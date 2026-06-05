@@ -1,5 +1,6 @@
 fastapi==0.115.5
 uvicorn[standard]==0.32.1
+python-multipart==0.0.20
 azure-search-documents==12.0.0
 azure-identity==1.19.0
 azure-keyvault-secrets==4.9.0

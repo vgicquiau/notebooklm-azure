@@ -4,6 +4,32 @@ Agent RAG (Retrieval-Augmented Generation) à interface conversationnelle, inspi
 
 ---
 
+## Quick Start
+
+**Prérequis :** [Azure CLI](https://aka.ms/installazurecliwindows) · [Python 3.11+](https://python.org/downloads) · [Docker](https://www.docker.com/products/docker-desktop) · une subscription Azure
+
+```powershell
+git clone https://github.com/vgicquiau/notebooklm-azure.git
+cd notebooklm-azure
+
+az login
+
+# Setup complet (~15 min — provisionne Azure + configure l'environnement local)
+.\deploy.ps1
+
+# Sur poste avec proxy d'entreprise (Zscaler, Forcepoint…)
+.\deploy.ps1 -SkipSSL
+
+# Lancer l'interface
+.\start-dev.ps1
+```
+
+L'interface s'ouvre automatiquement sur `http://127.0.0.1:8000`.
+
+> Pour tout supprimer : `.\teardown.ps1`
+
+---
+
 ## Fonctionnalités
 
 - **Ingestion multi-format** : PDF (OCR Azure Document Intelligence), Word, PowerPoint, Excel, Markdown, texte brut, code source
