@@ -1,10 +1,11 @@
 import hashlib
 import os
+import re
 from typing import Iterator
 
 import tiktoken
 from azure.ai.documentintelligence import DocumentIntelligenceClient
-from azure.ai.documentintelligence.models import AnalyzeDocumentRequest
+from azure.ai.documentintelligence.models import AnalyzeDocumentRequest, DocumentContentFormat
 from azure.identity import DefaultAzureCredential
 from tenacity import retry, stop_after_attempt, wait_exponential
 
@@ -13,6 +14,10 @@ from .base import Chunk
 CHUNK_SIZE = 1000
 CHUNK_OVERLAP = 200
 ENCODER = tiktoken.get_encoding("cl100k_base")
+
+# ADI insère ce commentaire entre chaque page en mode Markdown
+PAGE_BREAK_RE = re.compile(r'<!--\s*PageBreak\s*-->', re.IGNORECASE)
+HEADING_RE    = re.compile(r'^#{1,6}\s+(.+)$', re.MULTILINE)
 
 
 def _token_count(text: str) -> int:
@@ -25,8 +30,7 @@ def _split_by_tokens(text: str, chunk_size: int, overlap: int) -> list[str]:
     start = 0
     while start < len(tokens):
         end = min(start + chunk_size, len(tokens))
-        chunk_tokens = tokens[start:end]
-        chunks.append(ENCODER.decode(chunk_tokens))
+        chunks.append(ENCODER.decode(tokens[start:end]))
         if end == len(tokens):
             break
         start += chunk_size - overlap
@@ -45,6 +49,7 @@ class PDFChunker:
         poller = self.client.begin_analyze_document(
             "prebuilt-layout",
             AnalyzeDocumentRequest(bytes_source=file_bytes),
+            output_content_format=DocumentContentFormat.MARKDOWN,
         )
         return poller.result()
 
@@ -56,109 +61,49 @@ class PDFChunker:
         source_file = os.path.basename(file_path)
 
         result = self._analyze(file_bytes)
+        markdown = result.content or ""
 
-        paragraphs_with_meta: list[dict] = []
+        # Découpe par saut de page pour conserver les numéros de page
+        pages = PAGE_BREAK_RE.split(markdown)
+
+        chunk_index  = 0
+        current_title   = ""
         current_section = ""
-        current_title = ""
 
-        if result.paragraphs:
-            for para in result.paragraphs:
-                role = para.role or "paragraph"
-                content = para.content.strip()
-                if not content:
-                    continue
+        for page_num, page_md in enumerate(pages, start=1):
+            page_md = page_md.strip()
+            if not page_md:
+                continue
 
-                page_num = 1
-                if para.bounding_regions:
-                    page_num = para.bounding_regions[0].page_number
+            # Mise à jour titre/section depuis les headings de cette page
+            headings = HEADING_RE.findall(page_md)
+            if headings:
+                if not current_title:
+                    current_title = headings[0]
+                current_section = headings[-1]
 
-                if role in ("sectionHeading", "title"):
-                    current_section = content
-                    if role == "title":
-                        current_title = content
-
-                paragraphs_with_meta.append({
-                    "content": content,
-                    "page_number": page_num,
-                    "section": current_section,
-                    "title": current_title,
-                    "role": role,
-                })
-
-        chunk_buffer: list[str] = []
-        buffer_tokens = 0
-        chunk_index = 0
-        page_number = 1
-        section = ""
-        title = ""
-
-        def flush_buffer() -> Chunk | None:
-            nonlocal chunk_index
-            if not chunk_buffer:
-                return None
-            content = "\n\n".join(chunk_buffer)
-            c = Chunk(
-                content=content,
-                source_file=source_file,
-                page_number=page_number,
-                chunk_index=chunk_index,
-                doc_type="pdf",
-                section=section,
-                title=title,
-                file_hash=file_hash,
-            )
-            chunk_index += 1
-            return c
-
-        for para in paragraphs_with_meta:
-            para_tokens = _token_count(para["content"])
-
-            if para_tokens > CHUNK_SIZE:
-                c = flush_buffer()
-                if c:
-                    yield c
-                chunk_buffer = []
-                buffer_tokens = 0
-
-                sub_chunks = _split_by_tokens(para["content"], CHUNK_SIZE, CHUNK_OVERLAP)
-                for sub in sub_chunks:
+            if _token_count(page_md) <= CHUNK_SIZE:
+                yield Chunk(
+                    content=page_md,
+                    source_file=source_file,
+                    page_number=page_num,
+                    chunk_index=chunk_index,
+                    doc_type="pdf",
+                    section=current_section,
+                    title=current_title,
+                    file_hash=file_hash,
+                )
+                chunk_index += 1
+            else:
+                for sub in _split_by_tokens(page_md, CHUNK_SIZE, CHUNK_OVERLAP):
                     yield Chunk(
                         content=sub,
                         source_file=source_file,
-                        page_number=para["page_number"],
+                        page_number=page_num,
                         chunk_index=chunk_index,
                         doc_type="pdf",
-                        section=para["section"],
-                        title=para["title"],
+                        section=current_section,
+                        title=current_title,
                         file_hash=file_hash,
                     )
                     chunk_index += 1
-                continue
-
-            if buffer_tokens + para_tokens > CHUNK_SIZE and chunk_buffer:
-                c = flush_buffer()
-                if c:
-                    yield c
-
-                overlap_buffer: list[str] = []
-                overlap_tokens = 0
-                for p in reversed(chunk_buffer):
-                    t = _token_count(p)
-                    if overlap_tokens + t <= CHUNK_OVERLAP:
-                        overlap_buffer.insert(0, p)
-                        overlap_tokens += t
-                    else:
-                        break
-
-                chunk_buffer = overlap_buffer
-                buffer_tokens = overlap_tokens
-
-            chunk_buffer.append(para["content"])
-            buffer_tokens += para_tokens
-            page_number = para["page_number"]
-            section = para["section"]
-            title = para["title"]
-
-        c = flush_buffer()
-        if c:
-            yield c

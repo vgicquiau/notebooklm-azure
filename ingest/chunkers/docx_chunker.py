@@ -11,6 +11,11 @@ CHUNK_SIZE = 1000
 CHUNK_OVERLAP = 200
 ENCODER = tiktoken.get_encoding("cl100k_base")
 HEADING_STYLES = {"Heading 1", "Heading 2", "Heading 3", "Titre 1", "Titre 2", "Titre 3"}
+HEADING_PREFIX = {
+    "Heading 1": "#",  "Titre 1": "#",
+    "Heading 2": "##", "Titre 2": "##",
+    "Heading 3": "###","Titre 3": "###",
+}
 
 
 def _token_count(text: str) -> int:
@@ -30,11 +35,17 @@ def _split_by_tokens(text: str, chunk_size: int, overlap: int) -> list[str]:
     return chunks
 
 
-def _table_to_text(table) -> str:
+def _table_to_md(table) -> str:
+    """Convertit un tableau Word en table Markdown (première ligne = en-tête)."""
     rows = []
-    for row in table.rows:
-        cells = [cell.text.strip() for cell in row.cells]
-        rows.append(" | ".join(cells))
+    for i, row in enumerate(table.rows):
+        cells = [
+            cell.text.strip().replace("\n", " ").replace("|", "\\|")
+            for cell in row.cells
+        ]
+        rows.append("| " + " | ".join(cells) + " |")
+        if i == 0:
+            rows.append("| " + " | ".join("---" for _ in cells) + " |")
     return "\n".join(rows)
 
 
@@ -58,9 +69,11 @@ class DOCXChunker:
                         text = para.text.strip()
                         style = para.style.name if para.style else ""
                         if text:
+                            prefix = HEADING_PREFIX.get(style, "")
+                            content = f"{prefix} {text}" if prefix else text
                             elements.append({
                                 "type": "paragraph",
-                                "content": text,
+                                "content": content,
                                 "is_heading": style in HEADING_STYLES,
                                 "style": style,
                             })
@@ -68,7 +81,7 @@ class DOCXChunker:
             elif tag == 'tbl':
                 for table in doc.tables:
                     if table._element is child:
-                        text = _table_to_text(table)
+                        text = _table_to_md(table)
                         if text.strip():
                             elements.append({
                                 "type": "table",
