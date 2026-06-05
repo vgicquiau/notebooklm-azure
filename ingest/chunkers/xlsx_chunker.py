@@ -17,7 +17,12 @@ def _token_count(text: str) -> int:
 
 
 def _row_to_cells(cells) -> list[str]:
-    return [str(c.value).strip() if c.value is not None else "" for c in cells]
+    def _clean(v) -> str:
+        if v is None:
+            return ""
+        # Newlines (Alt+Entrée dans Excel) et pipes cassent les tables Markdown
+        return str(v).replace("\r\n", " ").replace("\n", " ").replace("\r", " ").replace("|", "\\|").strip()
+    return [_clean(c.value) for c in cells]
 
 
 def _is_empty_row(cells: list[str]) -> bool:
