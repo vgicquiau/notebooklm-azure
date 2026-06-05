@@ -1,7 +1,7 @@
 // src/Header.jsx — Barre supérieure
-// Props: onNewNote(), onClearSession()
+// Props: onClearSession()
 
-const Header = ({ onNewNote, onClearSession }) => {
+const Header = ({ onClearSession }) => {
   const btnBase = {
     display: 'flex', alignItems: 'center', gap: 7,
     height: 34, padding: '0 14px',
@@ -42,15 +42,6 @@ const Header = ({ onNewNote, onClearSession }) => {
           title="Effacer la conversation et démarrer une nouvelle session"
         >
           <Ic.Refresh s={15} /> Nouvelle conversation
-        </button>
-        <button
-          onClick={onNewNote}
-          style={btnBase}
-          onMouseEnter={e => { e.currentTarget.style.background = T.panel; e.currentTarget.style.borderColor = T.borderStrong; }}
-          onMouseLeave={e => { e.currentTarget.style.background = T.white; e.currentTarget.style.borderColor = T.border; }}
-          title="Créer une note manuelle dans le rail"
-        >
-          <Ic.Plus s={15} /> Nouvelle note
         </button>
       </div>
     </header>

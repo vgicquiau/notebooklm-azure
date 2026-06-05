@@ -152,12 +152,14 @@ const App = () => {
 
   // ── Enregistrer un message comme note ─────────────────────
   const handleSaveNote = React.useCallback((msg) => {
-    const plain  = markdownToPlain(msg.rawContent || msg.content);
+    const raw    = msg.rawContent || msg.content;
+    const plain  = markdownToPlain(raw);
     const source = msg.citations?.[0]?.source ?? undefined;
 
     setNotes(prev => [{
       id:        uid(),
-      text:      plain,
+      text:      raw,
+      preview:   plain,
       source,
       messageId: msg.id,
       timestamp: new Date().toISOString(),
@@ -183,7 +185,6 @@ const App = () => {
   // ── Supprimer une note ─────────────────────────────────────
   const handleDeleteNote = React.useCallback((id) => {
     setNotes(prev => prev.filter(n => n.id !== id));
-    setPinnedNotes(prev => prev.filter(n => n.id !== id));
   }, []);
 
   // ── Nouvelle note manuelle ─────────────────────────────────
@@ -263,7 +264,6 @@ const App = () => {
       overflow: 'hidden',
     }}>
       <Header
-        onNewNote={() => setBlankActive(true)}
         onClearSession={clearSession}
       />
 

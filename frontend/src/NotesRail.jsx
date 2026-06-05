@@ -80,14 +80,7 @@ const NoteModal = ({ note, onClose, onIngest }) => {
 
         {/* Corps */}
         <div style={{ flex: 1, overflowY: 'auto', padding: '22px 24px' }}>
-          <p style={{
-            margin: 0,
-            fontSize: 15, lineHeight: 1.75,
-            color: T.ink, fontFamily: T.font,
-            whiteSpace: 'pre-wrap', wordBreak: 'break-word',
-          }}>
-            {note.text}
-          </p>
+          <MarkdownContent text={note.text} />
         </div>
 
         {/* Footer */}
@@ -131,10 +124,11 @@ const NoteModal = ({ note, onClose, onIngest }) => {
 const NoteCard = ({ note, onDelete, onOpen, onIngest }) => {
   const [hovered, setHovered] = React.useState(false);
 
-  const isTruncated = note.text.length > NOTE_MAX_CHARS;
+  const plainText = note.preview ?? note.text;
+  const isTruncated = plainText.length > NOTE_MAX_CHARS;
   const preview = isTruncated
-    ? note.text.slice(0, NOTE_MAX_CHARS) + '…'
-    : note.text;
+    ? plainText.slice(0, NOTE_MAX_CHARS) + '…'
+    : plainText;
 
   const timeStr = new Date(note.timestamp).toLocaleTimeString('fr-FR', {
     hour: '2-digit', minute: '2-digit',
@@ -333,23 +327,50 @@ const NotesRail = ({ notes, onDelete, onAddBlank, blankActive, onBlankConfirm, o
 
       {/* En-tête */}
       <div style={{
-        display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-        padding: '16px 16px 12px',
+        padding: '14px 14px 12px',
         borderBottom: `1px solid ${T.border}`,
         flexShrink: 0,
       }}>
-        <span style={{ fontSize: 13, fontWeight: 700, color: T.ink, letterSpacing: 0.2 }}>
-          Notes
-        </span>
-        {notes.length > 0 && (
-          <span style={{
-            fontSize: 11, fontWeight: 600, color: T.muted,
-            background: T.white, border: `1px solid ${T.border}`,
-            borderRadius: T.radiusPill, padding: '2px 8px',
+        <div style={{
+          display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+          marginBottom: 10,
+        }}>
+          <div style={{
+            fontSize: 10, fontWeight: 700, letterSpacing: 1,
+            color: T.muted, textTransform: 'uppercase',
           }}>
-            {notes.length}
-          </span>
-        )}
+            Notes
+          </div>
+          {notes.length > 0 && (
+            <span style={{
+              fontSize: 11, fontWeight: 600, color: T.muted,
+              background: T.white, border: `1px solid ${T.border}`,
+              borderRadius: T.radiusPill, padding: '2px 8px',
+            }}>
+              {notes.length}
+            </span>
+          )}
+        </div>
+        <button
+          onClick={onAddBlank}
+          disabled={blankActive}
+          style={{
+            width: '100%', height: 31,
+            display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6,
+            border: `1px solid ${T.border}`,
+            borderRadius: T.radiusPill,
+            background: 'transparent', color: T.sub,
+            fontFamily: T.font, fontSize: 12, fontWeight: 500,
+            cursor: blankActive ? 'default' : 'pointer',
+            opacity: blankActive ? 0.4 : 1,
+            transition: 'background .12s, border-color .12s',
+          }}
+          onMouseEnter={e => { if (!blankActive) { e.currentTarget.style.background = T.panel; e.currentTarget.style.borderColor = T.borderStrong; } }}
+          onMouseLeave={e => { e.currentTarget.style.background = 'transparent'; e.currentTarget.style.borderColor = T.border; }}
+          title="Ajouter une note"
+        >
+          <Ic.Plus s={12} /> Ajouter une note
+        </button>
       </div>
 
       {/* Liste (scrollable) */}
@@ -387,28 +408,6 @@ const NotesRail = ({ notes, onDelete, onAddBlank, blankActive, onBlankConfirm, o
         </div>
       </div>
 
-      {/* Bouton ajouter */}
-      <div style={{ padding: '10px 14px 16px', flexShrink: 0 }}>
-        <button
-          onClick={onAddBlank}
-          disabled={blankActive}
-          style={{
-            display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 7,
-            width: '100%', height: 38,
-            borderRadius: T.radiusMd,
-            border: `1px dashed ${T.borderStrong}`,
-            background: 'transparent', color: T.sub,
-            fontFamily: T.font, fontSize: 12.5, fontWeight: 500,
-            cursor: blankActive ? 'default' : 'pointer',
-            opacity: blankActive ? 0.4 : 1,
-            transition: 'background .12s',
-          }}
-          onMouseEnter={e => { if (!blankActive) e.currentTarget.style.background = T.panel; }}
-          onMouseLeave={e => { e.currentTarget.style.background = 'transparent'; }}
-        >
-          <Ic.Plus s={14} /> Ajouter une note
-        </button>
-      </div>
     </aside>
   );
 };
