@@ -115,6 +115,67 @@ En production (Azure Container Apps) : `ManagedIdentityCredential` avec `AZURE_C
 
 ---
 
+## Git workflow
+
+### Stratégie de branches
+
+```
+master          — branche principale, toujours stable et déployable
+feature/<sujet> — toute nouvelle fonctionnalité ou correction
+```
+
+Pas de `develop`, pas de `release/*` — le projet est petit, on travaille en trunk-based allégé.
+
+### Cycle de travail type
+
+```powershell
+# 1. Créer une branche depuis master à jour
+git checkout master
+git pull
+git checkout -b feature/mon-sujet
+
+# 2. Travailler, commiter au fil de l'eau
+git add api/routers/mon_fichier.py frontend/src/MonComposant.jsx
+git commit -m "feat: décrire ce que ça fait et pourquoi"
+
+# 3. Pousser et ouvrir une PR
+git push -u origin feature/mon-sujet
+gh pr create --title "feat: mon sujet" --body "Description des changements"
+
+# 4. Après review/merge → nettoyer
+git checkout master
+git pull
+git branch -d feature/mon-sujet
+```
+
+### Règles de commit
+
+- Format : `type: message court` (pas de majuscule, pas de point final)
+- Types : `feat` · `fix` · `refactor` · `docs` · `chore`
+- Message = le **pourquoi**, pas le quoi (le diff montre le quoi)
+- Tous les commits assistés par Claude incluent la co-signature :
+  ```
+  Co-Authored-By: Claude Sonnet 4.6 <noreply@anthropic.com>
+  ```
+
+### Mettre à jour sa copie locale (amis/collaborateurs)
+
+```powershell
+# Récupérer les dernières modifications sans perdre ses changements locaux
+git pull --rebase
+
+# Si conflit : résoudre, puis
+git rebase --continue
+```
+
+### Ne jamais faire
+
+- `git push --force` sur `master`
+- Commiter `.env`, `api/.venv/`, `documents/`, `infra/main.parameters.json`
+- Merger sa propre PR sans review (sauf urgence documentée)
+
+---
+
 ## Ce qui n'est jamais commité
 
 - `.env`, `api/.env`, `ingest/.env` — contiennent les endpoints et clés Azure

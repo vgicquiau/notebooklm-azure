@@ -204,6 +204,39 @@ frontend/
 
 ---
 
+## Mise à jour
+
+Pour récupérer les dernières évolutions du projet :
+
+```powershell
+git pull --rebase
+# Redémarrer le serveur si des fichiers Python ont changé
+.\start-dev.ps1
+```
+
+Si les dépendances Python ont changé (nouveau `requirements.txt`) :
+
+```powershell
+api\.venv\Scripts\pip install -r api\requirements.txt -r ingest\requirements.txt
+```
+
+---
+
+## Contribuer
+
+```powershell
+git checkout -b feature/ma-fonctionnalite
+# ... développer ...
+git add <fichiers modifiés>
+git commit -m "feat: description courte"
+git push -u origin feature/ma-fonctionnalite
+gh pr create
+```
+
+Voir [CLAUDE.md](CLAUDE.md) pour les conventions de commit et les règles de branche.
+
+---
+
 ## Déploiement
 
 Le dossier `infra/` contient les templates Bicep pour déployer l'ensemble sur Azure Container Apps avec Managed Identity. Voir [GUIDE-DEPLOIEMENT.md](GUIDE-DEPLOIEMENT.md).
