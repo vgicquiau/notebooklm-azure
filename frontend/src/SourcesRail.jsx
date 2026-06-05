@@ -183,6 +183,7 @@ const SourcePreviewModal = ({ preview, loading, onClose }) => {
       <style>{`
         @keyframes nlSrcFadeIn  { from { opacity: 0; } to { opacity: 1; } }
         @keyframes nlSrcSlideUp { from { opacity: 0; transform: translateY(14px); } to { opacity: 1; transform: none; } }
+        @keyframes nlSrcSpin    { to { transform: rotate(360deg); } }
       `}</style>
     </div>,
     document.body
@@ -191,9 +192,39 @@ const SourcePreviewModal = ({ preview, loading, onClose }) => {
 
 
 // ── Carte d'une source indexée ────────────────────────────────────────
-const DocCard = ({ source, onView, onDelete }) => {
+const DocCard = ({ source, onView, onDelete, isDeleting }) => {
   const [hovered,    setHovered]    = React.useState(false);
   const [confirming, setConfirming] = React.useState(false);
+
+  // État "suppression en cours"
+  if (isDeleting) {
+    return (
+      <div style={{
+        padding: '9px 12px', margin: '0 6px 2px',
+        borderRadius: T.radiusMd,
+        border: '1px solid #fecaca', background: '#fef2f2',
+        cursor: 'default', opacity: 0.85,
+      }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+          <span style={{
+            display: 'inline-block', width: 11, height: 11, flexShrink: 0,
+            border: '2px solid #fca5a5', borderTopColor: '#dc2626',
+            borderRadius: '50%', animation: 'nlSrcSpin .7s linear infinite',
+          }} />
+          <span style={{
+            flex: 1, minWidth: 0,
+            fontSize: 12, fontWeight: 600, color: '#991b1b',
+            overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+          }}>
+            {source.source_file}
+          </span>
+        </div>
+        <div style={{ fontSize: 10.5, color: '#b91c1c', marginTop: 3, paddingLeft: 17 }}>
+          Suppression en cours…
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div
@@ -450,6 +481,7 @@ const SourcesRail = ({ sources, loadingSources, ingestJob, onUpload, onRefresh, 
             source={s}
             onView={handleView}
             onDelete={handleDelete}
+            isDeleting={deletingName === s.source_file}
           />
         ))}
 
