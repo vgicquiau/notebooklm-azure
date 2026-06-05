@@ -469,4 +469,4 @@ const ChatPanel = ({ messages, isLoading, input, onInputChange, onSend, onSaveNo
   );
 };
 
-Object.assign(window, { ChatPanel });
+Object.assign(window, { ChatPanel, MarkdownContent });

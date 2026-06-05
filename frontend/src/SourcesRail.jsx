@@ -173,12 +173,7 @@ const SourcePreviewModal = ({ preview, loading, onClose }) => {
                     ? `p.${chunk.page_number} — ${chunk.section}`
                     : `Page ${chunk.page_number}`}
                 </div>
-                <div style={{
-                  fontSize: 13.5, color: T.ink, lineHeight: 1.7,
-                  fontFamily: T.font, whiteSpace: 'pre-wrap',
-                }}>
-                  {chunk.content}
-                </div>
+                <MarkdownContent text={chunk.content} />
               </div>
             ))
           )}

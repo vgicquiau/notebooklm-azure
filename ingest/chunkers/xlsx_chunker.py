@@ -16,26 +16,24 @@ def _token_count(text: str) -> int:
     return len(ENCODER.encode(text))
 
 
-def _split_by_tokens(text: str, chunk_size: int, overlap: int) -> list[str]:
-    tokens = ENCODER.encode(text)
-    chunks = []
-    start = 0
-    while start < len(tokens):
-        end = min(start + chunk_size, len(tokens))
-        chunks.append(ENCODER.decode(tokens[start:end]))
-        if end == len(tokens):
-            break
-        start += chunk_size - overlap
-    return chunks
+def _row_to_cells(cells) -> list[str]:
+    return [str(c.value).strip() if c.value is not None else "" for c in cells]
 
 
-def _row_to_text(headers: list[str], cells) -> str:
-    parts = []
-    for h, c in zip(headers, cells):
-        val = str(c.value).strip() if c.value is not None else ""
-        if val:
-            parts.append(f"{h}: {val}" if h else val)
-    return " | ".join(parts)
+def _is_empty_row(cells: list[str]) -> bool:
+    return not any(v for v in cells)
+
+
+def _fmt_row(cells: list[str], width: int) -> str:
+    padded = [cells[i] if i < len(cells) else "" for i in range(width)]
+    return "| " + " | ".join(padded) + " |"
+
+
+def _build_md_table(headers: list[str], rows: list[list[str]]) -> str:
+    w = len(headers)
+    separator = "| " + " | ".join("---" for _ in headers) + " |"
+    lines = [_fmt_row(headers, w), separator] + [_fmt_row(r, w) for r in rows]
+    return "\n".join(lines)
 
 
 class XLSXChunker:
@@ -55,52 +53,24 @@ class XLSXChunker:
             if not rows:
                 continue
 
-            # Première ligne = en-têtes si au moins une cellule non vide non-générique
-            raw_headers = [str(c.value).strip() if c.value is not None else "" for c in rows[0]]
+            raw_headers = _row_to_cells(rows[0])
             has_headers = any(h and not h.startswith("None") for h in raw_headers)
             headers = raw_headers if has_headers else [f"Col{i+1}" for i in range(len(raw_headers))]
             data_rows = rows[1:] if has_headers else rows
 
-            buffer: list[str] = []
-            buffer_tokens = 0
+            # Coût fixe du header (répété à chaque chunk pour qu'il soit autonome)
+            header_overhead = _token_count(
+                _fmt_row(headers, len(headers)) + "\n" +
+                "| " + " | ".join("---" for _ in headers) + " |"
+            )
 
-            for row in data_rows:
-                line = _row_to_text(headers, row)
-                if not line.strip():
-                    continue
-                t = _token_count(line)
+            buffer: list[list[str]] = []
+            buffer_tokens = header_overhead
 
-                if buffer_tokens + t > CHUNK_SIZE and buffer:
-                    yield Chunk(
-                        content="\n".join(buffer),
-                        source_file=source_file,
-                        page_number=1,
-                        chunk_index=chunk_index,
-                        doc_type="xlsx",
-                        section=sheet_name,
-                        title=source_file,
-                        file_hash=file_hash,
-                    )
-                    chunk_index += 1
-
-                    overlap_buf: list[str] = []
-                    ot = 0
-                    for prev_line in reversed(buffer):
-                        lt = _token_count(prev_line)
-                        if ot + lt <= CHUNK_OVERLAP:
-                            overlap_buf.insert(0, prev_line)
-                            ot += lt
-                        else:
-                            break
-                    buffer = overlap_buf
-                    buffer_tokens = ot
-
-                buffer.append(line)
-                buffer_tokens += t
-
-            if buffer:
-                yield Chunk(
-                    content="\n".join(buffer),
+            def _emit(buf: list[list[str]]) -> Chunk:
+                nonlocal chunk_index
+                c = Chunk(
+                    content=_build_md_table(headers, buf),
                     source_file=source_file,
                     page_number=1,
                     chunk_index=chunk_index,
@@ -110,5 +80,35 @@ class XLSXChunker:
                     file_hash=file_hash,
                 )
                 chunk_index += 1
+                return c
+
+            for row in data_rows:
+                cells = _row_to_cells(row)
+                if _is_empty_row(cells):
+                    continue
+
+                row_tokens = _token_count(_fmt_row(cells, len(headers)))
+
+                if buffer_tokens + row_tokens > CHUNK_SIZE and buffer:
+                    yield _emit(buffer)
+
+                    # Overlap : dernières lignes jusqu'à CHUNK_OVERLAP tokens
+                    overlap: list[list[str]] = []
+                    ot = 0
+                    for prev in reversed(buffer):
+                        lt = _token_count(_fmt_row(prev, len(headers)))
+                        if ot + lt <= CHUNK_OVERLAP:
+                            overlap.insert(0, prev)
+                            ot += lt
+                        else:
+                            break
+                    buffer = overlap
+                    buffer_tokens = header_overhead + ot
+
+                buffer.append(cells)
+                buffer_tokens += row_tokens
+
+            if buffer:
+                yield _emit(buffer)
 
         wb.close()
