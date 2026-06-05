@@ -1,0 +1,35 @@
+# Secrets
+.env
+.env.local
+api/.env
+ingest/.env
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+api/.venv/
+*.egg-info/
+.pytest_cache/
+dist/
+
+# Node
+node_modules/
+
+# Binaires / installeurs
+*.msi
+*.whl
+
+# Logs
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Fichiers d'infrastructure sensibles
+infra/main.parameters.json
+
+# Documents métier — ne jamais versionner
+documents/

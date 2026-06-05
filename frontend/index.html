@@ -1,0 +1,105 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>NotebookLM Azure</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='8' fill='%232f6df0'/><text x='16' y='23' font-size='20' text-anchor='middle' fill='white' font-family='system-ui'>N</text></svg>">
+
+  <!-- Police Hanken Grotesk -->
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Hanken+Grotesk:wght@400;500;600;700&display=swap" rel="stylesheet" />
+
+  <style>
+    /* ── Reset ── */
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    html, body, #root { height: 100%; }
+    body { background: #f6f6f3; overflow: hidden; }
+
+    /* ── Scrollbars (chromium) ── */
+    ::-webkit-scrollbar { width: 5px; height: 5px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { background: #d4d2cc; border-radius: 99px; }
+
+    /* ── Markdown rendu (nlaz-md) ── */
+    .nlaz-md { font-family: "Hanken Grotesk", -apple-system, system-ui, sans-serif; color: #1c1b18; }
+    .nlaz-md p { margin: 6px 0; font-size: 15.5px; line-height: 1.7; }
+    .nlaz-md p:first-child { margin-top: 0; }
+    .nlaz-md p:last-child  { margin-bottom: 0; }
+    .nlaz-md h1, .nlaz-md h2 { font-size: 16px; font-weight: 700; margin: 16px 0 6px; border-bottom: 1px solid #eceae5; padding-bottom: 5px; }
+    .nlaz-md h3 { font-size: 15px; font-weight: 700; margin: 12px 0 4px; }
+    .nlaz-md h4, .nlaz-md h5 { font-size: 14px; font-weight: 600; margin: 8px 0 4px; color: #6b6963; }
+    .nlaz-md ul, .nlaz-md ol { padding-left: 22px; margin: 6px 0; }
+    .nlaz-md li { margin: 4px 0; font-size: 15px; line-height: 1.65; }
+    .nlaz-md li > ul, .nlaz-md li > ol { margin: 2px 0; }
+    .nlaz-md strong { font-weight: 700; }
+    .nlaz-md em { color: #6b6963; }
+    .nlaz-md blockquote { border-left: 3px solid #2f6df0; padding: 8px 14px; margin: 10px 0; color: #6b6963; background: #ecf2fe; border-radius: 0 8px 8px 0; font-style: italic; }
+    .nlaz-md hr { border: none; border-top: 1px solid #eceae5; margin: 14px 0; }
+    .nlaz-md a { color: #2f6df0; text-decoration: underline; }
+    .nlaz-md code { background: #f0efeb; color: #c2185b; padding: 2px 6px; border-radius: 4px; font-family: "Cascadia Code", Consolas, monospace; font-size: 13px; border: 1px solid #eceae5; }
+    .nlaz-md pre { background: #1e1e2e; padding: 16px; border-radius: 10px; overflow-x: auto; margin: 12px 0; }
+    .nlaz-md pre code { background: none; border: none; color: #cdd6f4; font-size: 13px; padding: 0; }
+    .nlaz-md table { border-collapse: collapse; width: 100%; margin: 12px 0; font-size: 14px; }
+    .nlaz-md th { background: #f6f6f3; color: #1c1b18; padding: 9px 14px; text-align: left; border: 1px solid #eceae5; font-weight: 700; font-size: 13px; }
+    .nlaz-md td { padding: 8px 14px; border: 1px solid #eceae5; color: #1c1b18; }
+    .nlaz-md tr:hover td { background: #f6f6f3; }
+
+    /* ── Badge citation inline [N] ── */
+    .nlaz-cite {
+      display: inline-flex; align-items: center; justify-content: center;
+      min-width: 16px; height: 16px; padding: 0 4px; margin: 0 1px;
+      border-radius: 5px; font-size: 10.5px; font-weight: 700; line-height: 1;
+      vertical-align: super; position: relative; top: -1px;
+      background: #2f6df0; color: #fff;
+      font-family: "Hanken Grotesk", system-ui, sans-serif;
+      cursor: pointer; transition: background .12s, transform .1s;
+      user-select: none;
+    }
+    .nlaz-cite:hover { background: #2257d4; transform: scale(1.15); }
+
+    /* ── Mermaid ── */
+    .nlaz-mermaid { margin: 12px 0; text-align: center; background: #f6f6f3; border: 1px solid #eceae5; border-radius: 10px; padding: 20px; overflow-x: auto; }
+    .nlaz-mermaid svg { max-width: 100%; height: auto; }
+    .nlaz-mermaid-error { border-left: 3px solid #dc2626 !important; }
+
+    /* ── Mode tags (injectés dynamiquement) ── */
+    .nlaz-mode-tag {
+      display: inline-flex; align-items: center; gap: 5px;
+      font-size: 11px; font-weight: 600; padding: 3px 9px;
+      border-radius: 99px; font-family: "Hanken Grotesk", system-ui, sans-serif;
+    }
+    .nlaz-mode-tag.rapide     { background: #ecfdf5; color: #059669; border: 1px solid #a7f3d0; }
+    .nlaz-mode-tag.standard   { background: #eff6ff; color: #2563eb; border: 1px solid #bfdbfe; }
+    .nlaz-mode-tag.approfondi { background: #f5f3ff; color: #7c3aed; border: 1px solid #ddd6fe; }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+
+  <!-- Dépendances vendorisées localement (suppression CDN externe — SEC-008) -->
+  <script src="vendor/react.production.min.js"></script>
+  <script src="vendor/react-dom.production.min.js"></script>
+  <script src="vendor/babel.min.js"></script>
+
+  <!-- Markdown + Mermaid + DOMPurify (sanitisation XSS — SEC-002) -->
+  <script src="vendor/dompurify.min.js"></script>
+  <script src="vendor/marked.min.js"></script>
+  <script src="vendor/mermaid.min.js"></script>
+
+  <script>
+    // securityLevel:'strict' — désactive HTML brut dans les labels Mermaid (SEC-002)
+    marked.setOptions({ breaks: true, gfm: true });
+    mermaid.initialize({ startOnLoad: false, theme: 'neutral', securityLevel: 'strict' });
+  </script>
+
+  <!-- Composants React (ordre impératif : tokens → Header → SourcesRail → NotesRail → ChatPanel → App) -->
+  <script type="text/babel" src="src/tokens.jsx"></script>
+  <script type="text/babel" src="src/Header.jsx"></script>
+  <script type="text/babel" src="src/SourcesRail.jsx"></script>
+  <script type="text/babel" src="src/NotesRail.jsx"></script>
+  <script type="text/babel" src="src/ChatPanel.jsx"></script>
+  <script type="text/babel" src="src/App.jsx"></script>
+</body>
+</html>
