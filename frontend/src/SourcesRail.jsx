@@ -202,6 +202,7 @@ const DocCard = ({ source, onView, onDelete }) => {
 
   return (
     <div
+      onClick={() => { if (!confirming) onView(source); }}
       onMouseEnter={() => setHovered(true)}
       onMouseLeave={() => { setHovered(false); setConfirming(false); }}
       style={{
@@ -210,11 +211,11 @@ const DocCard = ({ source, onView, onDelete }) => {
         borderRadius: T.radiusMd,
         border: `1px solid ${hovered ? T.borderStrong : 'transparent'}`,
         background: hovered ? T.panel : 'transparent',
-        cursor: 'default',
+        cursor: confirming ? 'default' : 'pointer',
         transition: 'background .1s, border-color .1s',
       }}
     >
-      {/* Ligne filename + actions hover */}
+      {/* Ligne filename + bouton suppression au survol */}
       <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
         <span style={{ color: T.azure, flexShrink: 0 }}><Ic.Doc s={13} /></span>
         <span style={{
@@ -226,38 +227,21 @@ const DocCard = ({ source, onView, onDelete }) => {
         </span>
 
         {hovered && !confirming && (
-          <div style={{ display: 'flex', gap: 2, flexShrink: 0 }}>
-            <button
-              onClick={() => onView(source)}
-              title="Prévisualiser le document"
-              style={{
-                width: 22, height: 22, border: 'none',
-                background: T.azureSoft, borderRadius: 6,
-                cursor: 'pointer', color: T.azureInk,
-                display: 'flex', alignItems: 'center', justifyContent: 'center',
-                transition: 'background .1s',
-              }}
-              onMouseEnter={e => e.currentTarget.style.background = T.azureBorder}
-              onMouseLeave={e => e.currentTarget.style.background = T.azureSoft}
-            >
-              <Ic.Search s={11} />
-            </button>
-            <button
-              onClick={() => setConfirming(true)}
-              title="Supprimer de l'index"
-              style={{
-                width: 22, height: 22, border: 'none',
-                background: '#fef2f2', borderRadius: 6,
-                cursor: 'pointer', color: T.danger,
-                display: 'flex', alignItems: 'center', justifyContent: 'center',
-                transition: 'background .1s',
-              }}
-              onMouseEnter={e => e.currentTarget.style.background = '#fecaca'}
-              onMouseLeave={e => e.currentTarget.style.background = '#fef2f2'}
-            >
-              <Ic.Close s={11} />
-            </button>
-          </div>
+          <button
+            onClick={e => { e.stopPropagation(); setConfirming(true); }}
+            title="Supprimer de l'index"
+            style={{
+              width: 22, height: 22, border: 'none', flexShrink: 0,
+              background: '#fef2f2', borderRadius: 6,
+              cursor: 'pointer', color: T.danger,
+              display: 'flex', alignItems: 'center', justifyContent: 'center',
+              transition: 'background .1s',
+            }}
+            onMouseEnter={e => e.currentTarget.style.background = '#fecaca'}
+            onMouseLeave={e => e.currentTarget.style.background = '#fef2f2'}
+          >
+            <Ic.Close s={11} />
+          </button>
         )}
       </div>
 
@@ -279,12 +263,15 @@ const DocCard = ({ source, onView, onDelete }) => {
 
       {/* Confirmation suppression inline */}
       {confirming && (
-        <div style={{
-          marginTop: 7, padding: '7px 10px',
-          background: '#fef2f2', borderRadius: T.radiusSm,
-          border: '1px solid #fecaca',
-          display: 'flex', alignItems: 'center', gap: 8,
-        }}>
+        <div
+          onClick={e => e.stopPropagation()}
+          style={{
+            marginTop: 7, padding: '7px 10px',
+            background: '#fef2f2', borderRadius: T.radiusSm,
+            border: '1px solid #fecaca',
+            display: 'flex', alignItems: 'center', gap: 8,
+          }}
+        >
           <span style={{ flex: 1, fontSize: 11, color: '#991b1b', fontWeight: 500 }}>
             Supprimer de l'index ?
           </span>
