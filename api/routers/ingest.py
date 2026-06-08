@@ -134,7 +134,7 @@ def _run_ingest(job_id: str, filepath: Path, filename: str, credential) -> None:
                 "id":             f"{chunk.file_hash}_{chunk.chunk_index}",
                 "content":        chunk.content,
                 "content_vector": embedding,
-                "source_file":    chunk.source_file,
+                "source_file":    filename,
                 "page_number":    chunk.page_number,
                 "chunk_index":    chunk.chunk_index,
                 "doc_type":       chunk.doc_type,

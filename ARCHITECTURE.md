@@ -26,6 +26,7 @@
     - [F4 — Injection de notes dans le contexte](#f4--injection-de-notes-dans-le-contexte)
     - [F5 — Viewer de citation](#f5--viewer-de-citation)
     - [F6 — Upload de document](#f6--upload-de-document)
+    - [F7 — Graphe ADG-M](#f7--graphe-adg-m)
 
 ---
 
@@ -1275,3 +1276,161 @@ sequenceDiagram
 | Toast bloqué sur "En file d'attente…" | ImportError silencieuse dans BackgroundTask | Vérifier logs uvicorn pour `ImportError` |
 | Toast d'erreur "Dépendance manquante" | tiktoken / azure-ai-documentintelligence / python-docx absent | `pip install tiktoken azure-ai-documentintelligence python-docx` |
 | Polling retourne 404 après redémarrage | `_jobs` dict réinitialisé | Comportement attendu — toast passe en erreur |
+
+---
+
+### F7 — Graphe ADG-M
+
+#### I. Vue d'ensemble
+
+La fonctionnalité **Graphe ADG-M** (Architecture de la Décomposition Grand-Mainframe) ajoute une deuxième vue à l'interface, accessible depuis le toggle "Graphe ADG-M" dans le header. Elle visualise l'architecture applicative du corpus documentaire sous forme de graphe interactif, propose un workflow de qualification 7R (stratégie de modernisation), et détecte automatiquement les clusters de composants via l'algorithme de Louvain.
+
+Cette fonctionnalité s'appuie sur un backend séparé — la Function App Azure `fn-adgm-graph` (Neo4j + Azure SQL) — qui est appelée en server-to-server via un proxy FastAPI pour contourner la CSP du frontend.
+
+#### II. Architecture de la fonctionnalité
+
+```mermaid
+flowchart TB
+    subgraph browser["🌐 Navigateur"]
+        GP[GraphPage.jsx\nCytoscape.js canvas]
+    end
+
+    subgraph api["⚙️ FastAPI notebooklm-azure"]
+        PROXY[graph.py\nProxy GET/PATCH/DELETE\n/api/graph/*]
+        EXTRACT[extract.py\nPipeline Chat→Graphe\n/api/extract/graph]
+    end
+
+    subgraph azure_fn["☁️ Azure Function App\nmodernagent-adgm-dev"]
+        FN[fn-adgm-graph\nfunction_app.py]
+    end
+
+    subgraph stores["🗄️ Données"]
+        NEO[Neo4j AuraDB\nTechnicalNode · FunctionalDomain\nMacroFunction · Program · DataEntity\nDEPENDS_ON · IMPLEMENTS · READS/WRITES]
+        SQL[Azure SQL\ndbo.NodeAnnotationHistory]
+        SRCH[Azure AI Search\nnotebooklm-chunks]
+        OAI[Azure OpenAI\nGPT-4o extraction]
+    end
+
+    GP -->|HTTP /api/graph/*| PROXY
+    PROXY -->|server-to-server| FN
+    GP -->|POST /api/extract/graph| EXTRACT
+    EXTRACT --> SRCH
+    EXTRACT --> OAI
+    EXTRACT -->|import-entities| FN
+    FN --> NEO
+    FN --> SQL
+```
+
+#### III. Composants et responsabilités
+
+**`frontend/src/GraphPage.jsx`**
+
+Composant React (Babel standalone, vendorisé Cytoscape.js) gérant la vue complète :
+- Canvas Cytoscape — rendu nœuds/arcs avec stylesheets `STATUS_COLORS`/`R7_COLORS`
+- Bi-plan switch (Fonctionnel / Technique / Overlay) — `GET /api/graph/nodes` filtré par `plane`
+- Detail panel — `GET /api/graph/nodes/{id}` + `GET /api/graph/nodes/{id}/impact`
+- Formulaire annotation 7R — `PATCH /api/graph/nodes/{id}/qualification`
+- Cluster highlight — `GET /api/graph/clusters`
+- Exports JSON (clusters) et CSV (nœuds non qualifiés)
+
+**`api/routers/graph.py`**
+
+Proxy async `httpx.AsyncClient` → `fn-adgm-graph`. Relaie uniquement les verbes de la surface utilisateur :
+- `GET /api/graph/{path}` — consultation (health, nodes, arcs, clusters, impact)
+- `PATCH /api/graph/{path}` — qualification 7R
+- `DELETE /api/graph/{path}` — reset et nettoyage couche fonctionnelle
+
+Ne relaie **pas** `POST /admin/analyze` ni `POST /admin/import-entities` (administration back-office appelée directement depuis `extract.py`).
+
+**`api/routers/extract.py`**
+
+Pipeline asynchrone Chat→Graphe (pattern `BackgroundTask` + polling, identique à `ingest.py`) :
+
+```
+POST /api/extract/graph → 202 { job_id }
+GET  /api/extract/graph/{job_id} → { status, docs_total, docs_processed, entities_imported }
+```
+
+Étapes internes :
+1. `DELETE fn-adgm-graph/admin/functional-entities` — vide la couche fonctionnelle (préserve `:TechnicalNode`)
+2. Lecture complète de l'index Azure AI Search (`search_text="*"`, top=5000)
+3. Pour chaque document : GPT-4o (prompt structuré → JSON `{system, functional_domains, macro_functions, programs, data_entities, crud_relationships}`)
+4. `POST fn-adgm-graph/admin/import-entities` avec le JSON extrait
+
+**`fn-adgm-graph/function_app.py`**
+
+Azure Function Python HTTP trigger gérant toutes les routes ADG-M. Dispatcher manuel sur `(method, parts)`. Backends :
+- Neo4j AuraDB via `neo4j` driver (GDS pour SPOF/Louvain)
+- Azure SQL via `pyodbc` (historique annotations)
+
+Principaux endpoints :
+
+| Méthode | Route | Description |
+|---|---|---|
+| GET | `/graph/health` | `{status, neo4j, sql, version}` |
+| GET | `/graph/nodes` | Liste nœuds avec filtres plan/7R/SPOF |
+| GET | `/graph/nodes/{id}` | Détail nœud + métriques |
+| GET | `/graph/nodes/{id}/impact` | Nœuds en aval dans `DEPENDS_ON` |
+| GET | `/graph/arcs` | Toutes les relations |
+| GET | `/graph/clusters` | Clusters Louvain agrégés (409 si non calculés) |
+| PATCH | `/graph/nodes/{id}/qualification` | Mise à jour `candidate7R` + historique SQL |
+| POST | `/graph/admin/analyze` | Calcul SPOF (betweenness) + Louvain |
+| POST | `/graph/admin/import-entities` | Import entités extraites par GPT-4o |
+| DELETE | `/graph/admin/functional-entities` | Supprime `:FunctionalDomain/:MacroFunction/:Program/:DataEntity` |
+| DELETE | `/graph/admin/reset` | `MATCH (n) DETACH DELETE n` — reset complet |
+
+#### IV. Modèle de données Neo4j
+
+```
+(:TechnicalNode {
+    nodeId, name, technology, description,
+    candidate7R,          -- UNQUALIFIED|RETAIN|RETIRE|REHOST|REPLATFORM|REPURCHASE|REFACTOR|REARCHITECT
+    isSPOF,               -- bool (betweenness > seuil)
+    isGhost,              -- bool (aucune relation entrante)
+    communityId,          -- int (Louvain, null avant POST /admin/analyze)
+    betweenness,          -- float
+    inDegree, outDegree
+})
+
+(:FunctionalDomain { id, code, name, description })
+(:MacroFunction    { id, code, name, mode, description })
+(:Program          { name, technology, mode, description })
+(:DataEntity       { name, type, description })
+
+(:TechnicalNode)  -[:DEPENDS_ON]->  (:TechnicalNode)
+(:MacroFunction)  -[:BELONGS_TO]->  (:FunctionalDomain)
+(:Program)        -[:IMPLEMENTS]->  (:MacroFunction)
+(:Program)        -[:READS|WRITES|UPDATES|DELETES]-> (:DataEntity)
+(:TechnicalNode)  -[:IMPLEMENTS]->  (:Program)
+```
+
+Historique des qualifications dans Azure SQL (`dbo.NodeAnnotationHistory`) :
+
+```sql
+nodeId VARCHAR(255), previous7R VARCHAR(50), new7R VARCHAR(50),
+justification NVARCHAR(1000), source VARCHAR(50), author VARCHAR(255),
+createdAt DATETIME2 DEFAULT GETUTCDATE()
+```
+
+#### V. Mécanique Reset vs Mise à jour
+
+| Action | Bouton UI | Endpoint | Effet Neo4j |
+|---|---|---|---|
+| **Reset complet** | "Reset graphe" (orange→rouge, 2 clics) | `DELETE /admin/reset` | `MATCH (n) DETACH DELETE n` — tout effacé |
+| **Mise à jour** | "Mettre à jour" (bleu clair→foncé) | `DELETE /admin/functional-entities` puis pipeline extract | Couche fonctionnelle reconstruite ; annotations 7R des `TechnicalNode` préservées |
+
+La mise à jour est **idempotente** : MERGE sur les nœuds techniques permet de relancer sans doublon, et les annotations 7R existantes sont conservées même si de nouveaux documents structurants viennent compléter les liens fonctionnels.
+
+#### VI. Vendoring Cytoscape.js
+
+`cytoscape.min.js` est copié dans `frontend/vendor/` et chargé par `<script>` dans `index.html` (après React/Babel, avant `GraphPage.jsx`). Il expose `window.cytoscape`. Même pattern que `mermaid.min.js` et `marked.min.js` — pas de npm, pas de build step.
+
+#### VII. Troubleshooting
+
+| Symptôme | Cause | Action |
+|---|---|---|
+| `DELETE /api/graph/admin/reset` → 404 | `"delete"` absent du tableau `methods` dans `function.json` | Vérifier `function.json` — Azure rejette avant d'atteindre Python |
+| `GET /api/graph/clusters` → 409 | `communityId` absent des nœuds (Louvain non lancé) | Lancer `POST /api/graph/admin/analyze` |
+| ExtractButton bloqué sur "running" | GPT-4o ou `import-entities` en erreur silencieuse | Vérifier les logs uvicorn (`WARNING import-entities returned ...`) |
+| `window.cytoscape` undefined | Script non chargé ou ordre incorrect dans `index.html` | Vérifier que `cytoscape.min.js` est avant `GraphPage.jsx` dans `index.html` |
+| `sql: "down"` dans `/graph/health` | `SQL_CONNECTION_STRING` au format ADO.NET au lieu de ODBC | Reformater en `Driver={ODBC Driver 18 for SQL Server};Server=tcp:...` |

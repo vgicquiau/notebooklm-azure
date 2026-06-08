@@ -94,12 +94,16 @@
     mermaid.initialize({ startOnLoad: false, theme: 'neutral', securityLevel: 'strict' });
   </script>
 
-  <!-- Composants React (ordre impératif : tokens → Header → SourcesRail → NotesRail → ChatPanel → App) -->
+  <!-- Cytoscape.js — rendu du graphe ADG-M (GraphPage), expose window.cytoscape -->
+  <script src="vendor/cytoscape.min.js"></script>
+
+  <!-- Composants React (ordre impératif : tokens → Header → SourcesRail → NotesRail → ChatPanel → GraphPage → App) -->
   <script type="text/babel" src="src/tokens.jsx"></script>
   <script type="text/babel" src="src/Header.jsx"></script>
   <script type="text/babel" src="src/SourcesRail.jsx"></script>
   <script type="text/babel" src="src/NotesRail.jsx"></script>
   <script type="text/babel" src="src/ChatPanel.jsx"></script>
+  <script type="text/babel" src="src/GraphPage.jsx"></script>
   <script type="text/babel" src="src/App.jsx"></script>
 </body>
 </html>

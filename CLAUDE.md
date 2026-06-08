@@ -20,6 +20,8 @@ notebooklm-azure/
 │   ├── main.py             # App, middlewares, lifespan, montage du frontend
 │   ├── routers/
 │   │   ├── chat.py         # POST /api/chat
+│   │   ├── extract.py      # POST /api/extract/graph (lance extraction Chat→Graph), GET /api/extract/graph/{job_id}
+│   │   ├── graph.py        # Proxy server-to-server vers fn-adgm-graph : GET/PATCH /api/graph/*
 │   │   ├── ingest.py       # POST /api/ingest, GET /api/ingest/{job_id}
 │   │   └── sources.py      # GET /api/sources, GET /api/sources/{name}/chunks, DELETE /api/sources/{name}
 │   └── services/
@@ -38,14 +40,15 @@ notebooklm-azure/
 │   └── indexer.py          # Azure AI Search — index "notebooklm-chunks"
 └── frontend/
     ├── index.html          # Point d'entrée — charge tous les scripts
-    ├── vendor/             # Dépendances JS vendorisées (React, Babel, Mermaid, etc.)
+    ├── vendor/             # Dépendances JS vendorisées (React, Babel, Mermaid, Cytoscape…)
     └── src/
         ├── tokens.jsx      # Design tokens (T.azure, T.ink, etc.) + icônes (Ic.*) + Logo
         ├── Header.jsx
         ├── SourcesRail.jsx # Rail gauche — sources indexées, upload, ingestion
         ├── NotesRail.jsx   # Rail droit — notes, indexation comme source
         ├── ChatPanel.jsx   # Zone de chat centrale
-        └── App.jsx         # État global, logique métier, montage React
+        ├── GraphPage.jsx   # Vue Graphe ADG-M (Cytoscape) — T16/T17/T18
+        └── App.jsx         # État global, vue active (chat|graph), montage React
 ```
 
 ---
@@ -68,7 +71,7 @@ Object.assign(window, { MonComposant });
 Dans `index.html`, les scripts sont chargés dans cet ordre (chaque fichier peut utiliser ce que le précédent a mis dans `window`) :
 
 ```
-tokens.jsx → Header.jsx → SourcesRail.jsx → NotesRail.jsx → ChatPanel.jsx → App.jsx
+tokens.jsx → Header.jsx → SourcesRail.jsx → NotesRail.jsx → ChatPanel.jsx → GraphPage.jsx → App.jsx
 ```
 
 Si tu ajoutes un nouveau composant, ajoute le `<script>` **avant** le fichier qui l'utilise, et **après** ses dépendances.
@@ -107,11 +110,63 @@ En production (Azure Container Apps) : `ManagedIdentityCredential` avec `AZURE_C
 
 ---
 
+## Graphe ADG-M
+
+### Vue d'ensemble
+
+La vue **Graphe ADG-M** (toggle "Graphe ADG-M" dans le header) est une fonctionnalité distincte de la vue Chat. Elle visualise l'architecture applicative extraite des documents Chat sous forme de graphe interactif (Cytoscape.js), qualifie les composants selon le modèle 7R et détecte les points de couplage fort (clusters Louvain).
+
+### Composants impliqués
+
+| Fichier | Rôle |
+|---|---|
+| `frontend/src/GraphPage.jsx` | Vue complète : canvas Cytoscape, bi-plan switch, detail panel, ExtractButton, ResetButton |
+| `api/routers/graph.py` | Proxy server-to-server GET/PATCH/DELETE `/api/graph/*` → `fn-adgm-graph` (Azure Function) |
+| `api/routers/extract.py` | Pipeline Chat→Graphe : lit l'index Search, appelle GPT-4o, pousse via `/admin/import-entities` |
+| `frontend/vendor/cytoscape.min.js` | Cytoscape.js vendorisé (même pattern que mermaid.min.js / marked.min.js) |
+
+### Variable d'environnement
+
+```
+ADGM_GRAPH_API_URL=https://modernagent-adgm-dev.azurewebsites.net/api/graph
+```
+Défaut dans les deux routers si absent. Ajouter dans `.env` pour cibler un autre déploiement.
+
+### Bouton "Mise à jour" (ExtractButton)
+
+1. `DELETE /api/graph/admin/functional-entities` — supprime les nœuds fonctionnels (`:FunctionalDomain`, `:MacroFunction`, `:Program`, `:DataEntity`) en préservant les `:TechnicalNode` et leurs annotations 7R
+2. Lit **tous** les chunks de l'index Azure AI Search, groupés par `source_file`
+3. Pour chaque document : appel GPT-4o (extraction JSON structurée) → `POST /api/graph/admin/import-entities`
+
+Résultat : dataset cohérent sur l'intégralité du corpus, pas seulement une mise à jour delta.
+
+### Bouton "Reset" (ResetButton)
+
+- Deux-clics de confirmation (pattern sécurité : premier clic → "⚠ Confirmer le reset", second → exécution)
+- `DELETE /api/graph/admin/reset` → `MATCH (n) DETACH DELETE n` dans Neo4j (toutes les données)
+- Auto-annulation après 4 s si le second clic n'arrive pas
+
+### Proxy `graph.py` — points à retenir
+
+- Sert à contourner la CSP `connect-src 'self'` du frontend (le navigateur ne peut pas appeler directement `fn-adgm-graph` sur une autre origine)
+- Relaie GET, PATCH et DELETE ; ne relaie **pas** `POST /admin/analyze` ni `POST /admin/import-entities` (administration back-office hors surface utilisateur)
+- `httpx.AsyncClient` (0.28.1) — dépendance directe dans `api/requirements.txt`
+
+### Azure Function `fn-adgm-graph` — quirk `function.json`
+
+```json
+{ "methods": ["get", "post", "patch", "delete"] }
+```
+
+Le tableau `methods` dans `function.json` contrôle l'acceptation HTTP **au niveau du trigger Azure**, avant que le code Python soit atteint. Si `"delete"` est absent, l'Azure Function retourne 404 sans jamais exécuter le handler — les logs Python restent vierges, ce qui rend le diagnostic non-évident.
+
+---
+
 ## Quirks connus
 
 - **MIME types sur Windows** : `main.py` enregistre explicitement `.js`, `.jsx`, `.css`, `.md` car le registre Windows ne les déclare pas toujours, ce qui ferait bloquer `X-Content-Type-Options: nosniff`.
 - **Avertissement Babel** : `You are using the in-browser Babel transformer` — non bloquant, inhérent à l'architecture sans build.
-- **Jobs d'ingestion** : stockés en mémoire dans `_jobs` (dict dans `ingest.py`). Perdus au redémarrage du serveur — par design (usage local).
+- **Jobs d'ingestion** : stockés en mémoire dans `_jobs` (dict dans `ingest.py` et `extract.py`). Perdus au redémarrage du serveur — par design (usage local).
 
 ---
 

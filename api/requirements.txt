@@ -9,3 +9,7 @@ python-dotenv==1.0.1
 pydantic==2.10.3
 tenacity==9.0.0
 azure-monitor-opentelemetry==1.8.8
+
+# Proxy serveur-à-serveur vers fn-adgm-graph (api/routers/graph.py) — déjà présent
+# en transitif via openai, épinglé ici en direct car utilisé explicitement.
+httpx==0.28.1
