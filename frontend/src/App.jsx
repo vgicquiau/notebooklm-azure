@@ -41,6 +41,7 @@ const markdownToPlain = (md) => {
 
 // ── Composant principal ────────────────────────────────────────
 const App = () => {
+  const [view,          setView]          = React.useState('chat');
   const [messages,      setMessages]      = React.useState([]);
   const [notes,         setNotes]         = React.useState(loadNotes);
   const [isLoading,     setIsLoading]     = React.useState(false);
@@ -265,38 +266,44 @@ const App = () => {
     }}>
       <Header
         onClearSession={clearSession}
+        view={view}
+        onViewChange={setView}
       />
 
-      <div style={{ flex: 1, display: 'flex', overflow: 'hidden' }}>
-        <SourcesRail
-          sources={sources}
-          loadingSources={loadingSources}
-          ingestJob={ingestJob}
-          onUpload={handleFileUpload}
-          onRefresh={fetchSources}
-          onDismissIngest={() => setIngestJob(null)}
-          apiFetch={_apiFetch}
-        />
-        <ChatPanel
-          messages={messages}
-          isLoading={isLoading}
-          input={input}
-          onInputChange={setInput}
-          onSend={sendMessage}
-          onSaveNote={handleSaveNote}
-          mode={mode}
-          onModeChange={setMode}
-        />
-        <NotesRail
-          notes={notes}
-          onDelete={handleDeleteNote}
-          onAddBlank={() => setBlankActive(true)}
-          blankActive={blankActive}
-          onBlankConfirm={handleBlankConfirm}
-          onBlankCancel={() => setBlankActive(false)}
-          onIngestNote={handleNoteIngest}
-        />
-      </div>
+      {view === 'graph' ? (
+        <GraphPage apiFetch={_apiFetch} />
+      ) : (
+        <div style={{ flex: 1, display: 'flex', overflow: 'hidden' }}>
+          <SourcesRail
+            sources={sources}
+            loadingSources={loadingSources}
+            ingestJob={ingestJob}
+            onUpload={handleFileUpload}
+            onRefresh={fetchSources}
+            onDismissIngest={() => setIngestJob(null)}
+            apiFetch={_apiFetch}
+          />
+          <ChatPanel
+            messages={messages}
+            isLoading={isLoading}
+            input={input}
+            onInputChange={setInput}
+            onSend={sendMessage}
+            onSaveNote={handleSaveNote}
+            mode={mode}
+            onModeChange={setMode}
+          />
+          <NotesRail
+            notes={notes}
+            onDelete={handleDeleteNote}
+            onAddBlank={() => setBlankActive(true)}
+            blankActive={blankActive}
+            onBlankConfirm={handleBlankConfirm}
+            onBlankCancel={() => setBlankActive(false)}
+            onIngestNote={handleNoteIngest}
+          />
+        </div>
+      )}
     </div>
   );
 };

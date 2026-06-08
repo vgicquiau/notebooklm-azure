@@ -39,33 +39,37 @@ L'interface s'ouvre automatiquement sur `http://127.0.0.1:8000`.
 - **Rail sources** : liste des documents indexés, prévisualisation des chunks, suppression de l'index
 - **Rail notes** : enregistrement des réponses de l'agent, indexation d'une note comme source
 - **Interface redimensionnable** : les deux rails sont redimensionnables par glisser-déposer
+- **Graphe ADG-M** : visualisation interactive de l'architecture applicative extraite du corpus — bi-plan switch (Fonctionnel/Technique), qualification 7R des composants, détection SPOF et clusters Louvain, exports JSON/CSV
 
 ---
 
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────────────┐
-│  Navigateur                                              │
-│  React (Babel standalone) — servi statiquement par API  │
-│  SourcesRail │ ChatPanel │ NotesRail                    │
-└──────────────────────┬──────────────────────────────────┘
-                       │ HTTP
-┌──────────────────────▼──────────────────────────────────┐
-│  FastAPI (Python 3.11)                                   │
-│  POST /api/chat      GET/DELETE /api/sources             │
-│  POST /api/ingest    GET /api/ingest/{job_id}            │
-└──────┬───────────────────────┬──────────────────────────┘
-       │                       │
-┌──────▼──────┐    ┌──────────▼──────────┐
-│ Azure OpenAI│    │ Azure AI Search      │
-│ GPT-4o      │    │ Index vectoriel      │
-│ Embeddings  │    │ notebooklm-chunks    │
-└─────────────┘    └─────────────────────┘
-                            ▲
-              ┌─────────────┘
-┌─────────────┴───────────────────────────┐
-│  Azure Document Intelligence             │
+┌──────────────────────────────────────────────────────────────────┐
+│  Navigateur                                                       │
+│  React (Babel standalone) — servi statiquement par API            │
+│  Vue Chat : SourcesRail │ ChatPanel │ NotesRail                   │
+│  Vue Graphe : GraphPage (Cytoscape.js)                            │
+└─────────────────────────┬────────────────────────────────────────┘
+                          │ HTTP
+┌─────────────────────────▼────────────────────────────────────────┐
+│  FastAPI (Python 3.11)                                            │
+│  POST /api/chat           GET/DELETE /api/sources                 │
+│  POST /api/ingest         GET /api/ingest/{job_id}                │
+│  GET/PATCH/DELETE /api/graph/*  (proxy → fn-adgm-graph)          │
+│  POST /api/extract/graph  GET /api/extract/graph/{job_id}         │
+└──────┬───────────────────────┬──────────────────┬────────────────┘
+       │                       │                  │
+┌──────▼──────┐    ┌──────────▼──────────┐  ┌───▼────────────────────────┐
+│ Azure OpenAI│    │ Azure AI Search      │  │ Azure Function App          │
+│ GPT-4o      │    │ Index vectoriel      │  │ fn-adgm-graph               │
+│ Embeddings  │    │ notebooklm-chunks    │  │  ├─ Neo4j AuraDB             │
+└─────────────┘    └─────────────────────┘  │  │  TechnicalNode · 7R       │
+                            ▲               │  │  SPOF · Louvain clusters   │
+              ┌─────────────┘               │  └─ Azure SQL                 │
+┌─────────────┴───────────────────────────┐ │     NodeAnnotationHistory     │
+│  Azure Document Intelligence             │ └────────────────────────────────┘
 │  OCR et extraction layout PDF            │
 └─────────────────────────────────────────┘
 ```
@@ -123,6 +127,7 @@ Variables requises :
 | `AZURE_SEARCH_ENDPOINT` | Endpoint Azure AI Search |
 | `AZURE_DOCINT_ENDPOINT` | Endpoint Azure Document Intelligence |
 | `API_KEY` | Clé d'authentification (optionnelle en local) |
+| `ADGM_GRAPH_API_URL` | URL de base de `fn-adgm-graph` (défaut : `https://modernagent-adgm-dev.azurewebsites.net/api/graph`) |
 
 ### 5. Authentification Azure
 
@@ -185,6 +190,8 @@ api/
 ├── main.py            # FastAPI app, middlewares sécurité, lifespan
 ├── routers/
 │   ├── chat.py        # Endpoint de conversation
+│   ├── extract.py     # Pipeline Chat→Graphe (extraction GPT-4o → fn-adgm-graph)
+│   ├── graph.py       # Proxy GET/PATCH/DELETE /api/graph/* → fn-adgm-graph
 │   ├── ingest.py      # Ingestion asynchrone avec polling
 │   └── sources.py     # CRUD sources dans l'index
 └── services/
@@ -198,8 +205,10 @@ ingest/
 
 frontend/
 ├── index.html         # Chargement ordonné des composants
-├── vendor/            # Dépendances JS (React, Babel, Mermaid…)
+├── vendor/            # Dépendances JS (React, Babel, Mermaid, Cytoscape…)
 └── src/               # Composants React (JSX transpilé in-browser)
+    ├── GraphPage.jsx  # Vue Graphe ADG-M (Cytoscape.js)
+    └── ...            # Chat : Header, SourcesRail, ChatPanel, NotesRail, App
 ```
 
 ---

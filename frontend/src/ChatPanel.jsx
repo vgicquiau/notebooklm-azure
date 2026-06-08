@@ -2,6 +2,18 @@
 // Props: messages[], isLoading, input, onInputChange(), onSend(), onSaveNote(),
 //        mode, onModeChange()
 
+// ── Rendu Markdown ─────────────────────────────────────────────
+const MarkdownContent = ({ text }) => {
+  if (!text) return null;
+  const html = DOMPurify.sanitize(marked.parse(text));
+  return (
+    <div
+      className="nlaz-md"
+      dangerouslySetInnerHTML={{ __html: html }}
+    />
+  );
+};
+
 // ── Config modes ───────────────────────────────────────────────
 const MODE_CONFIG = {
   rapide:     { label: 'Rapide',     icon: Ic.Lightning, color: '#059669', bg: '#ecfdf5', border: '#a7f3d0' },
