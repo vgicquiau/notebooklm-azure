@@ -37,3 +37,6 @@ infra/main.parameters.json
 
 # Documents métier — ne jamais versionner
 documents/
+
+# Corpus de référence — données sensibles
+doc-archimind/
