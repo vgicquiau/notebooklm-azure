@@ -3,6 +3,7 @@
 .env.local
 api/.env
 ingest/.env
+azure-functions/local.settings.json
 
 # Python
 __pycache__/
@@ -13,6 +14,9 @@ api/.venv/
 *.egg-info/
 .pytest_cache/
 dist/
+
+# Azure Functions
+.python_packages/
 
 # Node
 node_modules/
