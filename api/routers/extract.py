@@ -31,6 +31,7 @@ class ExtractStatus(BaseModel):
     docs_total: int = 0
     docs_processed: int = 0
     entities_imported: dict = {}
+    import_errors: int = 0
 
 
 _EXTRACT_SYSTEM = """You are a software architecture knowledge extractor.
@@ -136,6 +137,7 @@ def _run_extract_job(job_id: str, credential) -> None:
             "data_entities": 0,
             "relationships": 0,
         }
+        import_errors = 0
 
         # 3. Process each document: extract entities → push to fn-adgm-graph
         for doc_idx, (source_file, chunks) in enumerate(source_files.items()):
@@ -170,6 +172,7 @@ def _run_extract_job(job_id: str, credential) -> None:
                 extracted = json.loads(resp.choices[0].message.content)
             except Exception as exc:
                 logger.warning("GPT-4o extraction failed for %s: %s", source_file, exc)
+                import_errors += 1
                 continue
 
             try:
@@ -184,17 +187,25 @@ def _run_extract_job(job_id: str, credential) -> None:
                             total_imported[k] = total_imported.get(k, 0) + v
                     else:
                         logger.warning(
-                            "import-entities returned %s for %s", r.status_code, source_file
+                            "import-entities returned %s for %s: %s",
+                            r.status_code, source_file, r.text[:200],
                         )
+                        import_errors += 1
             except Exception as exc:
                 logger.warning("import-entities call failed for %s: %s", source_file, exc)
+                import_errors += 1
                 continue
 
+        total_entities = sum(total_imported.values())
+        done_msg = f"Extraction terminée — {docs_total} documents, {total_entities} entités importées."
+        if import_errors:
+            done_msg += f" ({import_errors} erreur(s) — voir logs serveur)"
         _jobs[job_id].update(
             status="done",
             docs_processed=docs_total,
-            message=f"Extraction terminée — {docs_total} documents traités.",
+            message=done_msg,
             entities_imported=total_imported,
+            import_errors=import_errors,
         )
 
     except Exception as exc:
@@ -213,6 +224,7 @@ async def start_extract(background_tasks: BackgroundTasks, request: Request):
         "docs_total": 0,
         "docs_processed": 0,
         "entities_imported": {},
+        "import_errors": 0,
     }
     background_tasks.add_task(_run_extract_job, job_id, request.app.state.credential)
     return ExtractStatus(job_id=job_id, **_jobs[job_id])

@@ -1,31 +1,67 @@
-// src/GraphPage.jsx — Page de visualisation du graphe ADG-M (vue bi-plan, F1.2)
+// src/GraphPage.jsx — Page de visualisation du graphe ADG-M (4 vues)
 // Props: apiFetch(url, options) — wrapper _apiFetch (injecte X-API-Key), fourni par App
 //
 // Charge nœuds + arcs via le proxy /api/graph/* (api/routers/graph.py → fn-adgm-graph),
-// puis les rend avec Cytoscape.js. Le switch de plan (Fonctionnel / Technique / Superposé)
-// filtre les nœuds par type et sélectionne le layout adapté (SDD §6).
+// puis les rend avec Cytoscape.js. Le switch de plan filtre les nœuds par subtype.
 
-// ── Config Cytoscape — portée verbatim depuis SDD_ADG-M_v1.md §6 (cytoscape.config.ts) ──
-// Couleurs des plans (cf. specs F1.2)
+// ── Couleurs par sous-type de nœud ────────────────────────────────────────────
 const STATUS_COLORS = {
-  EXISTING:      '#9e9e9e',   // gris
-  IN_TRANSITION: '#fb8c00',   // orange
-  TARGET:        '#43a047',   // vert
+  EXISTING:      '#9e9e9e',
+  IN_TRANSITION: '#fb8c00',
+  TARGET:        '#43a047',
 };
 const R7_COLORS = {
   RETIRE: '#e53935', RETAIN: '#9e9e9e', REHOST: '#4fc3f7',
   REPLATFORM: '#1e88e5', REPURCHASE: '#8e24aa', REFACTOR: '#fb8c00',
   REBUILD: '#43a047', UNQUALIFIED: '#ffffff',
 };
-// Layout hiérarchique pour le plan technique ; concentrique (cose) pour le fonctionnel
-const TECH_LAYOUT = { name: 'breadthfirst', directed: true, spacingFactor: 1.3, animate: true };
-const FUNCTIONAL_LAYOUT = { name: 'cose', idealEdgeLength: 100, nodeRepulsion: 8000, animate: true };
-// Le plan « Superposé » n'a pas de layout prescrit par la SDD : cose est repris ici car
-// il gère naturellement deux sous-graphes disjoints (fonctionnel et technique ne
-// partagent aucun arc exposé par /graph/arcs) en les écartant l'un de l'autre.
-const OVERLAY_LAYOUT = { name: 'cose', idealEdgeLength: 110, nodeRepulsion: 8500, animate: true };
+// Couleurs fixes pour les sous-types non-7R
+const SUBTYPE_COLORS = {
+  domain:       '#1565c0',   // bleu foncé — domaine fonctionnel
+  macrofunction:'#64b5f6',   // bleu clair — macro-fonction
+  dataentity:   '#7b1fa2',   // violet — entité de données
+  component:    '#ffffff',   // blanc — TechnicalNode générique (encode 7R)
+  system:       '#2e7d32',   // vert foncé — système
+  program:      '#ffffff',   // blanc — programme (encode 7R)
+};
+// Formes Cytoscape par sous-type — différenciation visuelle sans couleur
+const SUBTYPE_SHAPES = {
+  domain:       'ellipse',
+  macrofunction:'roundrectangle',
+  dataentity:   'hexagon',
+  program:      'diamond',
+  component:    'ellipse',
+  system:       'triangle',
+};
+const SUBTYPE_LABELS = {
+  domain:       'Domaine fonctionnel',
+  macrofunction:'Macro-fonction',
+  dataentity:   'Entité de données',
+  program:      'Programme',
+  component:    'Composant technique',
+  system:       'Système',
+};
 
-const PLAN_LAYOUTS = { functional: FUNCTIONAL_LAYOUT, technical: TECH_LAYOUT, overlay: OVERLAY_LAYOUT };
+// ── Layouts par vue ────────────────────────────────────────────────────────────
+const TECH_LAYOUT       = { name: 'breadthfirst', directed: true, spacingFactor: 2.8, padding: 80, animate: true };
+const FUNCTIONAL_LAYOUT = { name: 'cose', idealEdgeLength: 220, nodeRepulsion: 80000, gravity: 0.2, padding: 80, animate: true };
+const DATA_LAYOUT       = { name: 'cose', idealEdgeLength: 180, nodeRepulsion: 60000, gravity: 0.2, padding: 80, animate: true };
+const GLOBAL_LAYOUT     = { name: 'cose', idealEdgeLength: 250, nodeRepulsion: 90000, gravity: 0.15, padding: 80, animate: true };
+
+const PLAN_LAYOUTS = {
+  functional: FUNCTIONAL_LAYOUT,
+  technical:  TECH_LAYOUT,
+  data:       DATA_LAYOUT,
+  global:     GLOBAL_LAYOUT,
+};
+
+// ── Filtrage par vue : quels subtypes sont visibles ───────────────────────────
+const PLAN_SUBTYPES = {
+  functional: new Set(['domain', 'macrofunction']),
+  technical:  new Set(['program', 'component', 'system']),
+  data:       new Set(['dataentity']),
+  global:     null,  // null = tout afficher
+};
 
 const R7_LABELS = {
   RETIRE: 'Retire', RETAIN: 'Retain', REHOST: 'Rehost', REPLATFORM: 'Replatform',
@@ -43,6 +79,7 @@ const STATUS_LABELS = { EXISTING: 'Existant', IN_TRANSITION: 'En transition', TA
 const GRAPH_STYLE = [
   { selector: 'node', style: {
       'background-color': 'data(color)',
+      'shape': 'data(shape)',
       'border-color': '#e1ded7', 'border-width': 1,
       'color': '#1c1b18', 'text-outline-width': 2, 'text-outline-color': '#ffffff',
   } },
@@ -64,13 +101,24 @@ const GRAPH_STYLE = [
       'overlay-color': 'data(clusterColor)', 'overlay-opacity': 0.4, 'overlay-padding': 7,
   } },
   { selector: ':selected', style: { 'overlay-opacity': 0.2 } },
+  // Nœuds hors-plan introduits par le mode exploration — dashed + opacité réduite
+  { selector: 'node[?isOutOfPlan]', style: { 'border-style': 'dashed', 'border-color': '#94a3b8', 'opacity': 0.75 } },
+  // Labels de relation — visibles en mode exploration uniquement sur hover
+  { selector: 'edge[relLabel][?showLabel]', style: {
+      'label': 'data(relLabel)',
+      'font-size': 10, 'text-rotation': 'none',
+      'text-background-color': '#1e293b', 'text-background-opacity': 0.9, 'text-background-padding': '3px',
+      'text-border-width': 0, 'color': '#f1f5f9',
+      'text-halign': 'center', 'text-valign': 'center',
+  } },
 ];
 
-// ── Switch de plan (Fonctionnel / Technique / Superposé — F1.2) ───
+// ── Switch de plan (4 vues) ────────────────────────────────────────────────────
 const PLAN_OPTIONS = [
-  { key: 'functional', label: 'Fonctionnel' },
-  { key: 'technical',  label: 'Technique' },
-  { key: 'overlay',    label: 'Superposé' },
+  { key: 'functional', label: 'Fonctionnel', title: 'Domaines fonctionnels et macro-fonctions' },
+  { key: 'technical',  label: 'Technique',   title: 'Programmes, systèmes et composants techniques' },
+  { key: 'data',       label: 'Données',     title: 'Entités de données et leurs dépendances' },
+  { key: 'global',     label: 'Global',      title: 'Vue complète — tous les nœuds et arcs' },
 ];
 
 const PlanSwitch = ({ plan, onChange }) => (
@@ -78,14 +126,15 @@ const PlanSwitch = ({ plan, onChange }) => (
     display: 'flex', gap: 2, padding: 3,
     background: T.panel, borderRadius: T.radiusPill, border: `1px solid ${T.border}`,
   }}>
-    {PLAN_OPTIONS.map(({ key, label }) => {
+    {PLAN_OPTIONS.map(({ key, label, title }) => {
       const active = plan === key;
       return (
         <button
           key={key}
           onClick={() => onChange(key)}
+          title={title}
           style={{
-            height: 30, padding: '0 15px',
+            height: 30, padding: '0 14px',
             borderRadius: T.radiusPill, border: 'none',
             background: active ? T.white : 'transparent',
             color: active ? T.ink : T.muted,
@@ -114,21 +163,39 @@ const dot = (bg, extra = {}) => (
 );
 
 const Legend = ({ plan }) => {
-  const showStatus = plan !== 'technical';
-  const showR7 = plan !== 'functional';
   const sep = <span style={{ width: 1, height: 14, background: T.border, flexShrink: 0 }} />;
   return (
     <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 12, fontFamily: T.font }}>
-      {showStatus && Object.keys(STATUS_COLORS).map(k => (
-        <Swatch key={k} shape={dot(STATUS_COLORS[k])}>{STATUS_LABELS[k]}</Swatch>
-      ))}
-      {showStatus && showR7 && sep}
-      {showR7 && Object.keys(R7_COLORS).map(k => (
-        <Swatch key={k} shape={dot(R7_COLORS[k])}>{R7_LABELS[k]}</Swatch>
-      ))}
-      {sep}
-      <Swatch shape={dot('transparent', { border: '2.5px solid #e53935' })}>⚠ SPOF</Swatch>
-      <Swatch shape={dot(T.panel, { borderStyle: 'dashed', borderColor: T.muted, opacity: .7 })}>Fantôme</Swatch>
+      {plan === 'functional' && (
+        <>
+          <Swatch shape={dot(SUBTYPE_COLORS.domain)}       >Domaine fonctionnel</Swatch>
+          <Swatch shape={dot(SUBTYPE_COLORS.macrofunction)}>Macro-fonction</Swatch>
+        </>
+      )}
+      {plan === 'technical' && (
+        <>
+          {Object.keys(R7_COLORS).map(k => (
+            <Swatch key={k} shape={dot(R7_COLORS[k])}>{R7_LABELS[k]}</Swatch>
+          ))}
+          {sep}
+          <Swatch shape={dot('transparent', { border: '2.5px solid #e53935' })}>⚠ SPOF</Swatch>
+          <Swatch shape={dot(T.panel, { borderStyle: 'dashed', borderColor: T.muted, opacity: .7 })}>Fantôme</Swatch>
+        </>
+      )}
+      {plan === 'data' && (
+        <Swatch shape={dot(SUBTYPE_COLORS.dataentity)}>Entité de données</Swatch>
+      )}
+      {plan === 'global' && (
+        <>
+          <Swatch shape={dot(SUBTYPE_COLORS.domain)}       >Domaine</Swatch>
+          <Swatch shape={dot(SUBTYPE_COLORS.macrofunction)}>Macro-fonction</Swatch>
+          <Swatch shape={dot(SUBTYPE_COLORS.dataentity)}   >Donnée</Swatch>
+          {sep}
+          {Object.keys(R7_COLORS).filter(k => k !== 'UNQUALIFIED').map(k => (
+            <Swatch key={k} shape={dot(R7_COLORS[k])}>{R7_LABELS[k]}</Swatch>
+          ))}
+        </>
+      )}
     </div>
   );
 };
@@ -344,18 +411,57 @@ const ResetButton = ({ onReset, disabled }) => {
   );
 };
 
+// ── LED d'état du pipeline Neo4j ──────────────────────────────
+// Vert : données chargées · Jaune : en cours / réessai · Rouge : erreur
+const GraphLed = ({ graphStatus, error, extractJob }) => {
+  const isExtracting = extractJob?.status === 'pending' || extractJob?.status === 'running';
+
+  let color, label, pulse;
+  if (graphStatus === 'error') {
+    color = '#ef4444'; pulse = false;
+    label = error ? error.replace(/^(Nœuds|Arcs)\s*:\s*/i, '').slice(0, 60) : 'Service ADG-M inaccessible';
+  } else if (graphStatus === 'loading' || graphStatus === 'retrying' || isExtracting) {
+    color = '#f59e0b'; pulse = true;
+    label = graphStatus === 'retrying' ? 'Reconnexion au service ADG-M…'
+          : isExtracting               ? 'Extraction en cours…'
+          :                              'Connexion à Neo4j…';
+  } else if (graphStatus === 'empty') {
+    color = '#9ca3af'; pulse = false;
+    label = 'Base Neo4j vide — lancez une extraction';
+  } else {
+    color = '#22c55e'; pulse = false;
+    label = 'Neo4j disponible';
+  }
+
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', gap: 5, fontFamily: T.font }} title={label}>
+      <span style={{
+        width: 9, height: 9, borderRadius: '50%', flexShrink: 0,
+        background: color,
+        boxShadow: `0 0 0 2.5px ${color}30`,
+        animation: pulse ? 'nlGraphPulse 1.3s ease-in-out infinite' : 'none',
+      }} />
+      {graphStatus === 'error' && (
+        <span style={{ fontSize: 12, color: '#ef4444', whiteSpace: 'nowrap', maxWidth: 220, overflow: 'hidden', textOverflow: 'ellipsis' }}>
+          {label}
+        </span>
+      )}
+    </div>
+  );
+};
+
 // ── Extraction Chat → Graph (Track C) ─────────────────────────
 // Déclenche POST /api/extract/graph (api/routers/extract.py) et poll le statut.
 // Le composant reçoit le job courant et un callback onStart ; la logique de
 // polling et de refresh du graphe vit dans GraphPage (état et effets).
-const ExtractButton = ({ job, onStart }) => {
+const ExtractButton = ({ job, onStart, disabled }) => {
   const isRunning = job && (job.status === 'pending' || job.status === 'running');
   const isDone    = job?.status === 'done';
   const isError   = job?.status === 'error';
 
   if (isRunning) {
-    const progress = job.docsTotal > 0
-      ? Math.round((job.docsProcessed / job.docsTotal) * 100)
+    const progress = job.docs_total > 0
+      ? Math.round((job.docs_processed / job.docs_total) * 100)
       : null;
     return (
       <div style={{
@@ -377,8 +483,8 @@ const ExtractButton = ({ job, onStart }) => {
     );
   }
 
-  const totalImported = isDone && job.entitiesImported
-    ? Object.values(job.entitiesImported).reduce((s, v) => s + v, 0)
+  const totalImported = isDone && job.entities_imported
+    ? Object.values(job.entities_imported).reduce((s, v) => s + v, 0)
     : 0;
 
   const label = isError   ? 'Réessayer'
@@ -392,24 +498,28 @@ const ExtractButton = ({ job, onStart }) => {
 
   return (
     <button
-      onClick={onStart}
-      title={title}
+      onClick={disabled ? undefined : onStart}
+      disabled={disabled}
+      title={disabled ? 'Chargement en cours…' : title}
       style={{
         display: 'flex', alignItems: 'center', gap: 7,
         height: 30, padding: '0 14px',
         borderRadius: T.radiusPill, border: 'none',
-        background: isError
-          ? 'linear-gradient(135deg, #f87171 0%, #dc2626 100%)'
-          : 'linear-gradient(135deg, #60a5fa 0%, #1e40af 100%)',
-        color: '#ffffff',
+        background: disabled
+          ? T.panel2
+          : isError
+            ? 'linear-gradient(135deg, #f87171 0%, #dc2626 100%)'
+            : 'linear-gradient(135deg, #60a5fa 0%, #1e40af 100%)',
+        color: disabled ? T.muted : '#ffffff',
         fontFamily: T.font, fontSize: 12.5, fontWeight: 600,
-        cursor: 'pointer', whiteSpace: 'nowrap', transition: 'filter .12s',
-        boxShadow: isError
+        cursor: disabled ? 'default' : 'pointer', whiteSpace: 'nowrap', transition: 'filter .12s',
+        opacity: disabled ? 0.5 : 1,
+        boxShadow: disabled ? 'none' : isError
           ? '0 2px 6px rgba(220,38,38,.3)'
           : '0 2px 6px rgba(96,165,250,.35)',
       }}
-      onMouseEnter={e => { e.currentTarget.style.filter = 'brightness(1.1)'; }}
-      onMouseLeave={e => { e.currentTarget.style.filter = 'none'; }}
+      onMouseEnter={e => { if (!disabled) e.currentTarget.style.filter = 'brightness(1.1)'; }}
+      onMouseLeave={e => { if (!disabled) e.currentTarget.style.filter = 'none'; }}
     >
       <Ic.Lightning s={12} />
       {label}
@@ -693,20 +803,38 @@ const NodeDetailPanel = ({ nodeId, apiFetch, nodesById, onClose, onQualified }) 
 
 // ── Page principale ────────────────────────────────────────────
 const GraphPage = ({ apiFetch }) => {
-  const [plan,       setPlan]       = React.useState('technical');
-  const [nodes,      setNodes]      = React.useState([]);
-  const [arcs,       setArcs]       = React.useState([]);
-  const [loading,    setLoading]    = React.useState(true);
-  const [error,      setError]      = React.useState(null);
-  const [selectedId, setSelectedId] = React.useState(null);
+  const [plan,         setPlan]         = React.useState('functional');
+  const [nodes,        setNodes]        = React.useState([]);
+  const [arcs,         setArcs]         = React.useState([]);
+  const [loading,      setLoading]      = React.useState(true);
+  const [error,        setError]        = React.useState(null);
+  const [retryAttempt, setRetryAttempt] = React.useState(0);
+  const [selectedId,   setSelectedId]   = React.useState(null);
   const [showClusters, setShowClusters] = React.useState(false);
   const [clusters,     setClusters]     = React.useState([]);
   const [extractJob,   setExtractJob]   = React.useState(null);
   const [refreshKey,   setRefreshKey]   = React.useState(0);
   const [resetting,    setResetting]    = React.useState(false);
+  const [graphStatus,  setGraphStatus]  = React.useState('loading');
+  // Mode exploration (double-clic) : null = vue plan normale, Set<id> = ids visibles
+  const [exploredIds,      setExploredIds]      = React.useState(null);
+  // Données chargées par l'API neighbors pour le mode exploration
+  // { nodeMap: Map<id, nodeDTO>, edgeList: Array<edge> }
+  const [explorationBundle, setExplorationBundle] = React.useState(null);
+  // Tooltip hover
+  const [tooltip,      setTooltip]      = React.useState(null);
 
   const containerRef = React.useRef(null);
   const cyRef        = React.useRef(null);
+  // Refs pour accéder aux données fraîches depuis les handlers Cytoscape (closures statiques)
+  const nodesRef      = React.useRef([]);
+  const arcsRef       = React.useRef([]);
+  const planRef       = React.useRef('functional');
+  const apiFetchRef   = React.useRef(apiFetch);
+  React.useEffect(() => { nodesRef.current    = nodes;     }, [nodes]);
+  React.useEffect(() => { arcsRef.current     = arcs;      }, [arcs]);
+  React.useEffect(() => { planRef.current     = plan;      }, [plan]);
+  React.useEffect(() => { apiFetchRef.current = apiFetch;  }, [apiFetch]);
 
   // ── Reset graphe ───────────────────────────────────────────────
   const resetGraph = React.useCallback(async () => {
@@ -753,30 +881,55 @@ const GraphPage = ({ apiFetch }) => {
   }, [apiFetch, extractJob?.job_id, extractJob?.status]);
 
   // ── Chargement des nœuds + arcs via le proxy /api/graph/* ─────
+  // Retry sur 500 : l'Azure Function peut être transitoirement surchargée
+  // juste après un bulk import (écritures Neo4j), les lectures échouent
+  // quelques secondes avant que le service récupère.
   React.useEffect(() => {
     let cancelled = false;
+    const MAX_ATTEMPTS = 4;
     setLoading(true);
     setError(null);
+    setRetryAttempt(0);
+    setGraphStatus('loading');
 
-    (async () => {
+    const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+    const fetchGraph = async (attemptsLeft, delay) => {
+      if (cancelled) return;
       try {
         const [nodesRes, arcsRes] = await Promise.all([
           apiFetch(`${API_BASE}/graph/nodes?limit=500`),
           apiFetch(`${API_BASE}/graph/arcs?limit=1000`),
         ]);
+        if ((nodesRes.status === 500 || arcsRes.status === 500) && attemptsLeft > 0) {
+          if (!cancelled) {
+            setGraphStatus('retrying');
+            setRetryAttempt(MAX_ATTEMPTS - attemptsLeft + 1);
+          }
+          await sleep(delay);
+          return fetchGraph(attemptsLeft - 1, Math.min(delay * 1.5, 10000));
+        }
         if (!nodesRes.ok) throw new Error(`Nœuds : HTTP ${nodesRes.status}`);
         if (!arcsRes.ok)  throw new Error(`Arcs : HTTP ${arcsRes.status}`);
 
         const [nodesData, arcsData] = await Promise.all([nodesRes.json(), arcsRes.json()]);
         if (cancelled) return;
-        setNodes(nodesData.items ?? []);
-        setArcs(arcsData.items ?? []);
+        const n = nodesData.items ?? [];
+        const a = arcsData.items ?? [];
+        setNodes(n);
+        setArcs(a);
+        setGraphStatus(n.length > 0 ? 'ok' : 'empty');
       } catch (err) {
-        if (!cancelled) setError(err.message || 'Erreur de chargement du graphe.');
+        if (!cancelled) {
+          setError(err.message || 'Erreur de chargement du graphe.');
+          setGraphStatus('error');
+        }
       } finally {
         if (!cancelled) setLoading(false);
       }
-    })();
+    };
+
+    fetchGraph(4, 3000);
 
     return () => { cancelled = true; };
   }, [apiFetch, refreshKey]);
@@ -816,35 +969,80 @@ const GraphPage = ({ apiFetch }) => {
     return map;
   }, [clusters]);
 
-  // ── Filtrage par plan actif → éléments Cytoscape + layout ─────
+  // ── Filtrage par plan actif (ou mode exploration) → éléments Cytoscape + layout ─
   const { elements, layout, nodeCount, arcCount } = React.useMemo(() => {
-    const visibleNodes = plan === 'overlay' ? nodes : nodes.filter(n => n.type === plan);
-    const visibleIds = new Set(visibleNodes.map(n => n.id));
-    // Un arc n'est affiché que si ses deux extrémités sont visibles — dérive la
-    // visibilité des arcs de celle des nœuds plutôt que de dupliquer la logique de
-    // filtrage par arcType (les arcs FUNCTIONAL ne relient que des nœuds fonctionnels,
-    // les TECHNICAL_*/DATA_FLOW/TRANSITIONAL_COHABITATION que des nœuds techniques —
-    // vérifié sur les données live), garantissant la cohérence par construction.
-    const visibleArcs = arcs.filter(a => visibleIds.has(a.sourceNodeId) && visibleIds.has(a.targetNodeId));
+    const subtypeFilter = PLAN_SUBTYPES[plan];
+    const planSubtypes  = subtypeFilter;  // null = global
+    const EXPLORATION_LAYOUT = { name: 'cose', idealEdgeLength: 200, nodeRepulsion: 70000, gravity: 0.2, padding: 80, animate: true };
+
+    // ── Mode exploration : données venant du bundle /neighbors ──────────────
+    if (explorationBundle !== null && exploredIds !== null) {
+      const visibleNodes = [...explorationBundle.nodeMap.values()].filter(n => exploredIds.has(n.id));
+      const visibleIds   = new Set(visibleNodes.map(n => n.id));
+
+      const nodeElements = visibleNodes.map(n => {
+        const isTechnical  = n.type === 'technical';
+        const color        = isTechnical
+          ? (R7_COLORS[n.candidate7R] ?? R7_COLORS.UNQUALIFIED)
+          : (SUBTYPE_COLORS[n.subtype] ?? SUBTYPE_COLORS.domain);
+        const baseLabel    = isTechnical ? (n.componentName ?? n.id) : (n.domain ?? n.id);
+        const isOutOfPlan  = planSubtypes !== null && !planSubtypes.has(n.subtype);
+        return {
+          data: {
+            id: n.id,
+            label: n.isSPOF ? `⚠ ${baseLabel}` : baseLabel,
+            color, shape: SUBTYPE_SHAPES[n.subtype] ?? 'ellipse',
+            isSPOF: !!n.isSPOF, isGhost: !!n.isGhost,
+            isOutOfPlan: isOutOfPlan || undefined,
+            nodeType: n.type, subtype: n.subtype,
+          },
+        };
+      });
+
+      // Multi-arêtes possibles (ex. DEPENDS_ON + HAS_MACROFUNCTION sur même paire)
+      // → id unique par (source, target, relType)
+      const edgeElements = explorationBundle.edgeList
+        .filter(e => visibleIds.has(e.sourceNodeId) && visibleIds.has(e.targetNodeId))
+        .map(e => ({
+          data: {
+            id:         `${e.sourceNodeId}|${e.targetNodeId}|${e.relType}`,
+            source:     e.sourceNodeId,
+            target:     e.targetNodeId,
+            criticality: e.criticality,
+            arcType:    e.arcType,
+            relLabel:   e.relType,  // affiché sur l'arête en mode exploration
+          },
+        }));
+
+      return {
+        elements:  [...nodeElements, ...edgeElements],
+        layout:    EXPLORATION_LAYOUT,
+        nodeCount: visibleNodes.length,
+        arcCount:  edgeElements.length,
+      };
+    }
+
+    // ── Vue plan normale ────────────────────────────────────────────────────
+    const visibleNodes = planSubtypes === null
+      ? nodes
+      : nodes.filter(n => planSubtypes.has(n.subtype));
+    const visibleIds   = new Set(visibleNodes.map(n => n.id));
+    const visibleArcs  = arcs.filter(a => visibleIds.has(a.sourceNodeId) && visibleIds.has(a.targetNodeId));
 
     const nodeElements = visibleNodes.map(n => {
       const isTechnical = n.type === 'technical';
-      const color = isTechnical
+      const color       = isTechnical
         ? (R7_COLORS[n.candidate7R] ?? R7_COLORS.UNQUALIFIED)
-        : (STATUS_COLORS[n.modernizationStatus] ?? STATUS_COLORS.EXISTING);
-      const baseLabel = isTechnical ? n.componentName : n.domain;
+        : (SUBTYPE_COLORS[n.subtype] ?? SUBTYPE_COLORS.domain);
+      const baseLabel   = isTechnical ? (n.componentName ?? n.id) : (n.domain ?? n.id);
       const clusterEntry = showClusters ? nodeClusterIndex.get(n.id) : undefined;
       return {
         data: {
           id: n.id,
-          // Badge SPOF (SDD §9 : "badge ⚠ SPOF") — Cytoscape ne rend pas d'overlay DOM
-          // sur ses nœuds (rendu canvas) ; le préfixe textuel est l'équivalent direct,
-          // combiné à la bordure rouge épaisse héritée de graphStylesheet.
           label: n.isSPOF ? `⚠ ${baseLabel}` : baseLabel,
-          color,
-          isSPOF: !!n.isSPOF,
-          isGhost: !!n.isGhost,
-          nodeType: n.type,
+          color, shape: SUBTYPE_SHAPES[n.subtype] ?? 'ellipse',
+          isSPOF: !!n.isSPOF, isGhost: !!n.isGhost,
+          nodeType: n.type, subtype: n.subtype,
           ...(clusterEntry ? { clusterColor: clusterEntry.color } : {}),
         },
       };
@@ -852,38 +1050,107 @@ const GraphPage = ({ apiFetch }) => {
 
     const edgeElements = visibleArcs.map(a => ({
       data: {
-        id: a.id,
-        source: a.sourceNodeId,
-        target: a.targetNodeId,
-        criticality: a.criticality,
-        arcType: a.arcType,
+        id: a.id, source: a.sourceNodeId, target: a.targetNodeId,
+        criticality: a.criticality, arcType: a.arcType,
+        // pas de relLabel en vue plan → labels absents du style
       },
     }));
 
     return {
-      elements: [...nodeElements, ...edgeElements],
-      layout: PLAN_LAYOUTS[plan],
+      elements:  [...nodeElements, ...edgeElements],
+      layout:    PLAN_LAYOUTS[plan],
       nodeCount: visibleNodes.length,
-      arcCount: visibleArcs.length,
+      arcCount:  visibleArcs.length,
     };
-  }, [nodes, arcs, plan, showClusters, nodeClusterIndex]);
+  }, [nodes, arcs, plan, showClusters, nodeClusterIndex, exploredIds, explorationBundle]);
 
-  // ── Construction / reconstruction du graphe Cytoscape ─────────
+  // ── Initialisation Cytoscape — une seule fois au mount ────────
+  // On ne détruit jamais cy pendant que l'utilisateur interagit : cela laisse
+  // les listeners DOM internes de Cytoscape attachés à une instance dont
+  // _private est null, ce qui provoque un TypeError sur findNearestElement.
   React.useEffect(() => {
     if (!containerRef.current) return;
-
     const cy = window.cytoscape({
       container: containerRef.current,
-      elements,
+      elements: [],
       style: GRAPH_STYLE,
-      layout,
       wheelSensitivity: 0.25,
     });
+
     cy.on('tap', 'node', evt => setSelectedId(evt.target.id()));
-    cy.on('tap', evt => { if (evt.target === cy) setSelectedId(null); });
+    cy.on('tap', evt => {
+      if (evt.target === cy) {
+        setSelectedId(null);
+        setExploredIds(null);       // clic fond → quitter exploration
+        setExplorationBundle(null);
+      }
+    });
+
+    // Double-clic → mode exploration : charge TOUTES les relations Neo4j du nœud via /neighbors
+    cy.on('dblclick', 'node', async evt => {
+      const nodeId = evt.target.id();
+      try {
+        const res = await apiFetchRef.current(
+          `${API_BASE}/graph/nodes/${encodeURIComponent(nodeId)}/neighbors`
+        );
+        if (!res.ok) return;
+        const data = await res.json(); // { center, neighbors, edges }
+
+        // Merge dans le bundle existant (expansion progressive)
+        setExplorationBundle(prev => {
+          const nodeMap = prev ? new Map(prev.nodeMap) : new Map();
+          const edgeList = prev ? [...prev.edgeList] : [];
+          const seenKeys = new Set(edgeList.map(e => `${e.sourceNodeId}|${e.targetNodeId}|${e.relType}`));
+
+          nodeMap.set(data.center.id, data.center);
+          data.neighbors.forEach(n => nodeMap.set(n.id, n));
+          data.edges.forEach(e => {
+            const k = `${e.sourceNodeId}|${e.targetNodeId}|${e.relType}`;
+            if (!seenKeys.has(k)) { seenKeys.add(k); edgeList.push(e); }
+          });
+          return { nodeMap, edgeList };
+        });
+
+        setExploredIds(prev => {
+          const next = prev ? new Set(prev) : new Set();
+          next.add(data.center.id);
+          data.neighbors.forEach(n => next.add(n.id));
+          return next;
+        });
+      } catch (_) { /* exploration silencieuse si l'API est injoignable */ }
+    });
+
+    // Hover arête → affiche le label de relation (mode exploration)
+    cy.on('mouseover', 'edge', evt => { if (evt.target.data('relLabel')) evt.target.data('showLabel', true); });
+    cy.on('mouseout',  'edge', evt => { evt.target.data('showLabel', null); });
+
+    // Hover → tooltip avec infos clés
+    cy.on('mouseover', 'node', evt => {
+      const rp = evt.renderedPosition;
+      const rect = containerRef.current?.getBoundingClientRect();
+      if (!rect) return;
+      setTooltip({ nodeId: evt.target.id(), x: rect.left + rp.x, y: rect.top + rp.y });
+    });
+    cy.on('mouseout', 'node', () => setTooltip(null));
+    cy.on('viewport', () => setTooltip(null)); // pan/zoom → masquer tooltip
 
     cyRef.current = cy;
     return () => { cy.destroy(); cyRef.current = null; };
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ── Mise à jour du contenu — patche les éléments sans détruire cy ─
+  React.useEffect(() => {
+    const cy = cyRef.current;
+    if (!cy) return;
+    cy.elements().remove();
+    cy.add(elements);
+    const ly = cy.layout(layout);
+    ly.one('layoutstop', () => {
+      cy.fit(undefined, 80);
+      // Plafonner le zoom : évite que quelques nœuds ne remplissent tout l'écran
+      if (cy.zoom() > 1.0) { cy.zoom(1.0); cy.center(); }
+    });
+    ly.run();
   }, [elements, layout]);
 
   // ── Redimensionnement (Cytoscape ne suit pas son conteneur) ───
@@ -919,14 +1186,16 @@ const GraphPage = ({ apiFetch }) => {
     if (members.length > 0) cy.fit(members, 80);
   }, []);
 
-  // Les clusters ne regroupent que des nœuds techniques (Louvain tourne sur
-  // :TechnicalNode/DEPENDS_ON) — masquer le surlignage en vue Fonctionnelle
-  // évite d'afficher un toggle actif qui n'aurait visuellement aucun effet.
-  React.useEffect(() => { if (plan === 'functional') setShowClusters(false); }, [plan]);
+  // Les clusters Louvain ne concernent que les TechnicalNode — désactiver hors vue Technique/Global.
+  React.useEffect(() => {
+    if (plan !== 'technical' && plan !== 'global') setShowClusters(false);
+    setExploredIds(null);        // Changement de plan → sortir du mode exploration
+    setExplorationBundle(null);
+  }, [plan]);
 
-  const clusterToggleDisabled = plan === 'functional' || clusters.length === 0;
-  const clusterToggleTitle = plan === 'functional'
-    ? 'Disponible sur les plans Technique et Superposé — les clusters ne regroupent que des composants techniques'
+  const clusterToggleDisabled = (plan !== 'technical' && plan !== 'global') || clusters.length === 0;
+  const clusterToggleTitle = (plan !== 'technical' && plan !== 'global')
+    ? 'Disponible sur les vues Technique et Global — les clusters ne regroupent que des composants techniques'
     : clusters.length === 0
       ? "Aucun appartement candidat détecté (cohésion > 0,7 et couplage externe < 0,3) sur ce graphe"
       : 'Surligner les appartements candidats détectés par le clustering Louvain';
@@ -948,12 +1217,20 @@ const GraphPage = ({ apiFetch }) => {
             title={clusterToggleTitle}
             onChange={setShowClusters}
           />
+          <GraphLed graphStatus={graphStatus} error={error} extractJob={extractJob} />
           <span style={{ fontSize: 12.5, color: T.muted, whiteSpace: 'nowrap' }}>
             {nodeCount} nœud{nodeCount > 1 ? 's' : ''} · {arcCount} arc{arcCount > 1 ? 's' : ''}
           </span>
         </div>
         <div style={{ display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: 8 }}>
-          <ExtractButton job={extractJob} onStart={startExtract} />
+          <ExtractButton job={extractJob} onStart={startExtract} disabled={loading} />
+          <ActionButton
+            onClick={() => setRefreshKey(k => k + 1)}
+            disabled={loading}
+            title="Recharger les données depuis Neo4j (sans réextraction)"
+          >
+            <span style={{ fontSize: 14, lineHeight: 1 }}>↻</span> Actualiser
+          </ActionButton>
           <ResetButton onReset={resetGraph} disabled={resetting} />
           <span style={{ width: 1, height: 18, background: T.border, flexShrink: 0 }} />
           <GraphActions clusters={clusters} nodes={nodes} />
@@ -966,24 +1243,73 @@ const GraphPage = ({ apiFetch }) => {
         <div style={{ flex: 1, position: 'relative', background: T.panel, minHeight: 0 }}>
           <div ref={containerRef} style={{ position: 'absolute', inset: 0 }} />
 
+          {/* Bannière mode exploration */}
+          {exploredIds !== null && (
+            <div style={{
+              position: 'absolute', top: 12, left: '50%', transform: 'translateX(-50%)',
+              display: 'flex', alignItems: 'center', gap: 10,
+              padding: '6px 14px 6px 12px',
+              background: 'rgba(21,101,192,.92)', backdropFilter: 'blur(4px)',
+              borderRadius: T.radiusPill, fontFamily: T.font, fontSize: 12.5,
+              color: '#fff', boxShadow: '0 4px 16px rgba(21,101,192,.3)', zIndex: 10,
+              whiteSpace: 'nowrap',
+            }}>
+              <span style={{ opacity: .8 }}>Mode exploration</span>
+              <span style={{ fontWeight: 700 }}>{exploredIds.size} nœud{exploredIds.size > 1 ? 's' : ''}</span>
+              <span style={{ opacity: .6 }}>·</span>
+              <span style={{ opacity: .8, fontSize: 11 }}>Double-clic pour étendre · Clic fond pour quitter</span>
+              <button
+                onClick={() => { setExploredIds(null); setExplorationBundle(null); }}
+                style={{
+                  marginLeft: 4, padding: '2px 10px', borderRadius: T.radiusPill,
+                  border: 'none', background: 'rgba(255,255,255,.2)', color: '#fff',
+                  fontFamily: T.font, fontSize: 12, cursor: 'pointer',
+                }}
+              >Quitter</button>
+            </div>
+          )}
+
           {showClusters && clusters.length > 0 && (
             <ClusterList clusters={clusters} onFocus={focusCluster} onClose={() => setShowClusters(false)} />
           )}
 
-          {loading && (
-            <div style={{
-              position: 'absolute', inset: 0, display: 'flex', flexDirection: 'column',
-              alignItems: 'center', justifyContent: 'center', gap: 12,
-              background: T.panel, fontFamily: T.font,
-            }}>
+          {loading && (() => {
+            const isRetrying  = graphStatus === 'retrying';
+            const isRefreshing = extractJob?.status === 'done';
+            const spinColor   = isRetrying ? '#f59e0b' : T.azure;
+            const trackColor  = isRetrying ? '#fef3c7' : '#d2e0fc';
+            const mainMsg     = isRetrying
+              ? `Service temporairement indisponible · Tentative ${retryAttempt}/4…`
+              : isRefreshing
+                ? 'Actualisation du graphe après extraction…'
+                : 'Connexion au service graphe ADG-M…';
+            const subMsg      = isRetrying
+              ? 'Le service reprend généralement en quelques secondes.'
+              : isRefreshing
+                ? 'Les nouveaux nœuds et arcs vont apparaître.'
+                : null;
+            return (
               <div style={{
-                width: 26, height: 26, borderRadius: '50%',
-                border: '2.5px solid #d2e0fc', borderTopColor: T.azure,
-                animation: 'nlGraphSpin .7s linear infinite',
-              }} />
-              <span style={{ fontSize: 13, color: T.sub }}>Chargement du graphe…</span>
-            </div>
-          )}
+                position: 'absolute', inset: 0, display: 'flex', flexDirection: 'column',
+                alignItems: 'center', justifyContent: 'center', gap: 10,
+                background: T.panel, fontFamily: T.font,
+              }}>
+                <div style={{
+                  width: 26, height: 26, borderRadius: '50%',
+                  border: `2.5px solid ${trackColor}`, borderTopColor: spinColor,
+                  animation: 'nlGraphSpin .7s linear infinite',
+                }} />
+                <span style={{ fontSize: 13, color: isRetrying ? '#92400e' : T.sub, fontWeight: isRetrying ? 500 : 400 }}>
+                  {mainMsg}
+                </span>
+                {subMsg && (
+                  <span style={{ fontSize: 11.5, color: T.muted, maxWidth: 340, textAlign: 'center' }}>
+                    {subMsg}
+                  </span>
+                )}
+              </div>
+            );
+          })()}
 
           {!loading && error && (
             <div style={{ position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 24 }}>
@@ -1001,10 +1327,25 @@ const GraphPage = ({ apiFetch }) => {
 
           {!loading && !error && elements.length === 0 && (
             <div style={{
-              position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center',
-              fontFamily: T.font, fontSize: 13, color: T.muted,
+              position: 'absolute', inset: 0, display: 'flex', flexDirection: 'column',
+              alignItems: 'center', justifyContent: 'center', gap: 8,
+              fontFamily: T.font,
             }}>
-              Aucun nœud à afficher pour ce plan.
+              {nodes.length === 0 ? (
+                <>
+                  <span style={{ fontSize: 13, color: T.ink, fontWeight: 500 }}>
+                    Le graphe ADG-M est vide
+                  </span>
+                  <span style={{ fontSize: 12, color: T.muted, maxWidth: 320, textAlign: 'center', lineHeight: 1.6 }}>
+                    Indexez des documents dans l'onglet Chat, puis cliquez sur
+                    {' '}<strong>Construire le graphe ADG-M</strong> pour extraire les entités.
+                  </span>
+                </>
+              ) : (
+                <span style={{ fontSize: 13, color: T.muted }}>
+                  Aucun nœud à afficher pour ce plan.
+                </span>
+              )}
             </div>
           )}
         </div>
@@ -1021,7 +1362,58 @@ const GraphPage = ({ apiFetch }) => {
         )}
       </div>
 
-      <style>{`@keyframes nlGraphSpin { to { transform: rotate(360deg); } }`}</style>
+      {/* Tooltip hover — position: fixed pour sortir du clip du canvas */}
+      {tooltip && (() => {
+        const n = nodesById.get(tooltip.nodeId);
+        if (!n) return null;
+        const isTechnical = n.type === 'technical';
+        const lines = [
+          { label: 'Type',   value: SUBTYPE_LABELS[n.subtype] ?? n.subtype },
+          isTechnical && n.technology  && { label: 'Techno',  value: n.technology },
+          isTechnical && n.linesOfCode && { label: 'LoC',     value: n.linesOfCode.toLocaleString() },
+          isTechnical && n.candidate7R && { label: '7R',      value: n.candidate7R },
+          !isTechnical && n.modernizationStatus && { label: 'Statut', value: STATUS_LABELS[n.modernizationStatus] ?? n.modernizationStatus },
+        ].filter(Boolean);
+        const TIP_W = 200;
+        return (
+          <div style={{
+            position: 'fixed',
+            left: tooltip.x + 14, top: tooltip.y - 10,
+            width: TIP_W, padding: '8px 12px',
+            background: 'rgba(28,27,24,.93)', backdropFilter: 'blur(6px)',
+            borderRadius: T.radiusMd, fontFamily: T.font,
+            boxShadow: '0 6px 20px rgba(0,0,0,.25)', zIndex: 9999,
+            pointerEvents: 'none',
+          }}>
+            <div style={{ fontSize: 12.5, fontWeight: 700, color: '#fff', marginBottom: 5,
+                          overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+              {n.domain ?? n.componentName ?? n.id}
+            </div>
+            {lines.map(({ label, value }) => (
+              <div key={label} style={{ display: 'flex', justifyContent: 'space-between', fontSize: 11.5, marginTop: 2 }}>
+                <span style={{ color: '#94a3b8' }}>{label}</span>
+                <span style={{ color: '#e2e8f0', fontWeight: 500, marginLeft: 8,
+                               overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                               maxWidth: 110 }}>{value}</span>
+              </div>
+            ))}
+            {n.docCoveragePercent != null && (
+              <div style={{ marginTop: 5, fontSize: 11, color: '#64748b' }}>
+                Couverture doc. : {Math.round(n.docCoveragePercent)}%
+              </div>
+            )}
+            <div style={{ marginTop: 5, borderTop: '1px solid rgba(255,255,255,.1)', paddingTop: 5,
+                          fontSize: 10.5, color: '#475569' }}>
+              Double-clic → développer les voisins
+            </div>
+          </div>
+        );
+      })()}
+
+      <style>{`
+        @keyframes nlGraphSpin { to { transform: rotate(360deg); } }
+        @keyframes nlGraphPulse { 0%,100% { opacity: 1; } 50% { opacity: .35; } }
+      `}</style>
     </div>
   );
 };
