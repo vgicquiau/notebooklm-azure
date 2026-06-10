@@ -38,17 +38,26 @@ notebooklm-azure/
 │   │   └── text_chunker.py # Texte brut + code source (sliding window)
 │   ├── embedder.py         # text-embedding-3-large via Azure OpenAI
 │   └── indexer.py          # Azure AI Search — index "notebooklm-chunks"
-└── frontend/
-    ├── index.html          # Point d'entrée — charge tous les scripts
-    ├── vendor/             # Dépendances JS vendorisées (React, Babel, Mermaid, Cytoscape…)
-    └── src/
-        ├── tokens.jsx      # Design tokens (T.azure, T.ink, etc.) + icônes (Ic.*) + Logo
-        ├── Header.jsx
-        ├── SourcesRail.jsx # Rail gauche — sources indexées, upload, ingestion
-        ├── NotesRail.jsx   # Rail droit — notes, indexation comme source
-        ├── ChatPanel.jsx   # Zone de chat centrale
-        ├── GraphPage.jsx   # Vue Graphe ADG-M (Cytoscape) — T16/T17/T18
-        └── App.jsx         # État global, vue active (chat|graph), montage React
+├── frontend/
+│   ├── index.html          # Point d'entrée — charge tous les scripts
+│   ├── vendor/             # Dépendances JS vendorisées (React, Babel, Mermaid, Cytoscape…)
+│   └── src/
+│       ├── tokens.jsx      # Design tokens (T.azure, T.ink, etc.) + icônes (Ic.*) + Logo
+│       ├── Header.jsx
+│       ├── SourcesRail.jsx # Rail gauche — sources indexées, upload, ingestion
+│       ├── NotesRail.jsx   # Rail droit — notes, indexation comme source
+│       ├── ChatPanel.jsx   # Zone de chat centrale
+│       ├── GraphPage.jsx   # Vue Graphe ADG-M (Cytoscape) — T16/T17/T18
+│       └── App.jsx         # État global, vue active (chat|graph), montage React
+├── azure-functions/        # Source des Azure Functions déployées (modernagent-adgm-dev)
+│   ├── fn-adgm-graph/       # API Neo4j du graphe ADG-M (consommée via api/routers/graph.py)
+│   ├── fn-adgm-ingest/      # Blob trigger — ingestion des rétro-docs
+│   ├── db/                  # Schémas Neo4j / SQL (adgm_schema.sql, neo4j_schema.cypher, seed)
+│   └── requirements.txt, host.json, .funcignore
+├── doc-archimind/           # Corpus de référence CardDemo (architecture mainframe)
+└── docs/
+    ├── specs/               # Spécifications produit (SDD_*, ARCHITECTURE.md, plans…)
+    └── archive/sprint0/     # Scripts/templates du bootstrap initial (superseded)
 ```
 
 ---
@@ -159,6 +168,17 @@ Résultat : dataset cohérent sur l'intégralité du corpus, pas seulement une m
 ```
 
 Le tableau `methods` dans `function.json` contrôle l'acceptation HTTP **au niveau du trigger Azure**, avant que le code Python soit atteint. Si `"delete"` est absent, l'Azure Function retourne 404 sans jamais exécuter le handler — les logs Python restent vierges, ce qui rend le diagnostic non-évident.
+
+### Déploiement de `azure-functions/`
+
+Le code source de `fn-adgm-graph` et `fn-adgm-ingest` (sous `azure-functions/`) est déployé sur l'Azure Function App `modernagent-adgm-dev` :
+
+```powershell
+cd azure-functions
+func azure functionapp publish modernagent-adgm-dev --python --build remote
+```
+
+`local.settings.json` (non commité) contient les chaînes de connexion locales et n'est jamais publié (`.funcignore`).
 
 ---
 
