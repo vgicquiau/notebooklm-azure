@@ -1,6 +1,20 @@
 # NotebookLM Azure
 
-Agent RAG (Retrieval-Augmented Generation) à interface conversationnelle, inspiré de NotebookLM. Indexez vos documents dans Azure AI Search, posez des questions en langage naturel, obtenez des réponses sourcées avec citations cliquables.
+Agent RAG (Retrieval-Augmented Generation) à interface conversationnelle, inspiré de NotebookLM. Indexez vos documents dans Azure AI Search, posez des questions en langage naturel, obtenez des réponses sourcées avec citations cliquables. Inclut une vue **Graphe ADG-M** pour visualiser et qualifier (7R) l'architecture applicative extraite du corpus.
+
+---
+
+## Documentation
+
+| Document | Contenu |
+|---|---|
+| [README.md](README.md) (ce fichier) | Quick start, installation, utilisation |
+| [ARCHITECTURE.md](ARCHITECTURE.md) | Dossier d'architecture complet — fonctionnel, technique, sécurité, spécifications par fonctionnalité (F1-F7) |
+| [ADG-M_GRAPH_METHODOLOGIE.md](ADG-M_GRAPH_METHODOLOGIE.md) | Méthodologie du Graphe ADG-M : pipeline d'extraction, typage des nœuds Neo4j, glossaire |
+| [GUIDE-DEPLOIEMENT.md](GUIDE-DEPLOIEMENT.md) | Déploiement pas-à-pas sur Azure (infra Bicep, App Service, Docker) |
+| [azure-functions/README.md](azure-functions/README.md) | Backend du Graphe ADG-M (`fn-adgm-graph`, `fn-adgm-ingest`) — config, schémas DB, déploiement |
+| [CLAUDE.md](CLAUDE.md) | Guide de développement (structure du code, conventions git) |
+| [docs/specs/](docs/specs/) | Spécifications produit détaillées (SDD) |
 
 ---
 
@@ -127,7 +141,7 @@ Variables requises :
 | `AZURE_SEARCH_ENDPOINT` | Endpoint Azure AI Search |
 | `AZURE_DOCINT_ENDPOINT` | Endpoint Azure Document Intelligence |
 | `API_KEY` | Clé d'authentification (optionnelle en local) |
-| `ADGM_GRAPH_API_URL` | URL de base de `fn-adgm-graph` (défaut : `https://modernagent-adgm-dev.azurewebsites.net/api/graph`) |
+| `ADGM_GRAPH_API_URL` | URL de base de `fn-adgm-graph` (défaut : instance de dev partagée `https://modernagent-adgm-dev.azurewebsites.net/api/graph` — voir [azure-functions/README.md](azure-functions/README.md) pour déployer votre propre instance) |
 
 ### 5. Authentification Azure
 
@@ -209,6 +223,16 @@ frontend/
 └── src/               # Composants React (JSX transpilé in-browser)
     ├── GraphPage.jsx  # Vue Graphe ADG-M (Cytoscape.js)
     └── ...            # Chat : Header, SourcesRail, ChatPanel, NotesRail, App
+
+azure-functions/        # Backend du Graphe ADG-M (déployé sur Azure Functions)
+├── fn-adgm-graph/      # API Neo4j — nœuds, arcs, clusters, qualification 7R
+├── fn-adgm-ingest/     # Blob trigger — ingestion automatique des rétro-docs
+└── db/                 # Schémas Neo4j (Cypher) et Azure SQL
+
+doc-archimind/           # Corpus de référence (architecture mainframe CardDemo)
+docs/
+├── specs/               # Spécifications produit (SDD_*, plans, audits)
+└── archive/sprint0/     # Scripts du bootstrap initial (superseded)
 ```
 
 ---
