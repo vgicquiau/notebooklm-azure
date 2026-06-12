@@ -5,7 +5,7 @@
 
 .DESCRIPTION
     Phases executées :
-      0. Vérification des prérequis (az, python, docker) — parallel
+      0. Vérification des prérequis (az, python) — parallel
       1. Installation extensions Azure CLI (containerapp, bicep) — parallel
       2. Authentification Azure + sélection subscription
       3. Resource Group + déploiement Bicep (~12 min)
@@ -91,8 +91,7 @@ Write-Phase 0 6 "Vérification des prérequis"
 
 $prereqs = @(
     @{ Name = "Azure CLI (az)"; Test = { az --version 2>&1 | Out-Null }; Url = "https://aka.ms/installazurecliwindows" },
-    @{ Name = "Python 3.11+";   Test = { python --version 2>&1 | Out-Null }; Url = "https://python.org/downloads" },
-    @{ Name = "Docker";         Test = { docker --version 2>&1 | Out-Null }; Url = "https://www.docker.com/products/docker-desktop" }
+    @{ Name = "Python 3.11+";   Test = { python --version 2>&1 | Out-Null }; Url = "https://python.org/downloads" }
 )
 
 # Vérification parallèle via jobs

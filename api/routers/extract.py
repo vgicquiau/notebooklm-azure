@@ -923,6 +923,19 @@ def _run_extract_job(job_id: str, credential) -> None:
             logger.warning("Calcul de couverture impossible: %s", exc)
             coverage_report = {}
 
+        # 5. Analyse du graphe (criticité, SPOF, clustering Louvain) — sans cette étape,
+        # /graph/clusters répond 409 et les communautés/cohésion restent indisponibles
+        # dans GraphPage. Lancée ici pour que "Mettre à jour" produise un graphe
+        # immédiatement exploitable, sans étape manuelle supplémentaire.
+        _jobs[job_id]["message"] = "Analyse du graphe (criticité, SPOF, clusters)…"
+        try:
+            with httpx.Client(timeout=120.0) as http:
+                r = http.post(f"{_ADGM_BASE}/admin/analyze")
+                if not r.is_success:
+                    logger.warning("admin/analyze returned %s — continuing anyway", r.status_code)
+        except Exception as exc:
+            logger.warning("admin/analyze call failed: %s — continuing anyway", exc)
+
         total_entities = sum(total_imported.values())
         done_msg = f"Extraction terminée — {docs_total} documents, {total_entities} entités importées."
         if import_errors:

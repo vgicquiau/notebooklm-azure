@@ -19,7 +19,7 @@ Agent RAG (Retrieval-Augmented Generation) à interface conversationnelle, inspi
 
 ## Quick Start
 
-**Prérequis :** [Azure CLI](https://aka.ms/installazurecliwindows) · [Python 3.11+](https://python.org/downloads) · [Docker](https://www.docker.com/products/docker-desktop) · une subscription Azure
+**Prérequis :** [Azure CLI](https://aka.ms/installazurecliwindows) · [Python 3.11+](https://python.org/downloads) · une subscription Azure
 
 ```powershell
 git clone https://github.com/vgicquiau/notebooklm-azure.git

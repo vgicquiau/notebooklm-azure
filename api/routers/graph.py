@@ -19,8 +19,9 @@ _BASE_URL = os.environ.get(
 ).rstrip("/")
 
 # Seuls GET (consultation : health, nodes, arcs, clusters, impact) et PATCH
-# (qualification 7R) sont relayés — pas POST /admin/analyze, job d'administration
-# hors surface utilisateur de cette fonctionnalité.
+# (qualification 7R) sont relayés — POST /admin/analyze n'est pas exposé via ce proxy,
+# il est déclenché en server-to-server par api/routers/extract.py à la fin du job
+# d'extraction (bouton "Mettre à jour"), pas directement par le frontend.
 
 
 async def _forward(method: str, path: str, request: Request) -> Response:

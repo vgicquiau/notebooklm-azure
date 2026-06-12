@@ -624,9 +624,10 @@ const ExtractButton = ({ job, onStart, disabled }) => {
 };
 
 // SDD §7 : « GraphActions — relancer analyse, exporter clusters/CSV ». Le proxy
-// /api/graph (Increment 2) ne relaie volontairement que GET/PATCH — pas
-// POST /admin/analyze, opération d'administration hors surface utilisateur —
-// donc seuls les exports (100% client, sans dépendance backend) sont proposés ici.
+// /api/graph (Increment 2) ne relaie volontairement que GET/PATCH — POST
+// /admin/analyze n'est pas exposé ici, mais déjà déclenché automatiquement en fin
+// de job par le bouton "Mettre à jour" (cf. extract.py) — donc seuls les exports
+// (100% client, sans dépendance backend) sont proposés ici.
 const GraphActions = ({ clusters, nodes }) => {
   const unqualifiedCount = React.useMemo(
     () => nodes.filter(n => n.label === 'Composant' && n.candidate7R === 'UNQUALIFIED').length,
@@ -682,6 +683,49 @@ const DetailRow = ({ label, value }) => {
 
 const fiabiliteStyle = (fiabilite) => ({ color: FIABILITE_COLORS[fiabilite] ?? T.muted, fontWeight: 600 });
 
+// Libellés FR des 15 types de relation (ALLOWED_REL_TYPES, function_app.py) — affichés
+// en toutes lettres dans ArcSection (auparavant visibles uniquement au survol).
+const REL_TYPE_LABELS = {
+  CONTIENT:           'Contient',
+  CATALOGUE:          'Catalogue',
+  PORTE_REGLE:        'Porte la règle',
+  ORCHESTRE:          'Orchestre',
+  ORIENTE_PAR:        'Orienté par',
+  IMPLEMENTE:         'Implémente',
+  ENCODE_REGLE:       'Encode la règle',
+  APPELLE:            'Appelle',
+  INCLUT:             'Inclut',
+  ACCEDE_A:           'Accède à',
+  DECLENCHE:          'Déclenche',
+  CONTIENT_STEP:      'Contient (step)',
+  CORRESPOND_A:       'Correspond à',
+  GENERE_INCERTITUDE: 'Génère incertitude',
+  DEPEND_DE:          'Dépend de',
+};
+
+// Propriétés additionnelles portées par les relations (taxonomie v2.0, extract.py)
+// — non couvertes par fiabilite, affichées en chips sous la relation.
+const REL_PROP_LABELS = {
+  typePortage:  'Portage',
+  typeRoutage:  'Routage',
+  typeAppel:    'Appel',
+  typeEncodage: 'Encodage',
+  nature:       'Nature',
+  mode:         'Mode',
+  operations:   'Opérations',
+  ordre:        'Ordre',
+  conditionnel: 'Conditionnel',
+  contention:   'Contention',
+  description:  'Description',
+};
+const ARC_META_KEYS = new Set(['id', 'sourceNodeId', 'targetNodeId', 'type', 'fiabilite', 'createdAt', 'updatedAt']);
+const _relPropValue = (v) => {
+  if (Array.isArray(v)) return v.join(', ');
+  if (v === true) return 'Oui';
+  if (v === false) return 'Non';
+  return v;
+};
+
 const ArcSection = ({ title, arcs, nodesById, endField }) => {
   if (!arcs?.length) return null;
   return (
@@ -691,10 +735,26 @@ const ArcSection = ({ title, arcs, nodesById, endField }) => {
         {arcs.map(a => {
           const other = nodesById.get(a[endField]);
           const label = other ? (other.nom ?? other.id) : a[endField];
+          const extras = Object.entries(a).filter(
+            ([k, v]) => !ARC_META_KEYS.has(k) && v !== null && v !== undefined && v !== ''
+          );
           return (
-            <div key={a.id} title={a.type} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10, fontSize: 12, padding: '7px 10px', background: T.panel, borderRadius: T.radiusSm }}>
-              <span style={{ color: T.ink, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', minWidth: 0 }}>{label}</span>
-              <span style={{ flexShrink: 0, fontSize: 10.5, ...fiabiliteStyle(a.fiabilite) }}>{FIABILITE_LABELS[a.fiabilite] ?? a.fiabilite}</span>
+            <div key={a.id} style={{ display: 'flex', flexDirection: 'column', gap: 4, fontSize: 12, padding: '7px 10px', background: T.panel, borderRadius: T.radiusSm }}>
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10 }}>
+                <span style={{ color: T.ink, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', minWidth: 0 }}>
+                  <strong>{REL_TYPE_LABELS[a.type] ?? a.type}</strong> {label}
+                </span>
+                <span style={{ flexShrink: 0, fontSize: 10.5, ...fiabiliteStyle(a.fiabilite) }}>{FIABILITE_LABELS[a.fiabilite] ?? a.fiabilite}</span>
+              </div>
+              {extras.length > 0 && (
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: 5 }}>
+                  {extras.map(([k, v]) => (
+                    <span key={k} style={{ fontSize: 10.5, color: T.sub, background: T.white, border: `1px solid ${T.border}`, borderRadius: T.radiusSm, padding: '2px 6px' }}>
+                      {REL_PROP_LABELS[k] ?? k} : {String(_relPropValue(v))}
+                    </span>
+                  ))}
+                </div>
+              )}
             </div>
           );
         })}
@@ -867,7 +927,6 @@ const NodeDetailPanel = ({ nodeId, apiFetch, nodesById, onClose, onQualified }) 
             <DetailRow label="Type d'exécution" value={node.typeExecution} />
             <DetailRow label="Mode d'accès" value={node.modeAcces} />
             <DetailRow label="RGPD" value={node.regpd === true ? 'Oui' : node.regpd === false ? 'Non' : null} />
-            <DetailRow label="Niveau d'urgence" value={node.niveauUrgence} />
             <DetailRow label="Source" value={node.source} />
             <div style={{ marginTop: 16 }}>
               <SectionTitle>Métriques</SectionTitle>

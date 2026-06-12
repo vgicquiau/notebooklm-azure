@@ -326,22 +326,32 @@ def get_node_by_id(node_id: str) -> func.HttpResponse:
             node = record["n"]
 
             incoming_arcs = [
-                {"id": f"{rec['relType']}-{rec['otherId']}-{node_id}", "sourceNodeId": rec["otherId"], "type": rec["relType"], "fiabilite": rec["fiabilite"]}
+                {
+                    "id": f"{rec['relType']}-{rec['otherId']}-{node_id}",
+                    "sourceNodeId": rec["otherId"],
+                    "type": rec["relType"],
+                    **{k: _to_json(v) for k, v in rec["props"].items()},
+                }
                 for rec in session.run(
                     """
                     MATCH (src)-[r]->(n {id: $id}) WHERE type(r) IN $relTypes
-                    RETURN type(r) AS relType, src.id AS otherId, r.fiabilite AS fiabilite
+                    RETURN type(r) AS relType, src.id AS otherId, properties(r) AS props
                     ORDER BY relType, otherId
                     """,
                     {"id": node_id, "relTypes": list(ALLOWED_REL_TYPES)}
                 )
             ]
             outgoing_arcs = [
-                {"id": f"{rec['relType']}-{node_id}-{rec['otherId']}", "targetNodeId": rec["otherId"], "type": rec["relType"], "fiabilite": rec["fiabilite"]}
+                {
+                    "id": f"{rec['relType']}-{node_id}-{rec['otherId']}",
+                    "targetNodeId": rec["otherId"],
+                    "type": rec["relType"],
+                    **{k: _to_json(v) for k, v in rec["props"].items()},
+                }
                 for rec in session.run(
                     """
                     MATCH (n {id: $id})-[r]->(tgt) WHERE type(r) IN $relTypes
-                    RETURN type(r) AS relType, tgt.id AS otherId, r.fiabilite AS fiabilite
+                    RETURN type(r) AS relType, tgt.id AS otherId, properties(r) AS props
                     ORDER BY relType, otherId
                     """,
                     {"id": node_id, "relTypes": list(ALLOWED_REL_TYPES)}
