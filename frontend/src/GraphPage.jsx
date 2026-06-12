@@ -1,45 +1,94 @@
-// src/GraphPage.jsx — Page de visualisation du graphe ADG-M (4 vues)
+// src/GraphPage.jsx — Page de visualisation du graphe ADG-M (vues par couche taxonomique)
 // Props: apiFetch(url, options) — wrapper _apiFetch (injecte X-API-Key), fourni par App
 //
 // Charge nœuds + arcs via le proxy /api/graph/* (api/routers/graph.py → fn-adgm-graph),
-// puis les rend avec Cytoscape.js. Le switch de plan filtre les nœuds par subtype.
+// puis les rend avec Cytoscape.js. Le switch de couche filtre les nœuds par subtype,
+// une couche par entrée des Couches 1-7 de la taxonomie GraphRAG Legacy-Modernisation
+// v2.0 (Couche 0 — Méta-fiabilité — n'a pas de vue dédiée, cf. LAYER_SUBTYPES) + Global.
 
-// ── Couleurs par sous-type de nœud ────────────────────────────────────────────
-const STATUS_COLORS = {
-  EXISTING:      '#9e9e9e',
-  IN_TRANSITION: '#fb8c00',
-  TARGET:        '#43a047',
-};
+// ── Couleurs/formes/libellés par sous-type de nœud (taxonomie v2.0, 20 labels Phase-1) ──
+// `subtype` = label.lower() (cf. _generic_node_dto, function_app.py 1A) — un sous-type par
+// label de ALLOWED_NODE_LABELS. `composant` n'a pas de couleur fixe : il encode le 7R
+// (R7_COLORS) comme l'ancien `component`/`program`.
 const R7_COLORS = {
   RETIRE: '#e53935', RETAIN: '#9e9e9e', REHOST: '#4fc3f7',
   REPLATFORM: '#1e88e5', REPURCHASE: '#8e24aa', REFACTOR: '#fb8c00',
   REBUILD: '#43a047', UNQUALIFIED: '#ffffff',
 };
-// Couleurs fixes pour les sous-types non-7R
+// fiabilite (taxonomie v2.0, F.2) — visible en pastille + style pointillé pour
+// SUPPOSÉ/MANQUANT (équivalent du "fantôme" v1, cf. GRAPH_STYLE).
+const FIABILITE_COLORS = {
+  FAIT: '#43a047', 'HYPOTHÈSE': '#1e88e5', 'SUPPOSÉ': '#fb8c00', MANQUANT: '#9e9e9e',
+};
+const FIABILITE_LABELS = {
+  FAIT: 'Fait', 'HYPOTHÈSE': 'Hypothèse', 'SUPPOSÉ': 'Supposé', MANQUANT: 'Manquant',
+};
 const SUBTYPE_COLORS = {
-  domain:       '#1565c0',   // bleu foncé — domaine fonctionnel
-  macrofunction:'#64b5f6',   // bleu clair — macro-fonction
-  dataentity:   '#7b1fa2',   // violet — entité de données
-  component:    '#ffffff',   // blanc — TechnicalNode générique (encode 7R)
-  system:       '#2e7d32',   // vert foncé — système
-  program:      '#ffffff',   // blanc — programme (encode 7R)
+  system:                 '#2e7d32',
+  domaine_fonctionnel:    '#1565c0',
+  fonction:               '#64b5f6',
+  regle_metier:           '#ffb74d',
+  processus_fonctionnel:  '#4db6ac',
+  domaine_technique:      '#5e35b1',
+  composant:              '#ffffff',
+  point_entree:           '#fff176',
+  interface_utilisateur:  '#ba68c8',
+  job_batch:              '#8d6e63',
+  unite_execution:        '#a1887f',
+  procedure_reutilisable: '#90a4ae',
+  structure_partagee:     '#7b1fa2',
+  store_donnees:          '#26a69a',
+  store_echange:          '#42a5f5',
+  table_relationnelle:    '#66bb6a',
+  store_hierarchique:     '#9ccc65',
+  entite_donnees:         '#ab47bc',
+  canal_messagerie:       '#ef5350',
+  zone_incertitude:       '#bdbdbd',
 };
 // Formes Cytoscape par sous-type — différenciation visuelle sans couleur
 const SUBTYPE_SHAPES = {
-  domain:       'ellipse',
-  macrofunction:'roundrectangle',
-  dataentity:   'hexagon',
-  program:      'diamond',
-  component:    'ellipse',
-  system:       'triangle',
+  system:                 'triangle',
+  domaine_fonctionnel:    'ellipse',
+  fonction:               'round-rectangle',
+  regle_metier:           'diamond',
+  processus_fonctionnel:  'hexagon',
+  domaine_technique:      'ellipse',
+  composant:              'ellipse',
+  point_entree:           'vee',
+  interface_utilisateur:  'tag',
+  job_batch:              'rectangle',
+  unite_execution:        'round-rectangle',
+  procedure_reutilisable: 'round-tag',
+  structure_partagee:     'hexagon',
+  store_donnees:          'barrel',
+  store_echange:          'round-diamond',
+  table_relationnelle:    'rectangle',
+  store_hierarchique:     'round-octagon',
+  entite_donnees:         'octagon',
+  canal_messagerie:       'star',
+  zone_incertitude:       'round-pentagon',
 };
 const SUBTYPE_LABELS = {
-  domain:       'Domaine fonctionnel',
-  macrofunction:'Macro-fonction',
-  dataentity:   'Entité de données',
-  program:      'Programme',
-  component:    'Composant technique',
-  system:       'Système',
+  system:                 'Système',
+  domaine_fonctionnel:    'Domaine fonctionnel',
+  fonction:               'Fonction',
+  regle_metier:           'Règle métier',
+  processus_fonctionnel:  'Processus fonctionnel',
+  domaine_technique:      'Domaine technique',
+  composant:              'Composant',
+  point_entree:           "Point d'entrée",
+  interface_utilisateur:  'Interface utilisateur',
+  job_batch:              'Job batch',
+  unite_execution:        "Unité d'exécution",
+  procedure_reutilisable: 'Procédure réutilisable',
+  structure_partagee:     'Structure partagée',
+  store_donnees:          'Store de données',
+  store_echange:          "Store d'échange",
+  table_relationnelle:    'Table relationnelle',
+  store_hierarchique:     'Store hiérarchique',
+  entite_donnees:         'Entité de données',
+  canal_messagerie:       'Canal de messagerie',
+  zone_incertitude:       "Zone d'incertitude",
 };
 
 // ── Layouts par vue ────────────────────────────────────────────────────────────
@@ -48,26 +97,55 @@ const FUNCTIONAL_LAYOUT = { name: 'cose', idealEdgeLength: 220, nodeRepulsion: 8
 const DATA_LAYOUT       = { name: 'cose', idealEdgeLength: 180, nodeRepulsion: 60000, gravity: 0.2, padding: 80, animate: true };
 const GLOBAL_LAYOUT     = { name: 'cose', idealEdgeLength: 250, nodeRepulsion: 90000, gravity: 0.15, padding: 80, animate: true };
 
-const PLAN_LAYOUTS = {
-  functional: FUNCTIONAL_LAYOUT,
-  technical:  TECH_LAYOUT,
-  data:       DATA_LAYOUT,
-  global:     GLOBAL_LAYOUT,
+const LAYER_LAYOUTS = {
+  fonctionnel:        FUNCTIONAL_LAYOUT,
+  applicatif:         TECH_LAYOUT,
+  donnees:            DATA_LAYOUT,
+  integration:        GLOBAL_LAYOUT,
+  architecture_cible: GLOBAL_LAYOUT,
+  risque_qualite:     GLOBAL_LAYOUT,
+  modernisation:      DATA_LAYOUT,
+  global:             GLOBAL_LAYOUT,
 };
 
-// ── Filtrage par vue : quels subtypes sont visibles ───────────────────────────
-const PLAN_SUBTYPES = {
-  functional: new Set(['domain', 'macrofunction']),
-  technical:  new Set(['program', 'component', 'system']),
-  data:       new Set(['dataentity']),
-  global:     null,  // null = tout afficher
+// ── Filtrage par vue : une vue par couche de la taxonomie GraphRAG Legacy-
+// Modernisation v2.0 (glossaire-taxonomie-graphrag-legacy-modernisation.md).
+// La Couche 0 (Méta-fiabilité) n'a pas de vue dédiée — c'est une propriété
+// (`fiabilite`) sur tout nœud/relation, déjà visible via la Legend.
+// Couches 4 (Intégration), 5 (Architecture cible/DDD) et 6 (Risque & Qualité)
+// n'ont pas (encore) de nœuds dédiés dans le schéma Phase-1 — tableaux vides,
+// gérés par un état vide explicite (cf. LAYER_EMPTY_INFO).
+const LAYER_SUBTYPES = {
+  fonctionnel:        ['domaine_fonctionnel', 'fonction', 'regle_metier', 'processus_fonctionnel'],
+  applicatif:         ['composant', 'domaine_technique', 'point_entree', 'interface_utilisateur', 'job_batch', 'unite_execution', 'procedure_reutilisable'],
+  donnees:            ['structure_partagee', 'store_donnees', 'store_echange', 'table_relationnelle', 'store_hierarchique', 'entite_donnees', 'canal_messagerie'],
+  integration:        [],
+  architecture_cible: [],
+  risque_qualite:     [],
+  modernisation:      ['zone_incertitude'],
+  global:             ['system', 'zone_incertitude'],
+};
+
+// ── Infos affichées pour les couches sans nœuds dédiés (Couches 4/5/6) ────
+const LAYER_EMPTY_INFO = {
+  integration: {
+    title: "Couche Intégration — pas de nœuds dédiés",
+    body: "Les flux et dépendances entre composants sont modélisés comme des relations (Flux, Dépendance), pas comme des nœuds. Pour les explorer, double-cliquez sur un composant en vue Applicatif (mode exploration).",
+  },
+  architecture_cible: {
+    title: "Architecture cible (DDD) — non encore implémenté",
+    body: "Les Bounded Contexts et la cartographie cible (architecture DDD) font partie d'une phase future de la feuille de route ADG-M.",
+  },
+  risque_qualite: {
+    title: "Risque & Qualité",
+    body: "Les indicateurs (SPOF, communautés, criticité) sont portés comme propriétés des composants plutôt que comme nœuds dédiés.",
+  },
 };
 
 const R7_LABELS = {
   RETIRE: 'Retire', RETAIN: 'Retain', REHOST: 'Rehost', REPLATFORM: 'Replatform',
   REPURCHASE: 'Repurchase', REFACTOR: 'Refactor', REBUILD: 'Rebuild', UNQUALIFIED: 'Non qualifié',
 };
-const STATUS_LABELS = { EXISTING: 'Existant', IN_TRANSITION: 'En transition', TARGET: 'Cible' };
 
 // Feuille de style — la première section porte les styles dérivés (couleur de fond
 // par statut/7R, bordure et halo de texte par défaut) ; la seconde est graphStylesheet
@@ -89,12 +167,16 @@ const GRAPH_STYLE = [
   } },
   // ── graphStylesheet — SDD §6, verbatim ──
   { selector: 'node', style: { 'label': 'data(label)', 'font-size': 10, 'text-valign': 'center' } },
-  { selector: 'node[?isSPOF]', style: { 'border-width': 3, 'border-color': '#e53935' } },
-  { selector: 'node[?isGhost]', style: { 'border-style': 'dashed', 'background-opacity': 0.4 } },
-  { selector: "edge[criticality = 'CRITICAL']", style: { 'line-color': '#e53935', 'width': 3 } },
+  { selector: 'node[?isSpof]', style: { 'border-width': 3, 'border-color': '#e53935' } },
+  // fiabilite SUPPOSÉ/MANQUANT — donnée non confirmée par le corpus (taxonomie v2.0,
+  // F.2), équivalent du "fantôme" v1 : bordure pointillée + opacité réduite.
+  { selector: "node[fiabilite = 'SUPPOSÉ'], node[fiabilite = 'MANQUANT']",
+    style: { 'border-style': 'dashed', 'background-opacity': 0.5 } },
+  { selector: "edge[fiabilite = 'SUPPOSÉ'], edge[fiabilite = 'MANQUANT']",
+    style: { 'line-style': 'dashed', 'opacity': 0.5 } },
   // ── Halo de cluster (ajout T15 UI, hors SDD — cf. ClusterToggle plus bas) :
   // overlay-* ne touche ni au remplissage (7R/statut) ni à la bordure (réservée
-  // au badge isSPOF) — les encodages se superposent sans collision visuelle.
+  // au badge isSpof) — les encodages se superposent sans collision visuelle.
   // `clusterColor` n'existe dans data() que si l'utilisateur active le
   // surlignage des appartements candidats : sélecteur sans effet le reste du temps.
   { selector: 'node[clusterColor]', style: {
@@ -113,20 +195,24 @@ const GRAPH_STYLE = [
   } },
 ];
 
-// ── Switch de plan (4 vues) ────────────────────────────────────────────────────
-const PLAN_OPTIONS = [
-  { key: 'functional', label: 'Fonctionnel', title: 'Domaines fonctionnels et macro-fonctions' },
-  { key: 'technical',  label: 'Technique',   title: 'Programmes, systèmes et composants techniques' },
-  { key: 'data',       label: 'Données',     title: 'Entités de données et leurs dépendances' },
-  { key: 'global',     label: 'Global',      title: 'Vue complète — tous les nœuds et arcs' },
+// ── Switch de couche (taxonomie GraphRAG Legacy-Modernisation v2.0, Couches 1-7 + Global) ──
+const LAYER_OPTIONS = [
+  { key: 'fonctionnel',        label: 'Fonctionnel',        title: "Couche 1 — Domaines, fonctions, règles métier et processus fonctionnels" },
+  { key: 'applicatif',         label: 'Applicatif',         title: "Couche 2 — Composants, jobs batch, interfaces, points d'entrée" },
+  { key: 'donnees',            label: 'Données',            title: "Couche 3 — Stores de données, tables, structures partagées" },
+  { key: 'integration',        label: 'Intégration',        title: "Couche 4 — Flux et dépendances entre composants (relations, pas de nœuds dédiés)" },
+  { key: 'architecture_cible', label: 'Architecture cible', title: "Couche 5 — Architecture cible DDD (non implémenté)" },
+  { key: 'risque_qualite',     label: 'Risque & Qualité',   title: "Couche 6 — SPOF, communautés, criticité (propriétés des composants)" },
+  { key: 'modernisation',      label: 'Modernisation',      title: "Couche 7 — Zones d'incertitude et trajectoire de modernisation" },
+  { key: 'global',             label: 'Global',             title: 'Vue complète — tous les nœuds et arcs' },
 ];
 
-const PlanSwitch = ({ plan, onChange }) => (
+const LayerSwitch = ({ plan, onChange }) => (
   <div style={{
-    display: 'flex', gap: 2, padding: 3,
+    display: 'flex', gap: 2, padding: 3, flexWrap: 'wrap',
     background: T.panel, borderRadius: T.radiusPill, border: `1px solid ${T.border}`,
   }}>
-    {PLAN_OPTIONS.map(({ key, label, title }) => {
+    {LAYER_OPTIONS.map(({ key, label, title }) => {
       const active = plan === key;
       return (
         <button
@@ -162,40 +248,40 @@ const dot = (bg, extra = {}) => (
   <span style={{ width: 11, height: 11, borderRadius: '50%', flexShrink: 0, background: bg, border: '1px solid #e1ded7', ...extra }} />
 );
 
+// Sous-types affichés dans la légende par couche — sous-ensemble de LAYER_SUBTYPES,
+// `composant` est traité à part (encode 7R, cf. ci-dessous) plutôt que par sa couleur fixe.
+const LEGEND_SUBTYPES = {
+  fonctionnel:        LAYER_SUBTYPES.fonctionnel,
+  applicatif:         LAYER_SUBTYPES.applicatif.filter(s => s !== 'composant'),
+  donnees:            LAYER_SUBTYPES.donnees,
+  integration:        [],
+  architecture_cible: [],
+  risque_qualite:     [],
+  modernisation:      LAYER_SUBTYPES.modernisation,
+  global:             LAYER_SUBTYPES.global,
+};
+
 const Legend = ({ plan }) => {
   const sep = <span style={{ width: 1, height: 14, background: T.border, flexShrink: 0 }} />;
   return (
     <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 12, fontFamily: T.font }}>
-      {plan === 'functional' && (
+      {LEGEND_SUBTYPES[plan].map(s => (
+        <Swatch key={s} shape={dot(SUBTYPE_COLORS[s])}>{SUBTYPE_LABELS[s]}</Swatch>
+      ))}
+      {plan === 'applicatif' && (
         <>
-          <Swatch shape={dot(SUBTYPE_COLORS.domain)}       >Domaine fonctionnel</Swatch>
-          <Swatch shape={dot(SUBTYPE_COLORS.macrofunction)}>Macro-fonction</Swatch>
-        </>
-      )}
-      {plan === 'technical' && (
-        <>
+          {sep}
           {Object.keys(R7_COLORS).map(k => (
             <Swatch key={k} shape={dot(R7_COLORS[k])}>{R7_LABELS[k]}</Swatch>
           ))}
           {sep}
           <Swatch shape={dot('transparent', { border: '2.5px solid #e53935' })}>⚠ SPOF</Swatch>
-          <Swatch shape={dot(T.panel, { borderStyle: 'dashed', borderColor: T.muted, opacity: .7 })}>Fantôme</Swatch>
         </>
       )}
-      {plan === 'data' && (
-        <Swatch shape={dot(SUBTYPE_COLORS.dataentity)}>Entité de données</Swatch>
-      )}
-      {plan === 'global' && (
-        <>
-          <Swatch shape={dot(SUBTYPE_COLORS.domain)}       >Domaine</Swatch>
-          <Swatch shape={dot(SUBTYPE_COLORS.macrofunction)}>Macro-fonction</Swatch>
-          <Swatch shape={dot(SUBTYPE_COLORS.dataentity)}   >Donnée</Swatch>
-          {sep}
-          {Object.keys(R7_COLORS).filter(k => k !== 'UNQUALIFIED').map(k => (
-            <Swatch key={k} shape={dot(R7_COLORS[k])}>{R7_LABELS[k]}</Swatch>
-          ))}
-        </>
-      )}
+      {sep}
+      {Object.keys(FIABILITE_COLORS).map(k => (
+        <Swatch key={k} shape={dot(FIABILITE_COLORS[k])}>{FIABILITE_LABELS[k]}</Swatch>
+      ))}
     </div>
   );
 };
@@ -305,24 +391,23 @@ const _csvCell = (value) => {
   return /[",\r\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
 };
 
-// Colonnes du CSV — sous-ensemble de TechnicalNode utile au triage (taille,
-// criticité, SPOF, propriétaire, conformité), pas le DTO brut complet.
+// Colonnes du CSV — sous-ensemble de :Composant utile au triage (technologie,
+// criticité, SPOF, fiabilite), pas le DTO brut complet.
 const UNQUALIFIED_CSV_COLUMNS = [
-  ['id',                 n => n.id],
-  ['componentName',      n => n.componentName],
-  ['technology',         n => n.technology],
-  ['linesOfCode',        n => n.linesOfCode],
-  ['callFrequency',      n => n.callFrequency],
-  ['criticalityScore',   n => n.criticalityScore],
-  ['betweenness',        n => (typeof n.betweenness === 'number' ? n.betweenness.toFixed(3) : n.betweenness)],
-  ['isSPOF',             n => n.isSPOF],
-  ['docCoveragePercent', n => n.docCoveragePercent],
-  ['knowledgeOwner',     n => n.knowledgeOwner],
-  ['regulatoryTags',     n => n.regulatoryTags],
+  ['id',                n => n.id],
+  ['nom',               n => n.nom],
+  ['technologie',       n => n.technologie],
+  ['typeExecution',     n => n.typeExecution],
+  ['criticiteScore',    n => n.criticiteScore],
+  ['betweennessScore',  n => (typeof n.betweennessScore === 'number' ? n.betweennessScore.toFixed(3) : n.betweennessScore)],
+  ['isSpof',            n => n.isSpof],
+  ['fanIn',             n => n.fanIn],
+  ['fanOut',            n => n.fanOut],
+  ['fiabilite',         n => n.fiabilite],
 ];
 
 const exportUnqualifiedCsv = (nodes) => {
-  const rows = nodes.filter(n => n.type === 'technical' && n.candidate7R === 'UNQUALIFIED');
+  const rows = nodes.filter(n => n.label === 'Composant' && n.candidate7R === 'UNQUALIFIED');
   const lines = [
     UNQUALIFIED_CSV_COLUMNS.map(([key]) => key).join(','),
     ...rows.map(n => UNQUALIFIED_CSV_COLUMNS.map(([, get]) => _csvCell(get(n))).join(',')),
@@ -533,7 +618,7 @@ const ExtractButton = ({ job, onStart, disabled }) => {
 // donc seuls les exports (100% client, sans dépendance backend) sont proposés ici.
 const GraphActions = ({ clusters, nodes }) => {
   const unqualifiedCount = React.useMemo(
-    () => nodes.filter(n => n.type === 'technical' && n.candidate7R === 'UNQUALIFIED').length,
+    () => nodes.filter(n => n.label === 'Composant' && n.candidate7R === 'UNQUALIFIED').length,
     [nodes]
   );
   return (
@@ -584,7 +669,7 @@ const DetailRow = ({ label, value }) => {
   );
 };
 
-const critStyle = (level) => level === 'CRITICAL' ? { color: T.danger, fontWeight: 700 } : { color: T.muted, fontWeight: 500 };
+const fiabiliteStyle = (fiabilite) => ({ color: FIABILITE_COLORS[fiabilite] ?? T.muted, fontWeight: 600 });
 
 const ArcSection = ({ title, arcs, nodesById, endField }) => {
   if (!arcs?.length) return null;
@@ -594,11 +679,11 @@ const ArcSection = ({ title, arcs, nodesById, endField }) => {
       <div style={{ display: 'flex', flexDirection: 'column', gap: 5 }}>
         {arcs.map(a => {
           const other = nodesById.get(a[endField]);
-          const label = other ? (other.type === 'technical' ? other.componentName : other.domain) : a[endField];
+          const label = other ? (other.nom ?? other.id) : a[endField];
           return (
-            <div key={a.id} title={a.arcType} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10, fontSize: 12, padding: '7px 10px', background: T.panel, borderRadius: T.radiusSm }}>
+            <div key={a.id} title={a.type} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10, fontSize: 12, padding: '7px 10px', background: T.panel, borderRadius: T.radiusSm }}>
               <span style={{ color: T.ink, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', minWidth: 0 }}>{label}</span>
-              <span style={{ flexShrink: 0, fontSize: 10.5, ...critStyle(a.criticality) }}>{a.criticality}</span>
+              <span style={{ flexShrink: 0, fontSize: 10.5, ...fiabiliteStyle(a.fiabilite) }}>{FIABILITE_LABELS[a.fiabilite] ?? a.fiabilite}</span>
             </div>
           );
         })}
@@ -621,9 +706,9 @@ const ImpactSection = ({ impact }) => {
         {impact.downstreamImpacted.map(c => (
           <div key={c.id} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10, fontSize: 12 }}>
             <span style={{ color: T.ink, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', minWidth: 0 }}>
-              <span style={{ color: '#b91c1c', fontWeight: 700 }}>+{c.distance}</span> {c.componentName}
+              <span style={{ color: '#b91c1c', fontWeight: 700 }}>+{c.distance}</span> {c.nom}
             </span>
-            <span style={{ flexShrink: 0, fontSize: 10.5, ...critStyle(c.criticality) }}>{c.criticality}</span>
+            <span style={{ flexShrink: 0, fontSize: 10.5, ...fiabiliteStyle(c.fiabilite) }}>{FIABILITE_LABELS[c.fiabilite] ?? c.fiabilite}</span>
           </div>
         ))}
       </div>
@@ -711,8 +796,10 @@ const NodeDetailPanel = ({ nodeId, apiFetch, nodesById, onClose, onQualified }) 
         if (cancelled) return;
         setDetail(data);
         // SDD : "pour un nœud SPOF, retourne la liste des composants impactés en cascade"
-        // — on ne sollicite cet endpoint que pour les nœuds réellement concernés.
-        if (data?.node?.isSPOF) {
+        // — on ne sollicite cet endpoint que pour les nœuds réellement concernés
+        // (1B : isSpof n'est porté que par :Composant et :Store_Donnees, mais
+        // /nodes/{id}/impact ne traverse [:APPELLE] qu'à partir d'un :Composant).
+        if (data?.node?.isSpof) {
           const impRes = await apiFetch(`${API_BASE}/graph/nodes/${nodeId}/impact`);
           if (impRes.ok) { const impData = await impRes.json(); if (!cancelled) setImpact(impData); }
         }
@@ -726,7 +813,7 @@ const NodeDetailPanel = ({ nodeId, apiFetch, nodesById, onClose, onQualified }) 
   }, [nodeId, apiFetch]);
 
   const node = detail?.node;
-  const isTechnical = node?.type === 'technical';
+  const isComposant = node?.label === 'Composant';
 
   const handleAnnotationSuccess = React.useCallback((result) => {
     setDetail(prev => prev ? { ...prev, node: { ...prev.node, candidate7R: result.candidate7R, updatedAt: result.updatedAt } } : prev);
@@ -754,46 +841,37 @@ const NodeDetailPanel = ({ nodeId, apiFetch, nodesById, onClose, onQualified }) 
         {!loading && !error && node && (
           <>
             <div style={{ display: 'flex', alignItems: 'flex-start', gap: 7, marginBottom: 9 }}>
-              {node.isSPOF && <span title="Single Point of Failure" style={{ color: T.danger, fontWeight: 700, fontSize: 14, lineHeight: '22px' }}>⚠</span>}
-              <h3 style={{ margin: 0, fontSize: 15.5, fontWeight: 700, color: T.ink, lineHeight: 1.35, wordBreak: 'break-word' }}>{isTechnical ? node.componentName : node.domain}</h3>
+              {node.isSpof && <span title="Single Point of Failure" style={{ color: T.danger, fontWeight: 700, fontSize: 14, lineHeight: '22px' }}>⚠</span>}
+              <h3 style={{ margin: 0, fontSize: 15.5, fontWeight: 700, color: T.ink, lineHeight: 1.35, wordBreak: 'break-word' }}>{node.nom ?? node.id}</h3>
             </div>
             <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginBottom: 14 }}>
-              <Pill>{isTechnical ? 'Nœud technique' : 'Nœud fonctionnel'}</Pill>
-              {node.isSPOF && <Pill color={T.danger} bg="#fef2f2" border="#fecaca">⚠ SPOF</Pill>}
-              {node.isGhost && <Pill border={T.borderStrong}>Fantôme</Pill>}
-              {isTechnical && <Pill color={T.ink} bg={T.white} border={T.borderStrong}>{dot(R7_COLORS[node.candidate7R])} {R7_LABELS[node.candidate7R]}</Pill>}
-              {!isTechnical && <Pill color={T.ink} bg={T.white} border={T.borderStrong}>{dot(STATUS_COLORS[node.modernizationStatus])} {STATUS_LABELS[node.modernizationStatus]}</Pill>}
+              <Pill>{SUBTYPE_LABELS[node.subtype] ?? node.label}</Pill>
+              {node.isSpof && <Pill color={T.danger} bg="#fef2f2" border="#fecaca">⚠ SPOF</Pill>}
+              <Pill color={T.ink} bg={T.white} border={T.borderStrong}>{dot(FIABILITE_COLORS[node.fiabilite])} {FIABILITE_LABELS[node.fiabilite] ?? node.fiabilite}</Pill>
+              {isComposant && <Pill color={T.ink} bg={T.white} border={T.borderStrong}>{dot(R7_COLORS[node.candidate7R])} {R7_LABELS[node.candidate7R]}</Pill>}
             </div>
             <SectionTitle>Propriétés</SectionTitle>
-            {isTechnical ? (
-              <>
-                <DetailRow label="Technologie" value={node.technology} />
-                <DetailRow label="Lignes de code" value={node.linesOfCode?.toLocaleString('fr-FR')} />
-                <DetailRow label="Fréquence d'appel" value={node.callFrequency} />
-                <DetailRow label="Propriétaire connaissance" value={node.knowledgeOwner} />
-                <DetailRow label="Réglementaire" value={node.regulatoryTags?.length ? <span style={{ display: 'inline-flex', flexWrap: 'wrap', gap: 4, justifyContent: 'flex-end' }}>{node.regulatoryTags.map(t => <Pill key={t} color={T.azureInk} bg={T.azureSoft} border={T.azureBorder}>{t}</Pill>)}</span> : null} />
-                <DetailRow label="Cluster" value={node.clusterId} />
-              </>
-            ) : (
-              <>
-                <DetailRow label="Sous-domaine" value={node.subdomain} />
-                <DetailRow label="Processus" value={node.processes?.join(' · ')} />
-                <DetailRow label="Objets métier partagés" value={node.sharedBusinessObjects?.join(' · ')} />
-              </>
-            )}
-            <DetailRow label="Couverture documentaire" value={node.docCoveragePercent != null ? `${node.docCoveragePercent}%` : null} />
+            <DetailRow label="Description" value={node.description} />
+            <DetailRow label="Technologie" value={node.technologie} />
+            <DetailRow label="Type d'exécution" value={node.typeExecution} />
+            <DetailRow label="Mode d'accès" value={node.modeAcces} />
+            <DetailRow label="RGPD" value={node.regpd === true ? 'Oui' : node.regpd === false ? 'Non' : null} />
+            <DetailRow label="Niveau d'urgence" value={node.niveauUrgence} />
+            <DetailRow label="Source" value={node.source} />
             <div style={{ marginTop: 16 }}>
               <SectionTitle>Métriques</SectionTitle>
               <DetailRow label="Degré entrant" value={detail.metrics?.inDegree} />
               <DetailRow label="Degré sortant" value={detail.metrics?.outDegree} />
-              <DetailRow label="Arcs critiques entrants" value={detail.metrics?.criticalArcsIn} />
-              {isTechnical && <DetailRow label="Score de criticité" value={node.criticalityScore} />}
-              {isTechnical && <DetailRow label="Centralité (betweenness)" value={node.betweenness?.toFixed(3)} />}
+              <DetailRow label="Score de criticité" value={node.criticiteScore} />
+              <DetailRow label="Centralité (betweenness)" value={node.betweennessScore?.toFixed(3)} />
+              <DetailRow label="Fan-in" value={node.fanIn} />
+              <DetailRow label="Fan-out" value={node.fanOut} />
+              <DetailRow label="Communauté" value={node.communityId} />
             </div>
             <ImpactSection impact={impact} />
             <ArcSection title="Arcs entrants" arcs={detail.incomingArcs} nodesById={nodesById} endField="sourceNodeId" />
             <ArcSection title="Arcs sortants" arcs={detail.outgoingArcs} nodesById={nodesById} endField="targetNodeId" />
-            {isTechnical && <AnnotationForm node={node} apiFetch={apiFetch} onSuccess={handleAnnotationSuccess} />}
+            {isComposant && <AnnotationForm node={node} apiFetch={apiFetch} onSuccess={handleAnnotationSuccess} />}
           </>
         )}
       </div>
@@ -803,7 +881,7 @@ const NodeDetailPanel = ({ nodeId, apiFetch, nodesById, onClose, onQualified }) 
 
 // ── Page principale ────────────────────────────────────────────
 const GraphPage = ({ apiFetch }) => {
-  const [plan,         setPlan]         = React.useState('functional');
+  const [plan,         setPlan]         = React.useState('fonctionnel');
   const [nodes,        setNodes]        = React.useState([]);
   const [arcs,         setArcs]         = React.useState([]);
   const [loading,      setLoading]      = React.useState(true);
@@ -829,7 +907,7 @@ const GraphPage = ({ apiFetch }) => {
   // Refs pour accéder aux données fraîches depuis les handlers Cytoscape (closures statiques)
   const nodesRef      = React.useRef([]);
   const arcsRef       = React.useRef([]);
-  const planRef       = React.useRef('functional');
+  const planRef       = React.useRef('fonctionnel');
   const apiFetchRef   = React.useRef(apiFetch);
   React.useEffect(() => { nodesRef.current    = nodes;     }, [nodes]);
   React.useEffect(() => { arcsRef.current     = arcs;      }, [arcs]);
@@ -956,9 +1034,8 @@ const GraphPage = ({ apiFetch }) => {
   }, [apiFetch, refreshKey]);
 
   // ── Index nœud → cluster (T15 UI) ─────────────────────────────
-  // `clusterId` est documenté sur TechnicalNode (SDD) mais jamais peuplé par le
-  // backend (Louvain écrit `communityId`, pas `clusterId` — vérifié sur les 24
-  // nœuds techniques live, tous `clusterId: null`). On dérive donc l'appartenance
+  // Les nœuds portent `communityId` (Louvain, 1B), mais l'identifiant de cluster
+  // exposé par /graph/clusters est `clusterId` — on dérive donc l'appartenance
   // côté client en inversant les `nodeIds[]` de /graph/clusters.
   const nodeClusterIndex = React.useMemo(() => {
     const map = new Map();
@@ -971,8 +1048,7 @@ const GraphPage = ({ apiFetch }) => {
 
   // ── Filtrage par plan actif (ou mode exploration) → éléments Cytoscape + layout ─
   const { elements, layout, nodeCount, arcCount } = React.useMemo(() => {
-    const subtypeFilter = PLAN_SUBTYPES[plan];
-    const planSubtypes  = subtypeFilter;  // null = global
+    const planSubtypes = plan === 'global' ? null : LAYER_SUBTYPES[plan];
     const EXPLORATION_LAYOUT = { name: 'cose', idealEdgeLength: 200, nodeRepulsion: 70000, gravity: 0.2, padding: 80, animate: true };
 
     // ── Mode exploration : données venant du bundle /neighbors ──────────────
@@ -981,36 +1057,35 @@ const GraphPage = ({ apiFetch }) => {
       const visibleIds   = new Set(visibleNodes.map(n => n.id));
 
       const nodeElements = visibleNodes.map(n => {
-        const isTechnical  = n.type === 'technical';
-        const color        = isTechnical
+        const isComposant  = n.label === 'Composant';
+        const color        = isComposant
           ? (R7_COLORS[n.candidate7R] ?? R7_COLORS.UNQUALIFIED)
-          : (SUBTYPE_COLORS[n.subtype] ?? SUBTYPE_COLORS.domain);
-        const baseLabel    = isTechnical ? (n.componentName ?? n.id) : (n.domain ?? n.id);
-        const isOutOfPlan  = planSubtypes !== null && !planSubtypes.has(n.subtype);
+          : (SUBTYPE_COLORS[n.subtype] ?? '#9e9e9e');
+        const baseLabel    = n.nom ?? n.id;
+        const isOutOfPlan  = planSubtypes !== null && !planSubtypes.includes(n.subtype);
         return {
           data: {
             id: n.id,
-            label: n.isSPOF ? `⚠ ${baseLabel}` : baseLabel,
+            label: n.isSpof ? `⚠ ${baseLabel}` : baseLabel,
             color, shape: SUBTYPE_SHAPES[n.subtype] ?? 'ellipse',
-            isSPOF: !!n.isSPOF, isGhost: !!n.isGhost,
+            isSpof: !!n.isSpof, fiabilite: n.fiabilite,
             isOutOfPlan: isOutOfPlan || undefined,
-            nodeType: n.type, subtype: n.subtype,
+            nodeType: n.plane, subtype: n.subtype,
           },
         };
       });
 
-      // Multi-arêtes possibles (ex. DEPENDS_ON + HAS_MACROFUNCTION sur même paire)
-      // → id unique par (source, target, relType)
+      // Multi-arêtes possibles (ex. plusieurs relations sur la même paire de nœuds)
+      // → id unique par (source, target, type)
       const edgeElements = explorationBundle.edgeList
         .filter(e => visibleIds.has(e.sourceNodeId) && visibleIds.has(e.targetNodeId))
         .map(e => ({
           data: {
-            id:         `${e.sourceNodeId}|${e.targetNodeId}|${e.relType}`,
+            id:         `${e.sourceNodeId}|${e.targetNodeId}|${e.type}`,
             source:     e.sourceNodeId,
             target:     e.targetNodeId,
-            criticality: e.criticality,
-            arcType:    e.arcType,
-            relLabel:   e.relType,  // affiché sur l'arête en mode exploration
+            fiabilite:  e.fiabilite,
+            relLabel:   e.type,  // affiché sur l'arête en mode exploration
           },
         }));
 
@@ -1025,24 +1100,24 @@ const GraphPage = ({ apiFetch }) => {
     // ── Vue plan normale ────────────────────────────────────────────────────
     const visibleNodes = planSubtypes === null
       ? nodes
-      : nodes.filter(n => planSubtypes.has(n.subtype));
+      : nodes.filter(n => planSubtypes.includes(n.subtype));
     const visibleIds   = new Set(visibleNodes.map(n => n.id));
     const visibleArcs  = arcs.filter(a => visibleIds.has(a.sourceNodeId) && visibleIds.has(a.targetNodeId));
 
     const nodeElements = visibleNodes.map(n => {
-      const isTechnical = n.type === 'technical';
-      const color       = isTechnical
+      const isComposant = n.label === 'Composant';
+      const color       = isComposant
         ? (R7_COLORS[n.candidate7R] ?? R7_COLORS.UNQUALIFIED)
-        : (SUBTYPE_COLORS[n.subtype] ?? SUBTYPE_COLORS.domain);
-      const baseLabel   = isTechnical ? (n.componentName ?? n.id) : (n.domain ?? n.id);
+        : (SUBTYPE_COLORS[n.subtype] ?? '#9e9e9e');
+      const baseLabel   = n.nom ?? n.id;
       const clusterEntry = showClusters ? nodeClusterIndex.get(n.id) : undefined;
       return {
         data: {
           id: n.id,
-          label: n.isSPOF ? `⚠ ${baseLabel}` : baseLabel,
+          label: n.isSpof ? `⚠ ${baseLabel}` : baseLabel,
           color, shape: SUBTYPE_SHAPES[n.subtype] ?? 'ellipse',
-          isSPOF: !!n.isSPOF, isGhost: !!n.isGhost,
-          nodeType: n.type, subtype: n.subtype,
+          isSpof: !!n.isSpof, fiabilite: n.fiabilite,
+          nodeType: n.plane, subtype: n.subtype,
           ...(clusterEntry ? { clusterColor: clusterEntry.color } : {}),
         },
       };
@@ -1051,14 +1126,14 @@ const GraphPage = ({ apiFetch }) => {
     const edgeElements = visibleArcs.map(a => ({
       data: {
         id: a.id, source: a.sourceNodeId, target: a.targetNodeId,
-        criticality: a.criticality, arcType: a.arcType,
+        fiabilite: a.fiabilite,
         // pas de relLabel en vue plan → labels absents du style
       },
     }));
 
     return {
       elements:  [...nodeElements, ...edgeElements],
-      layout:    PLAN_LAYOUTS[plan],
+      layout:    LAYER_LAYOUTS[plan],
       nodeCount: visibleNodes.length,
       arcCount:  visibleArcs.length,
     };
@@ -1100,12 +1175,12 @@ const GraphPage = ({ apiFetch }) => {
         setExplorationBundle(prev => {
           const nodeMap = prev ? new Map(prev.nodeMap) : new Map();
           const edgeList = prev ? [...prev.edgeList] : [];
-          const seenKeys = new Set(edgeList.map(e => `${e.sourceNodeId}|${e.targetNodeId}|${e.relType}`));
+          const seenKeys = new Set(edgeList.map(e => `${e.sourceNodeId}|${e.targetNodeId}|${e.type}`));
 
           nodeMap.set(data.center.id, data.center);
           data.neighbors.forEach(n => nodeMap.set(n.id, n));
           data.edges.forEach(e => {
-            const k = `${e.sourceNodeId}|${e.targetNodeId}|${e.relType}`;
+            const k = `${e.sourceNodeId}|${e.targetNodeId}|${e.type}`;
             if (!seenKeys.has(k)) { seenKeys.add(k); edgeList.push(e); }
           });
           return { nodeMap, edgeList };
@@ -1163,8 +1238,8 @@ const GraphPage = ({ apiFetch }) => {
   // ── Panneau de détail (F1.4) ──────────────────────────────────
   const nodesById = React.useMemo(() => new Map(nodes.map(n => [n.id, n])), [nodes]);
 
-  // Un nœud sélectionné peut disparaître du plan actif au changement de plan
-  // (ex. un nœud technique sélectionné en vue "Technique" n'existe pas en "Fonctionnel")
+  // Un nœud sélectionné peut disparaître de la couche active au changement de couche
+  // (ex. un composant sélectionné en vue "Applicatif" n'existe pas en "Fonctionnel")
   // — fermer le panneau évite d'afficher le détail d'un nœud qui n'est plus visible.
   React.useEffect(() => { setSelectedId(null); }, [plan]);
 
@@ -1186,16 +1261,19 @@ const GraphPage = ({ apiFetch }) => {
     if (members.length > 0) cy.fit(members, 80);
   }, []);
 
-  // Les clusters Louvain ne concernent que les TechnicalNode — désactiver hors vue Technique/Global.
+  // Les clusters Louvain (1B) couvrent la projection structurelle [Composant, Structure_Partagee,
+  // Store_Donnees, Store_Echange, Table_Relationnelle, Store_Hierarchique, Canal_Messagerie] —
+  // c'est-à-dire les couches Applicatif et Données. Désactiver hors vue Applicatif/Données/Global.
+  const CLUSTER_PLANES = ['applicatif', 'donnees', 'global'];
   React.useEffect(() => {
-    if (plan !== 'technical' && plan !== 'global') setShowClusters(false);
+    if (!CLUSTER_PLANES.includes(plan)) setShowClusters(false);
     setExploredIds(null);        // Changement de plan → sortir du mode exploration
     setExplorationBundle(null);
   }, [plan]);
 
-  const clusterToggleDisabled = (plan !== 'technical' && plan !== 'global') || clusters.length === 0;
-  const clusterToggleTitle = (plan !== 'technical' && plan !== 'global')
-    ? 'Disponible sur les vues Technique et Global — les clusters ne regroupent que des composants techniques'
+  const clusterToggleDisabled = !CLUSTER_PLANES.includes(plan) || clusters.length === 0;
+  const clusterToggleTitle = !CLUSTER_PLANES.includes(plan)
+    ? 'Disponible sur les vues Applicatif, Données et Global — les clusters regroupent des composants et stores de données'
     : clusters.length === 0
       ? "Aucun appartement candidat détecté (cohésion > 0,7 et couplage externe < 0,3) sur ce graphe"
       : 'Surligner les appartements candidats détectés par le clustering Louvain';
@@ -1209,7 +1287,7 @@ const GraphPage = ({ apiFetch }) => {
         borderBottom: `1px solid ${T.border}`, background: T.white, fontFamily: T.font,
       }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 16, flexWrap: 'wrap' }}>
-          <PlanSwitch plan={plan} onChange={setPlan} />
+          <LayerSwitch plan={plan} onChange={setPlan} />
           <ClusterToggle
             active={showClusters}
             count={clusters.length}
@@ -1328,7 +1406,7 @@ const GraphPage = ({ apiFetch }) => {
           {!loading && !error && elements.length === 0 && (
             <div style={{
               position: 'absolute', inset: 0, display: 'flex', flexDirection: 'column',
-              alignItems: 'center', justifyContent: 'center', gap: 8,
+              alignItems: 'center', justifyContent: 'center', gap: 8, padding: 24,
               fontFamily: T.font,
             }}>
               {nodes.length === 0 ? (
@@ -1341,9 +1419,33 @@ const GraphPage = ({ apiFetch }) => {
                     {' '}<strong>Construire le graphe ADG-M</strong> pour extraire les entités.
                   </span>
                 </>
+              ) : LAYER_EMPTY_INFO[plan] ? (
+                <>
+                  <span style={{ fontSize: 13, color: T.ink, fontWeight: 500, textAlign: 'center' }}>
+                    {LAYER_EMPTY_INFO[plan].title}
+                  </span>
+                  <span style={{ fontSize: 12, color: T.muted, maxWidth: 380, textAlign: 'center', lineHeight: 1.6 }}>
+                    {LAYER_EMPTY_INFO[plan].body}
+                  </span>
+                  {plan === 'risque_qualite' && (() => {
+                    const composants = nodes.filter(n => n.label === 'Composant');
+                    const spofCount = composants.filter(n => n.isSpof).length;
+                    const communityIds = new Set(composants.map(n => n.communityId).filter(id => id !== null && id !== undefined));
+                    return (
+                      <div style={{ display: 'flex', gap: 18, marginTop: 6 }}>
+                        <span style={{ fontSize: 12.5, color: T.sub }}>
+                          <strong style={{ color: T.ink }}>{spofCount}</strong> SPOF
+                        </span>
+                        <span style={{ fontSize: 12.5, color: T.sub }}>
+                          <strong style={{ color: T.ink }}>{communityIds.size}</strong> communauté{communityIds.size > 1 ? 's' : ''} (Louvain)
+                        </span>
+                      </div>
+                    );
+                  })()}
+                </>
               ) : (
                 <span style={{ fontSize: 13, color: T.muted }}>
-                  Aucun nœud à afficher pour ce plan.
+                  Aucun nœud à afficher pour cette couche.
                 </span>
               )}
             </div>
@@ -1366,13 +1468,12 @@ const GraphPage = ({ apiFetch }) => {
       {tooltip && (() => {
         const n = nodesById.get(tooltip.nodeId);
         if (!n) return null;
-        const isTechnical = n.type === 'technical';
+        const isComposant = n.label === 'Composant';
         const lines = [
           { label: 'Type',   value: SUBTYPE_LABELS[n.subtype] ?? n.subtype },
-          isTechnical && n.technology  && { label: 'Techno',  value: n.technology },
-          isTechnical && n.linesOfCode && { label: 'LoC',     value: n.linesOfCode.toLocaleString() },
-          isTechnical && n.candidate7R && { label: '7R',      value: n.candidate7R },
-          !isTechnical && n.modernizationStatus && { label: 'Statut', value: STATUS_LABELS[n.modernizationStatus] ?? n.modernizationStatus },
+          n.technologie && { label: 'Techno',  value: n.technologie },
+          isComposant && n.candidate7R && { label: '7R', value: n.candidate7R },
+          n.fiabilite && { label: 'Fiabilité', value: FIABILITE_LABELS[n.fiabilite] ?? n.fiabilite },
         ].filter(Boolean);
         const TIP_W = 200;
         return (
@@ -1387,7 +1488,7 @@ const GraphPage = ({ apiFetch }) => {
           }}>
             <div style={{ fontSize: 12.5, fontWeight: 700, color: '#fff', marginBottom: 5,
                           overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-              {n.domain ?? n.componentName ?? n.id}
+              {n.nom ?? n.id}
             </div>
             {lines.map(({ label, value }) => (
               <div key={label} style={{ display: 'flex', justifyContent: 'space-between', fontSize: 11.5, marginTop: 2 }}>
@@ -1397,11 +1498,6 @@ const GraphPage = ({ apiFetch }) => {
                                maxWidth: 110 }}>{value}</span>
               </div>
             ))}
-            {n.docCoveragePercent != null && (
-              <div style={{ marginTop: 5, fontSize: 11, color: '#64748b' }}>
-                Couverture doc. : {Math.round(n.docCoveragePercent)}%
-              </div>
-            )}
             <div style={{ marginTop: 5, borderTop: '1px solid rgba(255,255,255,.1)', paddingTop: 5,
                           fontSize: 10.5, color: '#475569' }}>
               Double-clic → développer les voisins
