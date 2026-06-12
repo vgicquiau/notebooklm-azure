@@ -125,6 +125,35 @@ En production (Azure Container Apps) : `ManagedIdentityCredential` avec `AZURE_C
 
 La vue **Graphe ADG-M** (toggle "Graphe ADG-M" dans le header) est une fonctionnalité distincte de la vue Chat. Elle visualise l'architecture applicative extraite des documents Chat sous forme de graphe interactif (Cytoscape.js), qualifie les composants selon le modèle 7R et détecte les points de couplage fort (clusters Louvain).
 
+### Vues par couche (taxonomie GraphRAG Legacy-Modernisation v2.0)
+
+Le switch supérieur (`LayerSwitch`, `GraphPage.jsx`) propose une vue par couche de la taxonomie (Couches 1-7), avec des noms parlants plutôt que "Couche N" :
+
+| Couche | Nom dans l'UI | Contenu |
+|---|---|---|
+| 1 — Fonctionnelle | Fonctionnel | `Domaine_Fonctionnel`, `Fonction`, `Regle_Metier`, `Processus_Fonctionnel` |
+| 2 — Applicative | Applicatif | `Composant`, `Domaine_Technique`, `Point_Entree`, `Interface_Utilisateur`, `Job_Batch`, `Unite_Execution`, `Procedure_Reutilisable` |
+| 3 — Données | Données | `Structure_Partagee`, `Store_Donnees`, `Store_Echange`, `Table_Relationnelle`, `Store_Hierarchique`, `Entite_Donnees`, `Canal_Messagerie` |
+| 4 — Intégration | Intégration | Pas de nœuds dédiés (Flux/Dépendance = relations, décision F.3 Option A) — état vide avec renvoi vers le mode exploration |
+| 5 — Architecture DDD | Architecture cible | Non implémenté (`Bounded_Context` etc., Phase 3 de la feuille de route) — état vide |
+| 6 — Risque & Qualité | Risque & Qualité | Pas de nœuds dédiés — indicateurs (`isSpof`, `communityId`, `criticiteScore`) portés par `Composant` ; état vide avec résumé chiffré (nb SPOF, nb communautés Louvain) |
+| 7 — Modernisation | Modernisation | `Zone_Incertitude` |
+| — | Global | Vue complète, tous les nœuds et arcs |
+
+La Couche 0 (Méta-fiabilité) n'a pas de vue dédiée : c'est la propriété `fiabilite` (`FAIT`/`HYPOTHÈSE`/`SUPPOSÉ`/`MANQUANT`), déjà visible dans la légende de chaque vue. `LAYER_SUBTYPES`/`LAYER_EMPTY_INFO` (`GraphPage.jsx`) pilotent ce mapping et les messages des couches sans nœuds.
+
+### Schéma — taxonomie GraphRAG Legacy-Modernisation v2.0
+
+Le schéma Neo4j (labels de nœuds, types de relations, propriétés universelles `fiabilite`/`nom`/`source`/etc.) est défini par `notebooklm-azure/glossaire-taxonomie-graphrag-legacy-modernisation.md` — c'est la **référence canonique**. `function_app.py` l'opérationnalise via deux ensembles fermés, `ALLOWED_NODE_LABELS` (19 labels Phase-1 + `System`) et `ALLOWED_REL_TYPES` (14 types) ; `extract.py` (`_EXTRACT_SYSTEM`) instruit le LLM à produire le contrat générique `{nodes:[{id,label,properties}], relations:[{from,to,type,properties}]}`. `neo4j_schema.cypher` porte une contrainte `IS UNIQUE` sur `.id` par label.
+
+`Domaine_Fonctionnel` a un double rôle : `CONTIENT` structurellement ses `Processus_Fonctionnel`, et `CATALOGUE` logiquement ses `Fonction` (indépendamment de leur exécution). `Regle_Metier` a aussi un double rôle : `PORTE_REGLE` (logique interne d'une `Fonction`) et `ORIENTE_PAR` (un `Processus_Fonctionnel` est orienté par la règle pour son routage/branchement, propriété `typeRoutage: BRANCHEMENT|BOUCLE|CONDITION_SORTIE`).
+
+Deux extensions, additives par rapport à la taxonomie :
+- **Ext #1** : `ACCEDE_A` porte une propriété `operations: [C,R,U,D]` en plus de `mode: R|W|RW` (granularité CRUD).
+- **Ext #2** : `CONTIENT` est réutilisé pour `Domaine_Technique → {Composant,Job_Batch,Procedure_Reutilisable}` (non défini dans la taxonomie, qui ne couvre que `Domaine_Fonctionnel → Processus_Fonctionnel`). `CORRESPOND_A` (`Entite_Donnees → {Store_Donnees,Table_Relationnelle,Store_Hierarchique}`) est également une relation additive.
+
+`fiabilite` (`FAIT|HYPOTHÈSE|SUPPOSÉ|MANQUANT`) est portée par chaque nœud/relation et fusionnée en upgrade-only lors d'une ré-extraction (FAIT > HYPOTHÈSE > SUPPOSÉ > MANQUANT).
+
 ### Composants impliqués
 
 | Fichier | Rôle |
@@ -134,16 +163,39 @@ La vue **Graphe ADG-M** (toggle "Graphe ADG-M" dans le header) est une fonctionn
 | `api/routers/extract.py` | Pipeline Chat→Graphe : lit l'index Search, appelle GPT-4o, pousse via `/admin/import-entities` |
 | `frontend/vendor/cytoscape.min.js` | Cytoscape.js vendorisé (même pattern que mermaid.min.js / marked.min.js) |
 
-### Variable d'environnement
+### Variables d'environnement
 
 ```
 ADGM_GRAPH_API_URL=https://modernagent-adgm-dev.azurewebsites.net/api/graph
 ```
 Défaut dans les deux routers si absent. Ajouter dans `.env` pour cibler un autre déploiement.
 
+```
+EXTRACT_SYSTEM_NAME=CardDemo
+EXTRACT_STACK_PRIMARY=COBOL_ZOS
+EXTRACT_STACK_SECONDARY=DB2_ZOS, IMS_DLI, IBM_MQ, BMS
+EXTRACT_DOC_LANGUAGE=FR
+```
+Fiche d'instanciation injectée dans `_EXTRACT_SYSTEM_TEMPLATE` (`extract.py`) — ces valeurs sont
+les défauts (corpus CardDemo), utilisés tant qu'aucune configuration n'a été appliquée depuis le
+frontend. `EXTRACT_SYSTEM_NAME` doit être un identifiant stable sans espace/accent, utilisé tel
+quel dans l'id du nœud `System` (`sys:<EXTRACT_SYSTEM_NAME>`).
+
+### Configuration corpus (modale frontend)
+
+Le bouton "Configuration corpus" de la barre supérieure (`Header.jsx`) ouvre une modale
+permettant de renseigner `nom_systeme`, `stack_primaire`, `stacks_secondaires`,
+`langue_documentation` et un champ libre `contexte_libre` (contexte métier additionnel injecté
+tel quel dans le prompt d'extraction). Le bouton "Appliquer" persiste ces valeurs via
+`PUT /api/extract/config` dans `api/extract_config.json` (non commité, voir `.gitignore`) ;
+`GET /api/extract/config` les relit (avec retour aux variables d'environnement ci-dessus si le
+fichier n'existe pas). `_run_extract_job` appelle `_render_extract_system(_load_extract_config())`
+à chaque lancement de "Mise à jour" — donc la configuration est prise en compte immédiatement,
+sans redémarrage du serveur.
+
 ### Bouton "Mise à jour" (ExtractButton)
 
-1. `DELETE /api/graph/admin/functional-entities` — supprime les nœuds fonctionnels (`:FunctionalDomain`, `:MacroFunction`, `:Program`, `:DataEntity`) en préservant les `:TechnicalNode` et leurs annotations 7R
+1. `DELETE /api/graph/admin/functional-entities` — supprime tout le graphe SAUF les nœuds `:Composant`/`:System` (et leurs relations vers `:Composant`), préservant ainsi la qualification 7R et les propriétés calculées par GDS (`isSpof`, `communityId`, etc.)
 2. Lit **tous** les chunks de l'index Azure AI Search, groupés par `source_file`
 3. Pour chaque document : appel GPT-4o (extraction JSON structurée) → `POST /api/graph/admin/import-entities`
 
