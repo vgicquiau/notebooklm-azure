@@ -27,6 +27,7 @@ from api.routers.ingest import router as ingest_router
 from api.routers.sources import router as sources_router
 from api.services.retriever import Retriever
 from api.services.generator import Generator
+from api.services import session_store
 
 load_dotenv()
 
@@ -134,6 +135,7 @@ def _load_secrets_from_keyvault():
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     _load_secrets_from_keyvault()
+    session_store.init_db()
 
     client_id = os.environ.get("AZURE_CLIENT_ID")
     if client_id and (os.environ.get("WEBSITE_INSTANCE_ID") or os.environ.get("CONTAINER_APP_NAME")):

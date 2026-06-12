@@ -3,7 +3,7 @@ from typing import Literal, Optional
 
 
 class ChatRequest(BaseModel):
-    message: str = Field(..., min_length=1, max_length=4000)
+    message: str = Field(..., min_length=1, max_length=32000)
     session_id: Optional[str] = Field(default=None)
     top_k: int = Field(default=10, ge=1, le=20)
     mode: Literal["rapide", "standard", "approfondi"] = Field(default="standard")

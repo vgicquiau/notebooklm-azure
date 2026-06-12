@@ -25,7 +25,7 @@ graph TB
 
     subgraph adgm["🟢 ADG-M ✅ — modernagent-adgm-dev"]
         func_adgm["fn-adgm-graph<br/>Azure Functions Python<br/>GET/PATCH/DELETE /graph/*<br/>POST /admin/analyze · import-entities<br/>DELETE /admin/reset · functional-entities"]
-        neo4j["Neo4j AuraDB<br/>TechnicalNode · FunctionalDomain<br/>MacroFunction · Program · DataEntity<br/>betweenness · communityId · candidate7R"]
+        neo4j["Neo4j AuraDB<br/>Taxonomie GraphRAG v2.0<br/>Composant · Fonction · Regle_Metier · ...<br/>betweennessScore · communityId · candidate7R · fiabilite"]
         logic_adgm["GDS<br/>• Betweenness → isSPOF<br/>• Louvain → communityId"]
     end
 
@@ -147,16 +147,16 @@ Pipeline d'ingestion — NotebookLM Azure
 Architecte lance "Mettre à jour le graphe"
   ↓ [POST /api/extract/graph → BackgroundTask — extract.py]
 Pipeline Chat→Graphe (Track C)
-  ├→ DELETE /admin/functional-entities : vide FunctionalDomain/MacroFunction/Program/DataEntity
-  │   (préserve TechnicalNode et leurs annotations candidate7R)
+  ├→ DELETE /admin/functional-entities : vide tout le graphe SAUF Composant/System
+  │   (préserve la qualification candidate7R et les propriétés calculées par GDS)
   ├→ Azure AI Search : lecture complète (top 5000 chunks, groupés par source_file)
   ├→ GPT-4o : extraction JSON structurée par document
-  │   (system · functional_domains · macro_functions · programs · data_entities · crud_relationships)
-  └→ fn-adgm-graph POST /admin/import-entities : MERGE nœuds + arcs dans Neo4j
+  │   (taxonomie GraphRAG v2.0 : {nodes:[{id,label,properties}], relations:[{from,to,type,properties}]})
+  └→ fn-adgm-graph POST /admin/import-entities : MERGE nœuds + arcs dans Neo4j (fiabilite upgrade-only)
   ↓
 POST /graph/admin/analyze (déclenché séparément)
-  ├→ GDS Betweenness → isSPOF sur chaque TechnicalNode
-  └→ GDS Louvain → communityId par composant (clusters candidats)
+  ├→ GDS Betweenness → isSpof sur Composant/Store_Donnees
+  └→ GDS Louvain → communityId par nœud de la projection structurelle (clusters candidats)
   ↓
 Graphe bi-plan live dans NotebookLM Azure
   ↓ [Vue Graphe ADG-M — GraphPage.jsx, Cytoscape.js]

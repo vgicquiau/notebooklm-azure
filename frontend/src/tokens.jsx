@@ -52,6 +52,8 @@ const Ic = {
   Microscope:({ s = 14 }) => <svg width={s} height={s} viewBox="0 0 18 18" {...S()}><rect x="6" y="2" width="6" height="8" rx="3"/><path d="M9 10v3M5 16h8M12.5 13A3.5 3.5 0 0 1 5.5 13"/></svg>,
   Inject:    ({ s = 14 }) => <svg width={s} height={s} viewBox="0 0 18 18" {...S()}><path d="M9 13V4M5 8l4-4 4 4"/><path d="M3 15h12"/></svg>,
   Upload:    ({ s = 15 }) => <svg width={s} height={s} viewBox="0 0 18 18" {...S()}><path d="M3 13v2a1 1 0 0 0 1 1h10a1 1 0 0 0 1-1v-2M9 3v9M6 6l3-3 3 3"/></svg>,
+  Edit:      ({ s = 14 }) => <svg width={s} height={s} viewBox="0 0 18 18" {...S()}><path d="M11.5 2.5a1.7 1.7 0 0 1 2.4 2.4L5.5 13.3l-3 .8.8-3z"/></svg>,
+  Settings:  ({ s = 15 }) => <svg width={s} height={s} viewBox="0 0 18 18" {...S()}><circle cx="9" cy="9" r="2.3"/><path d="M9 1.8v2M9 14.2v2M16.2 9h-2M3.8 9h-2M14.1 3.9l-1.4 1.4M5.3 12.7l-1.4 1.4M14.1 14.1l-1.4-1.4M5.3 5.3 3.9 3.9"/></svg>,
 };
 
 // ── Logo NotebookLM Azure ──────────────────────────────────────
