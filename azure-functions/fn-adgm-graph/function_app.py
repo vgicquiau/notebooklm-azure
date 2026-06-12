@@ -45,13 +45,96 @@ SQL_CONNECTION_STRING = os.getenv("SQL_CONNECTION_STRING")
 APP_VERSION = "1.0.0"
 
 SEVEN_R_VALUES = {"RETIRE", "RETAIN", "REHOST", "REPLATFORM", "REPURCHASE", "REFACTOR", "REBUILD", "UNQUALIFIED"}
-ARC_TYPES = {"FUNCTIONAL", "TECHNICAL_CALL_SYNC", "TECHNICAL_CALL_ASYNC", "TECHNICAL_BATCH", "DATA_FLOW", "TRANSITIONAL_COHABITATION"}
-CRITICALITY_VALUES = {"CRITICAL", "HIGH", "MEDIUM", "LOW"}
-DIRECTION_VALUES = {"UNIDIRECTIONAL", "BIDIRECTIONAL"}
 
 # Analyse F1.3/F1.5 (SDD §2.1 + §4 tuning) — exécutée par /graph/admin/analyze, pas par l'ingestion
 GDS_TECH_PROJECTION = "moderngraph_tech"
 SPOF_BETWEENNESS_PERCENTILE = float(os.getenv("SPOF_BETWEENNESS_PERCENTILE", "90"))
+
+# 1B — projection structurelle (taxonomie v2.0, Couches 3-4) : labels/relations porteurs de
+# couplage réel. Remplace l'ancienne projection (:TechnicalNode)-[:DEPENDS_ON] (edgeless,
+# aucun DEPENDS_ON Program->Program n'a jamais existé — cf. plan).
+GDS_STRUCTURAL_NODE_LABELS = [
+    "Composant", "Structure_Partagee", "Store_Donnees", "Store_Echange",
+    "Table_Relationnelle", "Store_Hierarchique", "Canal_Messagerie",
+]
+GDS_STRUCTURAL_REL_CONFIG = {
+    "APPELLE": {"orientation": "UNDIRECTED"},
+    "INCLUT": {"orientation": "UNDIRECTED"},
+    "ACCEDE_A": {"orientation": "UNDIRECTED"},
+}
+
+# Poids heuristiques de Score_Criticite (Partie C, ligne 128 : "agrège fan-in, fan-out,
+# ... présence SPOF") — fan-in/fan-out comptent modérément, SPOF/articulation (signaux
+# structurels forts) pèsent plus lourd. Score plafonné à 100 (Partie C : integer [0-100]).
+_CRITICITE_FANINOUT_WEIGHT = 5
+_CRITICITE_SPOF_BONUS = 30
+_CRITICITE_ARTICULATION_BONUS = 20
+
+# ============================================================================
+# Taxonomie GraphRAG Legacy-Modernisation v2.0 — Phase 1 (voir
+# notebooklm-azure/glossaire-taxonomie-graphrag-legacy-modernisation.md)
+# ============================================================================
+
+# 19 labels de la taxonomie + System (racine, non-taxonomie, conservé). Préfixes d'id
+# (Partie C, "<préfixe>:<nom>") documentés dans le system prompt extract.py.
+ALLOWED_NODE_LABELS = {
+    "System", "Domaine_Fonctionnel", "Fonction", "Regle_Metier", "Processus_Fonctionnel",
+    "Domaine_Technique", "Composant", "Point_Entree", "Interface_Utilisateur",
+    "Job_Batch", "Unite_Execution", "Procedure_Reutilisable", "Structure_Partagee",
+    "Store_Donnees", "Store_Echange", "Table_Relationnelle", "Store_Hierarchique",
+    "Entite_Donnees", "Canal_Messagerie", "Zone_Incertitude",
+}
+
+# 12 types de relation de la taxonomie v2 (Partie B.1/B.2, ASCII : IMPLEMENTE/DECLENCHE —
+# accents retirés des identifiants Cypher, plan decision #3) + CORRESPOND_A (B.2,
+# Entite_Donnees -> stores). from -> to attendus (non vérifiés à l'exécution — le moteur
+# d'import est générique/label-driven, plan decision #1) :
+#   CONTIENT            Domaine_Fonctionnel->Processus_Fonctionnel | Domaine_Technique
+#                        ->{Composant,Job_Batch,Procedure_Reutilisable} | System->
+#                        {Domaine_Fonctionnel,Domaine_Technique}  (2e/3e groupes = Ext #2)
+#   CATALOGUE           Domaine_Fonctionnel->Fonction  (rattachement logique au catalogue,
+#                        indépendant de l'exécution — distinct de CONTIENT)
+#   PORTE_REGLE         Fonction->Regle_Metier
+#   ORCHESTRE           Processus_Fonctionnel->Fonction
+#   ORIENTE_PAR         Processus_Fonctionnel->Regle_Metier  (règle qui oriente le routage/
+#                        branchement du processus — distinct de PORTE_REGLE)
+#   IMPLEMENTE          Composant->Fonction
+#   ENCODE_REGLE        Composant->Regle_Metier
+#   APPELLE             Composant->Composant
+#   INCLUT              Composant->Structure_Partagee
+#   ACCEDE_A            Composant->{Store_Donnees,Store_Echange,Table_Relationnelle,
+#                        Store_Hierarchique,Canal_Messagerie}  (operations[] = Ext #1)
+#   DECLENCHE           {Unite_Execution,Point_Entree}->Composant
+#   CONTIENT_STEP       Job_Batch->Unite_Execution
+#   CORRESPOND_A        Entite_Donnees->{Store_Donnees,Table_Relationnelle,Store_Hierarchique}
+#   GENERE_INCERTITUDE  <tout nœud>->Zone_Incertitude
+ALLOWED_REL_TYPES = {
+    "CONTIENT", "CATALOGUE", "PORTE_REGLE", "ORCHESTRE", "ORIENTE_PAR", "IMPLEMENTE",
+    "ENCODE_REGLE", "APPELLE", "INCLUT", "ACCEDE_A", "DECLENCHE", "CONTIENT_STEP",
+    "CORRESPOND_A", "GENERE_INCERTITUDE",
+}
+
+# F.2 — fiabilite : priorité d'upgrade FAIT > HYPOTHÈSE > SUPPOSÉ > MANQUANT. Une ré-extraction
+# ne peut jamais dégrader la fiabilite déjà connue d'un nœud/relation (import_entities).
+_FIABILITE_RANK = {"MANQUANT": 0, "SUPPOSÉ": 1, "HYPOTHÈSE": 2, "FAIT": 3}
+_DEFAULT_FIABILITE = "SUPPOSÉ"
+
+# Regroupement par plan pour le frontend bi-plan (GraphPage.jsx, increment 1C) — chaque
+# label Phase-1 vers functional|technical|data|global.
+_PLANE_BY_LABEL = {
+    "System": "global",
+    "Domaine_Fonctionnel": "functional", "Fonction": "functional",
+    "Regle_Metier": "functional", "Processus_Fonctionnel": "functional",
+    "Domaine_Technique": "technical", "Composant": "technical",
+    "Point_Entree": "technical", "Interface_Utilisateur": "technical",
+    "Job_Batch": "technical", "Unite_Execution": "technical",
+    "Procedure_Reutilisable": "technical",
+    "Structure_Partagee": "data", "Store_Donnees": "data",
+    "Store_Echange": "data", "Table_Relationnelle": "data",
+    "Store_Hierarchique": "data", "Entite_Donnees": "data",
+    "Canal_Messagerie": "data",
+    "Zone_Incertitude": "global",
+}
 
 logger = logging.getLogger(__name__)
 
@@ -82,66 +165,23 @@ def _to_json(v):
     """Converts neo4j.time.DateTime (and similar) to ISO string; passes other values through."""
     return v.isoformat() if hasattr(v, "isoformat") else v
 
-def _technical_node_dto(props: dict) -> dict:
-    return {
-        "id": props.get("id"),
-        "type": "technical",
-        "componentName": props.get("componentName"),
-        "technology": props.get("technology"),
-        "linesOfCode": props.get("linesOfCode"),
-        "callFrequency": props.get("callFrequency"),
-        "candidate7R": props.get("candidate7R"),
-        "knowledgeOwner": props.get("knowledgeOwner"),
-        "regulatoryTags": props.get("regulatoryTags", []),
-        "docCoveragePercent": props.get("docCoveragePercent"),
-        "isGhost": props.get("isGhost", False),
-        "sourceDocIds": props.get("sourceDocIds", []),
-        "criticalityScore": props.get("criticalityScore", 0),
-        "betweenness": props.get("betweenness", 0.0),
-        "isSPOF": props.get("isSPOF", False),
-        "clusterId": props.get("clusterId"),
-        "createdAt": _to_json(props.get("createdAt")),
-        "updatedAt": _to_json(props.get("updatedAt")),
-    }
-
-def _functional_node_dto(props: dict) -> dict:
-    return {
-        "id": props.get("id"),
-        "type": "functional",
-        "domain": props.get("domain"),
-        "subdomain": props.get("subdomain"),
-        "processes": props.get("processes", []),
-        "sharedBusinessObjects": props.get("sharedBusinessObjects", []),
-        "docCoveragePercent": props.get("docCoveragePercent"),
-        "modernizationStatus": props.get("modernizationStatus"),
-        "sourceDocIds": props.get("sourceDocIds", []),
-        "createdAt": _to_json(props.get("createdAt")),
-        "updatedAt": _to_json(props.get("updatedAt")),
-    }
+def _generic_node_dto(props: dict, label: str) -> dict:
+    """DTO générique pour les 20 labels Phase-1 de la taxonomie GraphRAG v2.0 — propriétés
+    brutes (dates converties) + label/plane/subtype. Le détail par sous-type (couleurs,
+    formes, panneau de détail) est calculé côté frontend (GraphPage.jsx, increment 1C)."""
+    dto = {k: _to_json(v) for k, v in props.items()}
+    dto["label"] = label
+    dto["plane"] = _PLANE_BY_LABEL.get(label, "global")
+    dto["type"] = dto["plane"]
+    dto["subtype"] = label.lower()
+    return dto
 
 def node_to_dto(node) -> dict:
-    """Nœud Neo4j -> DTO SDD §2.3 (métriques d'analyse F1.3/F1.5 absentes => défaut-valorisées)."""
+    """Nœud Neo4j -> DTO générique (taxonomie v2.0, 20 labels Phase-1)."""
     props = dict(node)
     labels = set(node.labels)
-    if "TechnicalNode" in labels:
-        dto = _technical_node_dto(props)
-        if "Program" in labels:
-            dto["subtype"] = "program"
-        elif "System" in labels:
-            dto["subtype"] = "system"
-        else:
-            dto["subtype"] = "component"
-        return dto
-    dto = _functional_node_dto(props)
-    if "FunctionalDomain" in labels:
-        dto["subtype"] = "domain"
-    elif "MacroFunction" in labels:
-        dto["subtype"] = "macrofunction"
-    elif "DataEntity" in labels:
-        dto["subtype"] = "dataentity"
-    else:
-        dto["subtype"] = "functional"
-    return dto
+    label = next((l for l in ALLOWED_NODE_LABELS if l in labels), None) or sorted(labels)[0]
+    return _generic_node_dto(props, label)
 
 def error_response(message: str, status_code: int, **extra) -> func.HttpResponse:
     body = {"error": message}
@@ -204,43 +244,45 @@ def get_health() -> func.HttpResponse:
 
 
 def get_nodes(request: func.HttpRequest) -> func.HttpResponse:
-    """GET /graph/nodes — Liste filtrable et paginée des nœuds fonctionnels/techniques (SDD §3)."""
-    try:
-        node_type = request.params.get("type")
-        status = request.params.get("status")
-        candidate7r = request.params.get("candidate7R")
-        is_ghost_raw = request.params.get("isGhost")
+    """GET /graph/nodes — Liste filtrable et paginée des nœuds (taxonomie v2.0, 20 labels Phase-1).
 
-        if node_type and node_type not in ("functional", "technical"):
-            return error_response("Paramètre type invalide", 400)
-        if status and status not in ("UNQUALIFIED", "QUALIFIED"):
-            return error_response("Paramètre type invalide", 400)
+    Filtres optionnels : `label` (un des ALLOWED_NODE_LABELS), `plane`
+    (functional|technical|data|global, via _PLANE_BY_LABEL), `fiabilite`
+    (FAIT|HYPOTHÈSE|SUPPOSÉ|MANQUANT), `candidate7R` (qualification 7R, propriété
+    Composant uniquement — ignoré pour les autres labels)."""
+    try:
+        label = request.params.get("label")
+        plane = request.params.get("plane")
+        fiabilite = request.params.get("fiabilite")
+        candidate7r = request.params.get("candidate7R")
+
+        if label and label not in ALLOWED_NODE_LABELS:
+            return error_response("Paramètre label invalide", 400)
+        if plane and plane not in _PLANE_BY_LABEL.values():
+            return error_response("Paramètre plane invalide", 400)
+        if fiabilite and fiabilite not in _FIABILITE_RANK:
+            return error_response("Paramètre fiabilite invalide", 400)
         if candidate7r and candidate7r not in SEVEN_R_VALUES:
-            return error_response("Paramètre type invalide", 400)
-        if is_ghost_raw is not None and is_ghost_raw.lower() not in ("true", "false"):
-            return error_response("Paramètre type invalide", 400)
+            return error_response("Paramètre candidate7R invalide", 400)
+
+        plane_labels = [l for l, p in _PLANE_BY_LABEL.items() if p == plane] if plane else None
 
         params = {
-            "type": node_type,
-            "domain": request.params.get("domain"),
+            "allowedLabels": list(ALLOWED_NODE_LABELS),
+            "label": label,
+            "planeLabels": plane_labels,
+            "fiabilite": fiabilite,
             "candidate7R": candidate7r,
-            "clusterId": request.params.get("clusterId"),
-            "status": status,
-            "isGhost": (is_ghost_raw.lower() == "true") if is_ghost_raw is not None else None,
             "limit": max(0, _parse_int_param(request, "limit", 100)),
             "offset": max(0, _parse_int_param(request, "offset", 0)),
         }
 
         where_clause = """
-            (n:TechnicalNode OR n:FunctionalNode)
-            AND ($type IS NULL OR ($type = 'technical' AND n:TechnicalNode) OR ($type = 'functional' AND n:FunctionalNode))
-            AND ($domain IS NULL OR n.domain = $domain)
+            any(l IN labels(n) WHERE l IN $allowedLabels)
+            AND ($label IS NULL OR $label IN labels(n))
+            AND ($planeLabels IS NULL OR any(l IN labels(n) WHERE l IN $planeLabels))
+            AND ($fiabilite IS NULL OR n.fiabilite = $fiabilite)
             AND ($candidate7R IS NULL OR n.candidate7R = $candidate7R)
-            AND ($clusterId IS NULL OR n.clusterId = $clusterId)
-            AND ($isGhost IS NULL OR n.isGhost = $isGhost)
-            AND ($status IS NULL
-                 OR ($status = 'UNQUALIFIED' AND n.candidate7R = 'UNQUALIFIED')
-                 OR ($status = 'QUALIFIED' AND n.candidate7R IS NOT NULL AND n.candidate7R <> 'UNQUALIFIED'))
         """
 
         driver = get_neo4j_driver()
@@ -264,63 +306,48 @@ def get_nodes(request: func.HttpRequest) -> func.HttpResponse:
 
 
 def get_node_by_id(node_id: str) -> func.HttpResponse:
-    """GET /graph/nodes/{id} — Détail complet : métriques dérivées + arcs entrants/sortants résumés (SDD §3)."""
+    """GET /graph/nodes/{id} — Détail complet : métriques dérivées + arcs entrants/sortants résumés
+    (taxonomie v2.0, ALLOWED_REL_TYPES uniquement)."""
     try:
         driver = get_neo4j_driver()
         with driver.session() as session:
             record = session.run(
-                "MATCH (n) WHERE (n:TechnicalNode OR n:FunctionalNode) AND n.id = $id RETURN n",
-                {"id": node_id}
+                "MATCH (n) WHERE any(l IN labels(n) WHERE l IN $allowedLabels) AND n.id = $id RETURN n",
+                {"id": node_id, "allowedLabels": list(ALLOWED_NODE_LABELS)}
             ).single()
 
             if not record:
                 return error_response("Nœud introuvable", 404)
 
             node = record["n"]
-            is_technical = "TechnicalNode" in node.labels
 
             incoming_arcs = [
-                {"id": rec["arcId"], "sourceNodeId": rec["otherId"], "arcType": rec["arcType"], "criticality": rec["criticality"]}
+                {"id": f"{rec['relType']}-{rec['otherId']}-{node_id}", "sourceNodeId": rec["otherId"], "type": rec["relType"], "fiabilite": rec["fiabilite"]}
                 for rec in session.run(
                     """
-                    MATCH (src)-[r:DEPENDS_ON]->(n {id: $id})
-                    RETURN r.id AS arcId, src.id AS otherId, r.arcType AS arcType, r.criticality AS criticality
-                    ORDER BY arcId
+                    MATCH (src)-[r]->(n {id: $id}) WHERE type(r) IN $relTypes
+                    RETURN type(r) AS relType, src.id AS otherId, r.fiabilite AS fiabilite
+                    ORDER BY relType, otherId
                     """,
-                    {"id": node_id}
+                    {"id": node_id, "relTypes": list(ALLOWED_REL_TYPES)}
                 )
             ]
             outgoing_arcs = [
-                {"id": rec["arcId"], "targetNodeId": rec["otherId"], "arcType": rec["arcType"], "criticality": rec["criticality"]}
+                {"id": f"{rec['relType']}-{node_id}-{rec['otherId']}", "targetNodeId": rec["otherId"], "type": rec["relType"], "fiabilite": rec["fiabilite"]}
                 for rec in session.run(
                     """
-                    MATCH (n {id: $id})-[r:DEPENDS_ON]->(tgt)
-                    RETURN r.id AS arcId, tgt.id AS otherId, r.arcType AS arcType, r.criticality AS criticality
-                    ORDER BY arcId
+                    MATCH (n {id: $id})-[r]->(tgt) WHERE type(r) IN $relTypes
+                    RETURN type(r) AS relType, tgt.id AS otherId, r.fiabilite AS fiabilite
+                    ORDER BY relType, otherId
                     """,
-                    {"id": node_id}
+                    {"id": node_id, "relTypes": list(ALLOWED_REL_TYPES)}
                 )
             ]
 
             metrics = {
                 "inDegree": len(incoming_arcs),
                 "outDegree": len(outgoing_arcs),
-                "criticalArcsIn": sum(1 for a in incoming_arcs if a["criticality"] == "CRITICAL"),
             }
-            if is_technical:
-                metrics["realizesFunctionalNodes"] = [
-                    rec["fnId"] for rec in session.run(
-                        "MATCH (fn:FunctionalNode)-[:REALIZED_BY]->(:TechnicalNode {id: $id}) RETURN fn.id AS fnId ORDER BY fnId",
-                        {"id": node_id}
-                    )
-                ]
-            else:
-                metrics["realizedByTechnicalNodes"] = [
-                    rec["tnId"] for rec in session.run(
-                        "MATCH (:FunctionalNode {id: $id})-[:REALIZED_BY]->(tn:TechnicalNode) RETURN tn.id AS tnId ORDER BY tnId",
-                        {"id": node_id}
-                    )
-                ]
 
         return func.HttpResponse(
             json.dumps({
@@ -340,40 +367,43 @@ def get_node_by_id(node_id: str) -> func.HttpResponse:
 def get_node_neighbors(node_id: str) -> func.HttpResponse:
     """GET /graph/nodes/{id}/neighbors — Tous les nœuds et relations adjacents (mode exploration IHM).
 
-    Contrairement à /graph/arcs (DEPENDS_ON uniquement), cet endpoint traverse TOUTES les
-    relations Neo4j du nœud : HAS_MACROFUNCTION, IMPLEMENTED_BY, READS/WRITES/CREATES/DELETES,
-    DEPENDS_ON, etc. Utilisé par le double-clic d'exploration dans GraphPage.jsx.
+    Contrairement à /graph/arcs (relations structurelles uniquement), cet endpoint traverse
+    TOUTES les relations Neo4j du nœud parmi ALLOWED_REL_TYPES. Utilisé par le double-clic
+    d'exploration dans GraphPage.jsx.
     """
     try:
         driver = get_neo4j_driver()
         with driver.session() as session:
+            allowed_labels = list(ALLOWED_NODE_LABELS)
+            allowed_rels = list(ALLOWED_REL_TYPES)
+
             center_rec = session.run(
-                "MATCH (n) WHERE (n:TechnicalNode OR n:FunctionalNode) AND n.id = $id RETURN n",
-                {"id": node_id}
+                "MATCH (n) WHERE any(l IN labels(n) WHERE l IN $allowedLabels) AND n.id = $id RETURN n",
+                {"id": node_id, "allowedLabels": allowed_labels}
             ).single()
             if not center_rec:
                 return error_response("Nœud introuvable", 404)
 
             center_node = center_rec["n"]
 
-            # Toutes les relations adjacentes — startNode/endNode préservent la direction réelle.
-            # DISTINCT évite les doublons dus au parcours bidirectionnel de MATCH (n)-[r]-(m).
+            # Toutes les relations adjacentes (ALLOWED_REL_TYPES) — startNode/endNode préservent
+            # la direction réelle. DISTINCT évite les doublons dus au parcours bidirectionnel
+            # de MATCH (n)-[r]-(m).
             records = session.run(
                 """
                 MATCH (center {id: $id})-[r]-(neighbor)
-                WHERE (center:TechnicalNode OR center:FunctionalNode)
-                  AND (neighbor:TechnicalNode OR neighbor:FunctionalNode)
+                WHERE any(l IN labels(center) WHERE l IN $allowedLabels)
+                  AND any(l IN labels(neighbor) WHERE l IN $allowedLabels)
+                  AND type(r) IN $allowedRels
                 RETURN DISTINCT
                     neighbor,
                     type(r)          AS relType,
                     startNode(r).id  AS sourceId,
                     endNode(r).id    AS targetId,
-                    r.id             AS relId,
-                    r.arcType        AS arcType,
-                    r.criticality    AS criticality
+                    r.fiabilite      AS fiabilite
                 ORDER BY relType, sourceId, targetId
                 """,
-                {"id": node_id}
+                {"id": node_id, "allowedLabels": allowed_labels, "allowedRels": allowed_rels}
             )
 
             neighbors: dict = {}
@@ -389,18 +419,16 @@ def get_node_neighbors(node_id: str) -> func.HttpResponse:
                 source_id   = rec["sourceId"]
                 target_id   = rec["targetId"]
                 rel_type    = rec["relType"]
-                rel_id      = rec["relId"] or f"{rel_type}-{source_id}-{target_id}"
                 edge_key    = (source_id, target_id, rel_type)
 
                 if edge_key not in seen_edges:
                     seen_edges.add(edge_key)
                     edges.append({
-                        "id":           rel_id,
+                        "id":           f"{rel_type}-{source_id}-{target_id}",
                         "sourceNodeId": source_id,
                         "targetNodeId": target_id,
-                        "relType":      rel_type,
-                        "arcType":      rec["arcType"] or rel_type,
-                        "criticality":  rec["criticality"] or "MEDIUM",
+                        "type":         rel_type,
+                        "fiabilite":    rec["fiabilite"] or _DEFAULT_FIABILITE,
                     })
 
         return func.HttpResponse(
@@ -418,19 +446,19 @@ def get_node_neighbors(node_id: str) -> func.HttpResponse:
 
 
 def get_node_impact(node_id: str) -> func.HttpResponse:
-    """GET /graph/nodes/{id}/impact — Rayon d'impact downstream d'un nœud technique (SDD §3, consommé par ADM-M C5).
+    """GET /graph/nodes/{id}/impact — Rayon d'impact downstream d'un :Composant (SDD §3, consommé par ADM-M C5).
 
-    `isSPOF`/`betweenness` sont des propriétés calculées par le job d'analyse F1.3/F1.5
-    (cf. detect_spof / POST /graph/admin/analyze) — cet endpoint les lit telles que persistées,
-    il ne relance pas GDS à la volée. La liste `downstreamImpacted` est calculée pour tout nœud
-    technique existant (pas seulement les SPOF) : `isSPOF` indique au consommateur le poids à
-    accorder au résultat, sans lui cacher l'information pour les nœuds non-SPOF.
+    `isSpof`/`betweennessScore` sont des propriétés calculées par le job d'analyse F1.3/F1.5
+    (cf. detect_spof / POST /graph/admin/analyze, 1B) — cet endpoint les lit telles que
+    persistées, il ne relance pas GDS à la volée. `downstreamImpacted` parcourt les appels
+    [:APPELLE*] (1B — projection structurelle) pour tout :Composant existant (pas seulement
+    les SPOF) : `isSpof` indique au consommateur le poids à accorder au résultat.
     """
     try:
         driver = get_neo4j_driver()
         with driver.session() as session:
             record = session.run(
-                "MATCH (n:TechnicalNode {id: $id}) RETURN n.isSPOF AS isSPOF",
+                "MATCH (n:Composant {id: $id}) RETURN n.isSpof AS isSpof",
                 {"id": node_id}
             ).single()
 
@@ -440,21 +468,21 @@ def get_node_impact(node_id: str) -> func.HttpResponse:
             downstream = [
                 {
                     "id": rec["id"],
-                    "componentName": rec["componentName"],
+                    "nom": rec["nom"],
                     "distance": rec["distance"],
-                    "criticality": rec["criticality"],
+                    "fiabilite": rec["fiabilite"],
                 }
                 for rec in session.run(
                     """
-                    MATCH (origin:TechnicalNode {id: $id})
-                    MATCH path = (origin)-[:DEPENDS_ON*1..18]->(downstream:TechnicalNode)
+                    MATCH (origin:Composant {id: $id})
+                    MATCH path = (origin)-[:APPELLE*1..18]->(downstream:Composant)
                     WHERE downstream <> origin
                     WITH downstream, path, length(path) AS len
                     ORDER BY len ASC
                     WITH downstream, collect(path)[0] AS shortestPath, min(len) AS distance
-                    RETURN downstream.id AS id, downstream.componentName AS componentName,
-                           distance, last(relationships(shortestPath)).criticality AS criticality
-                    ORDER BY distance, componentName
+                    RETURN downstream.id AS id, downstream.nom AS nom,
+                           distance, last(relationships(shortestPath)).fiabilite AS fiabilite
+                    ORDER BY distance, nom
                     """,
                     {"id": node_id}
                 )
@@ -463,7 +491,7 @@ def get_node_impact(node_id: str) -> func.HttpResponse:
         return func.HttpResponse(
             json.dumps({
                 "nodeId": node_id,
-                "isSPOF": record["isSPOF"] if record["isSPOF"] is not None else False,
+                "isSpof": record["isSpof"] if record["isSpof"] is not None else False,
                 "downstreamImpacted": downstream,
                 "impactedCount": len(downstream),
             }),
@@ -507,7 +535,7 @@ def patch_node_qualification(req: func.HttpRequest, node_id: str) -> func.HttpRe
         driver = get_neo4j_driver()
         with driver.session() as session:
             existing = session.run(
-                "MATCH (n:TechnicalNode {id: $id}) RETURN n.candidate7R AS previous7R",
+                "MATCH (n:Composant {id: $id}) RETURN n.candidate7R AS previous7R",
                 {"id": node_id}
             ).single()
             if not existing:
@@ -523,7 +551,7 @@ def patch_node_qualification(req: func.HttpRequest, node_id: str) -> func.HttpRe
             previous7r = existing["previous7R"]
             updated_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
             session.run(
-                "MATCH (n:TechnicalNode {id: $id}) SET n.candidate7R = $candidate7R, n.updatedAt = $updatedAt",
+                "MATCH (n:Composant {id: $id}) SET n.candidate7R = $candidate7R, n.updatedAt = $updatedAt",
                 {"id": node_id, "candidate7R": candidate7r, "updatedAt": updated_at}
             ).consume()
 
@@ -560,51 +588,60 @@ def patch_node_qualification(req: func.HttpRequest, node_id: str) -> func.HttpRe
 
 
 def get_arcs(request: func.HttpRequest) -> func.HttpResponse:
-    """GET /graph/arcs — Liste filtrable des arcs DEPENDS_ON (SDD §3)."""
-    try:
-        arc_type = request.params.get("arcType")
-        criticality = request.params.get("criticality")
-        direction = request.params.get("direction")
+    """GET /graph/arcs — Liste filtrable des relations (taxonomie v2.0, ALLOWED_REL_TYPES).
 
-        if arc_type and arc_type not in ARC_TYPES:
+    Filtres optionnels : `nodeId` (source ou cible), `type` (un des ALLOWED_REL_TYPES),
+    `fiabilite` (FAIT|HYPOTHÈSE|SUPPOSÉ|MANQUANT)."""
+    try:
+        rel_type = request.params.get("type")
+        fiabilite = request.params.get("fiabilite")
+
+        if rel_type and rel_type not in ALLOWED_REL_TYPES:
             return error_response("Paramètre de filtre invalide", 400)
-        if criticality and criticality not in CRITICALITY_VALUES:
-            return error_response("Paramètre de filtre invalide", 400)
-        if direction and direction not in DIRECTION_VALUES:
+        if fiabilite and fiabilite not in _FIABILITE_RANK:
             return error_response("Paramètre de filtre invalide", 400)
 
         params = {
+            "allowedRels": list(ALLOWED_REL_TYPES),
             "nodeId": request.params.get("nodeId"),
-            "arcType": arc_type,
-            "criticality": criticality,
-            "direction": direction,
+            "type": rel_type,
+            "fiabilite": fiabilite,
             "limit": max(0, _parse_int_param(request, "limit", 100)),
             "offset": max(0, _parse_int_param(request, "offset", 0)),
         }
 
         where_clause = """
-            ($nodeId IS NULL OR source.id = $nodeId OR target.id = $nodeId)
-            AND ($arcType IS NULL OR r.arcType = $arcType)
-            AND ($criticality IS NULL OR r.criticality = $criticality)
-            AND ($direction IS NULL OR r.direction = $direction)
+            type(r) IN $allowedRels
+            AND ($nodeId IS NULL OR source.id = $nodeId OR target.id = $nodeId)
+            AND ($type IS NULL OR type(r) = $type)
+            AND ($fiabilite IS NULL OR r.fiabilite = $fiabilite)
         """
 
         driver = get_neo4j_driver()
         with driver.session() as session:
             total = session.run(
-                f"MATCH (source)-[r:DEPENDS_ON]->(target) WHERE {where_clause} RETURN count(r) AS total", params
+                f"MATCH (source)-[r]->(target) WHERE {where_clause} RETURN count(r) AS total", params
             ).single()["total"]
             records = session.run(
                 f"""
-                MATCH (source)-[r:DEPENDS_ON]->(target) WHERE {where_clause}
-                RETURN r.id AS id, source.id AS sourceNodeId, target.id AS targetNodeId,
-                       r.arcType AS arcType, r.dataFormat AS dataFormat,
-                       r.direction AS direction, r.criticality AS criticality
-                ORDER BY id SKIP $offset LIMIT $limit
+                MATCH (source)-[r]->(target) WHERE {where_clause}
+                RETURN source.id AS sourceNodeId, target.id AS targetNodeId,
+                       type(r) AS type, r.fiabilite AS fiabilite, properties(r) AS properties
+                ORDER BY type, sourceNodeId, targetNodeId SKIP $offset LIMIT $limit
                 """,
                 params
             )
-            items = [dict(record) for record in records]
+            items = []
+            for record in records:
+                props = {k: _to_json(v) for k, v in record["properties"].items()}
+                items.append({
+                    "id": f"{record['type']}-{record['sourceNodeId']}-{record['targetNodeId']}",
+                    "sourceNodeId": record["sourceNodeId"],
+                    "targetNodeId": record["targetNodeId"],
+                    "type": record["type"],
+                    "fiabilite": record["fiabilite"] or _DEFAULT_FIABILITE,
+                    "properties": props,
+                })
 
         return func.HttpResponse(
             json.dumps({"total": total, "items": items}),
@@ -619,14 +656,14 @@ def get_arcs(request: func.HttpRequest) -> func.HttpResponse:
 def get_clusters(request: func.HttpRequest) -> func.HttpResponse:
     """GET /graph/clusters — Appartements candidats issus du clustering Louvain (SDD §3, T15).
 
-    Cluster n'a pas de label dans le schéma Neo4j (SDD §2.1 ne définit que TechnicalNode/
-    FunctionalNode) : agrégation calculée à la lecture, par regroupement des TechnicalNode
+    Cluster n'a pas de label dans le schéma Neo4j : agrégation calculée à la lecture, par
+    regroupement des nœuds de la projection structurelle (1B — GDS_STRUCTURAL_NODE_LABELS)
     sur communityId (écrit par run_louvain / gds.louvain.write — 409 si jamais exécuté).
 
     cohesion/externalCoupling n'ont pas de formule donnée dans le SDD (seulement les seuils
     > 0.7 / < 0.3 et "ratios 0-1", §2.3 lignes 263-265) — gap structurel identique à "pas de
-    voisin redondant" pour detect_spof. Dérivés ici à partir des arcs DEPENDS_ON internes vs.
-    sortants de chaque communauté :
+    voisin redondant" pour detect_spof. Dérivés ici à partir des arcs structurels (1B —
+    GDS_STRUCTURAL_REL_CONFIG) internes vs. sortants de chaque communauté :
       cohesion         = densité interne = arêtes internes / paires possibles n·(n-1)/2
       externalCoupling = arêtes sortantes / (arêtes internes + arêtes sortantes)
     isCandidateApartment est calculé sur les valeurs arrondies (cohérence affichage/flag :
@@ -644,11 +681,17 @@ def get_clusters(request: func.HttpRequest) -> func.HttpResponse:
 
         driver = get_neo4j_driver()
         with driver.session() as session:
+            structural_labels = list(GDS_STRUCTURAL_NODE_LABELS)
+            structural_rels = list(GDS_STRUCTURAL_REL_CONFIG.keys())
+
             community_rows = [
                 {"communityId": rec["communityId"], "id": rec["id"]}
                 for rec in session.run(
-                    "MATCH (n:TechnicalNode) WHERE n.communityId IS NOT NULL "
-                    "RETURN n.communityId AS communityId, n.id AS id"
+                    """
+                    MATCH (n) WHERE any(l IN labels(n) WHERE l IN $labels) AND n.communityId IS NOT NULL
+                    RETURN n.communityId AS communityId, n.id AS id
+                    """,
+                    {"labels": structural_labels}
                 )
             ]
             if not community_rows:
@@ -657,8 +700,13 @@ def get_clusters(request: func.HttpRequest) -> func.HttpResponse:
             edges = [
                 (rec["sourceId"], rec["targetId"])
                 for rec in session.run(
-                    "MATCH (a:TechnicalNode)-[:DEPENDS_ON]->(b:TechnicalNode) "
-                    "RETURN a.id AS sourceId, b.id AS targetId"
+                    """
+                    MATCH (a)-[r]->(b)
+                    WHERE any(l IN labels(a) WHERE l IN $labels) AND any(l IN labels(b) WHERE l IN $labels)
+                      AND type(r) IN $relTypes
+                    RETURN a.id AS sourceId, b.id AS targetId
+                    """,
+                    {"labels": structural_labels, "relTypes": structural_rels}
                 )
             ]
 
@@ -729,41 +777,100 @@ def _drop_projection_if_exists(session, name: str) -> None:
     ).consume()
 
 
+def _structural_projection_inputs(session) -> tuple[list[str], dict]:
+    """gds.graph.project lève IllegalArgumentException si un label/type de
+    GDS_STRUCTURAL_NODE_LABELS / GDS_STRUCTURAL_REL_CONFIG n'existe pas du tout dans le
+    graphe (ex : aucune relation APPELLE/INCLUT/ACCEDE_A pas encore extraite). On restreint
+    donc la projection aux labels/types réellement présents — un sous-ensemble vide signale
+    à l'appelant de sauter la projection GDS et renvoyer un résultat neutre."""
+    existing_labels = {r["label"] for r in session.run("CALL db.labels() YIELD label RETURN label")}
+    existing_rel_types = {r["relationshipType"] for r in session.run(
+        "CALL db.relationshipTypes() YIELD relationshipType RETURN relationshipType"
+    )}
+    node_labels = [l for l in GDS_STRUCTURAL_NODE_LABELS if l in existing_labels]
+    rel_config = {t: cfg for t, cfg in GDS_STRUCTURAL_REL_CONFIG.items() if t in existing_rel_types}
+    return node_labels, rel_config
+
+
 def compute_criticality(driver) -> int:
-    """F1.3 — Score de criticité = somme pondérée des arcs entrants (SDD §2.1, Cypher fourni verbatim).
-    Poids : CRITICAL=4, HIGH=3, MEDIUM=2, LOW=1. Un nœud sans arc entrant n'est pas retourné par ce
-    MATCH ; son criticalityScore reste à sa valeur initiale (0, valorisée par l'ingestion)."""
+    """F1.3 — criticiteScore [0-100] (Partie C, ligne 128) sur Composant et Store_Donnees.
+
+    fanIn/fanOut (Partie C : applicable sur Composant, + fanIn sur Structure_Partagee et
+    Store_Donnees) sont calculés depuis les arcs structurels APPELLE/INCLUT/ACCEDE_A/
+    DECLENCHE (1B). criticiteScore agrège fanIn/fanOut/isSpof/isArticulationPoint — ces deux
+    derniers doivent déjà être écrits par detect_spof (run_analysis appelle detect_spof
+    avant compute_criticality)."""
     with driver.session() as session:
+        session.run(
+            """
+            MATCH (c:Composant)
+            SET c.fanOut = COUNT { (c)-[:APPELLE]->(:Composant) },
+                c.fanIn  = COUNT { (c)<-[:APPELLE]-(:Composant) } + COUNT { (c)<-[:DECLENCHE]-() }
+            """
+        ).consume()
+        session.run(
+            """
+            MATCH (s:Structure_Partagee)
+            SET s.fanIn = COUNT { (s)<-[:INCLUT]-(:Composant) }
+            """
+        ).consume()
+        session.run(
+            """
+            MATCH (s:Store_Donnees)
+            SET s.fanIn = COUNT { (s)<-[:ACCEDE_A]-(:Composant) }
+            """
+        ).consume()
+
         result = session.run(
             """
-            MATCH (src)-[r:DEPENDS_ON]->(n:TechnicalNode)
-            WITH n, sum(
-              CASE r.criticality WHEN 'CRITICAL' THEN 4 WHEN 'HIGH' THEN 3
-                                 WHEN 'MEDIUM' THEN 2 ELSE 1 END) AS score
-            SET n.criticalityScore = score
+            MATCH (n)
+            WHERE n:Composant OR n:Store_Donnees
+            WITH n, (coalesce(n.fanIn, 0) * $w + coalesce(n.fanOut, 0) * $w
+                     + CASE WHEN coalesce(n.isSpof, false) THEN $spof ELSE 0 END
+                     + CASE WHEN coalesce(n.isArticulationPoint, false) THEN $art ELSE 0 END) AS raw
+            SET n.criticiteScore = CASE WHEN raw > 100 THEN 100 ELSE raw END
             RETURN count(n) AS updated
-            """
+            """,
+            {"w": _CRITICITE_FANINOUT_WEIGHT, "spof": _CRITICITE_SPOF_BONUS, "art": _CRITICITE_ARTICULATION_BONUS},
         )
         return result.single()["updated"]
 
 
 def detect_spof(driver, percentile: float = SPOF_BETWEENNESS_PERCENTILE) -> dict:
-    """F1.3/F1.5 — isSPOF = betweenness > pXX ET pas de voisin redondant (SDD §9 detect_spof).
+    """F1.3/F1.5 — isSpof = betweennessScore > pXX ET pas de voisin redondant (Partie C : SPOF
+    / Noeud_Articulation).
 
     « Pas de voisin redondant » est opérationnalisé comme : le nœud est un point d'articulation
     (gds.articulationPoints — sa suppression déconnecterait le graphe, donc aucun chemin de
     secours n'existe entre ses voisins). Une betweenness élevée seule ne suffit pas : un hub très
     sollicité mais doublé par un chemin alternatif n'est pas un SPOF réel — d'où le ET.
 
-    Projection 'moderngraph_tech' non orientée, identique à celle prescrite par le Cypher SDD §2.1
-    pour Louvain (réutilisable telle quelle par F1.5) ; supprimée après lecture des métriques
-    (op. coûteuse en mémoire GDS, ne doit pas persister entre deux exécutions du job).
+    Projection structurelle 1B (GDS_STRUCTURAL_NODE_LABELS / GDS_STRUCTURAL_REL_CONFIG, non
+    orientée, partagée avec run_louvain) ; supprimée après lecture des métriques (op. coûteuse
+    en mémoire GDS, ne doit pas persister entre deux exécutions du job). Écrit
+    betweennessScore/isSpof/isArticulationPoint sur Composant et Store_Donnees (Partie C
+    "applicable sur").
     """
     with driver.session() as session:
         _drop_projection_if_exists(session, GDS_TECH_PROJECTION)
+        node_labels, rel_config = _structural_projection_inputs(session)
+
+        if not node_labels or not rel_config:
+            # Graphe structurel vide ou incomplet (aucun Composant/Store_*/Structure_Partagee,
+            # ou aucune relation APPELLE/INCLUT/ACCEDE_A pas encore extraite) — gds.graph.project
+            # lève IllegalArgumentException si un label/type projeté n'existe pas du tout dans
+            # le graphe ; retour neutre dans ce cas.
+            return {
+                "nodesAnalyzed": 0,
+                "betweennessPercentile": percentile,
+                "betweennessThreshold": 0.0,
+                "spofCount": 0,
+                "spofNodeIds": [],
+            }
+
         session.run(
-            "CALL gds.graph.project($name, 'TechnicalNode', {DEPENDS_ON: {orientation: 'UNDIRECTED'}})",
-            {"name": GDS_TECH_PROJECTION}
+            "CALL gds.graph.project($name, $nodeLabels, $relConfig)",
+            {"name": GDS_TECH_PROJECTION, "nodeLabels": node_labels, "relConfig": rel_config}
         ).consume()
 
         try:
@@ -788,20 +895,26 @@ def detect_spof(driver, percentile: float = SPOF_BETWEENNESS_PERCENTILE) -> dict
 
         threshold = _percentile(list(betweenness.values()), percentile)
         rows = [
-            {"id": node_id, "betweenness": score, "isSPOF": score > threshold and node_id in articulation_ids}
+            {
+                "id": node_id, "betweenness": score,
+                "isArticulationPoint": node_id in articulation_ids,
+                "isSpof": score > threshold and node_id in articulation_ids,
+            }
             for node_id, score in betweenness.items()
         ]
 
         session.run(
             """
             UNWIND $rows AS row
-            MATCH (n:TechnicalNode {id: row.id})
-            SET n.betweenness = row.betweenness, n.isSPOF = row.isSPOF
+            MATCH (n {id: row.id})
+            WHERE n:Composant OR n:Store_Donnees
+            SET n.betweennessScore = row.betweenness, n.isSpof = row.isSpof,
+                n.isArticulationPoint = row.isArticulationPoint
             """,
             {"rows": rows}
         ).consume()
 
-        spof_ids = sorted(row["id"] for row in rows if row["isSPOF"])
+        spof_ids = sorted(row["id"] for row in rows if row["isSpof"])
         return {
             "nodesAnalyzed": len(rows),
             "betweennessPercentile": percentile,
@@ -812,17 +925,24 @@ def detect_spof(driver, percentile: float = SPOF_BETWEENNESS_PERCENTILE) -> dict
 
 
 def run_louvain(driver) -> dict:
-    """F1.5 — Clustering Louvain "appartements candidats" (SDD §2.1, Cypher fourni verbatim) :
-    projette moderngraph_tech (même projection non orientée que detect_spof, supprimée après
-    écriture — réutilise _drop_projection_if_exists) puis gds.louvain.write(..., writeProperty:
-    'communityId'). Persiste uniquement communityId sur chaque TechnicalNode : Cluster n'a pas
-    de label dans le schéma SDD (§2.1 ne définit que TechnicalNode/FunctionalNode), le reste
-    (cohesion, externalCoupling, regroupement) est calculé à la lecture par get_clusters."""
+    """F1.5/Couche 6 — Communaute_Louvain (Partie B ligne 126) : projette la même projection
+    structurelle que detect_spof (GDS_STRUCTURAL_NODE_LABELS / GDS_STRUCTURAL_REL_CONFIG,
+    supprimée après écriture) puis gds.louvain.write(..., writeProperty: 'communityId').
+    communityId est écrit sur tous les labels projetés (Partie C : "Tous") — proxy
+    automatique pour valider/challenger les Bounded Contexts candidats (Couche 5, hors
+    scope de cet arc). Le reste (cohesion, externalCoupling, regroupement) est calculé à la
+    lecture par get_clusters."""
     with driver.session() as session:
         _drop_projection_if_exists(session, GDS_TECH_PROJECTION)
+        node_labels, rel_config = _structural_projection_inputs(session)
+
+        if not node_labels or not rel_config:
+            # Graphe structurel vide ou incomplet — cf. detect_spof.
+            return {"communityCount": 0, "modularity": 0.0}
+
         session.run(
-            "CALL gds.graph.project($name, 'TechnicalNode', {DEPENDS_ON: {orientation: 'UNDIRECTED'}})",
-            {"name": GDS_TECH_PROJECTION}
+            "CALL gds.graph.project($name, $nodeLabels, $relConfig)",
+            {"name": GDS_TECH_PROJECTION, "nodeLabels": node_labels, "relConfig": rel_config}
         ).consume()
 
         try:
@@ -841,21 +961,22 @@ def run_louvain(driver) -> dict:
 
 
 def clear_functional_entities(req: func.HttpRequest) -> func.HttpResponse:
-    """DELETE /graph/admin/functional-entities — Supprime la couche fonctionnelle extraite des
-    documents Chat (FunctionalDomain, MacroFunction, Program, DataEntity + leurs relations).
-    Les TechnicalNode et leurs annotations candidate7R sont préservés."""
+    """DELETE /graph/admin/functional-entities — pré-étape du bouton "Mise à jour" (ré-extraction
+    complète, taxonomie v2.0) : supprime tout le graphe SAUF :Composant/:System, puis détache
+    les :Composant de leurs relations. Les nœuds :Composant et leurs propriétés de
+    qualification (strategie7R, candidate7R) et calculées par GDS (isSpof, betweennessScore,
+    communityId, ...) survivent ainsi à une ré-extraction ; tout le reste (Fonction,
+    Regle_Metier, stores, relations...) est intégralement reconstruit par l'extraction
+    suivante."""
     try:
         driver = get_neo4j_driver()
         with driver.session() as session:
             count_result = session.run(
-                "MATCH (n) WHERE n:FunctionalDomain OR n:MacroFunction OR n:Program OR n:DataEntity "
-                "RETURN count(n) AS total"
+                "MATCH (n) WHERE NOT n:Composant AND NOT n:System RETURN count(n) AS total"
             )
             total = count_result.single()["total"]
-            session.run(
-                "MATCH (n) WHERE n:FunctionalDomain OR n:MacroFunction OR n:Program OR n:DataEntity "
-                "DETACH DELETE n"
-            )
+            session.run("MATCH (n) WHERE NOT n:Composant AND NOT n:System DETACH DELETE n")
+            session.run("MATCH (c:Composant)-[r]-() DELETE r")
         return func.HttpResponse(
             json.dumps({"status": "ok", "deleted": total, "timestamp": datetime.now(timezone.utc).isoformat()}),
             status_code=200, mimetype="application/json"
@@ -892,11 +1013,14 @@ def run_analysis(req: func.HttpRequest) -> func.HttpResponse:
     garde l'ingestion rapide et découple son coût du calcul GDS, conformément au commentaire
     SDD §2.1 qui distingue explicitement jobs d'analyse et ingestion). Les trois algorithmes
     sont groupés dans un seul script Cypher au SDD §2.1 — gardés ensemble ici pour la même raison.
+
+    Ordre 1B : detect_spof avant compute_criticality — criticiteScore agrège isSpof/
+    isArticulationPoint/betweennessScore, écrits par detect_spof.
     """
     try:
         driver = get_neo4j_driver()
-        nodes_scored = compute_criticality(driver)
         spof = detect_spof(driver)
+        nodes_scored = compute_criticality(driver)
         clustering = run_louvain(driver)
         return func.HttpResponse(
             json.dumps({
@@ -918,222 +1042,122 @@ def run_analysis(req: func.HttpRequest) -> func.HttpResponse:
 # ============================================================================
 
 def import_entities(req: func.HttpRequest) -> func.HttpResponse:
-    """Merge un graphe de connaissance (extrait des documents Chat via GPT-4o) dans Neo4j.
+    """Merge un graphe de connaissance (extrait des documents Chat via GPT-4o, taxonomie
+    GraphRAG Legacy-Modernisation v2.0) dans Neo4j.
 
-    Payload JSON (tous les champs sont optionnels — les imports partiels sont supportés) :
+    Payload JSON :
     {
-      "system":             {"id": str, "name": str},
-      "functional_domains": [{"id": str, "code": str|null, "name": str, "description": str|null}],
-      "macro_functions":    [{"id": str, "code": str|null, "name": str, "mode": str|null,
-                              "domain_id": str, "description": str|null}],
-      "programs":           [{"name": str, "technology": str|null, "mode": str|null,
-                              "macro_function_ids": list[str], "description": str|null}],
-      "data_entities":      [{"name": str, "type": str|null, "description": str|null}],
-      "crud_relationships": [{"program_name": str, "entity_name": str, "operations": list[str]}]
+      "nodes":     [{"id": str, "label": str, "properties": {...}}],
+      "relations": [{"from": str, "to": str, "type": str, "properties": {...}}]
     }
 
-    Toutes les opérations sont des MERGE sur l'identifiant canonique — idempotent,
-    safe pour les re-lancements successifs. Les annotations 7R sur les TechnicalNode
-    existants ne sont jamais écrasées (ON MATCH SET ne touche pas candidate7R).
+    `label` doit appartenir à ALLOWED_NODE_LABELS et `type` à ALLOWED_REL_TYPES — toute
+    entrée hors de ces ensembles est ignorée (défense contre la dérive du LLM extracteur).
+    MERGE par `id` pour les nœuds, par triplet (from, type, to) pour les relations (F.2).
+    Le label/type dynamique est injecté par interpolation de chaîne dans la requête Cypher
+    (APOC n'est pas disponible sur cette instance — `apoc.merge.*` retourne
+    ProcedureNotFound) ; c'est sans risque d'injection car `label`/`rel_type` sont
+    systématiquement vérifiés contre ALLOWED_NODE_LABELS/ALLOWED_REL_TYPES (ensembles fermés
+    de littéraux) avant interpolation. La propriété `fiabilite` (FAIT > HYPOTHÈSE > SUPPOSÉ >
+    MANQUANT, F.2) est upgrade-only : un import qui re-merge un nœud/relation existant ne
+    peut jamais dégrader sa fiabilite.
     """
     try:
         body = req.get_json()
     except Exception:
         return error_response("Corps JSON invalide", 400)
 
-    system            = body.get("system") or {}
-    functional_domains = body.get("functional_domains") or []
-    macro_functions   = body.get("macro_functions") or []
-    programs          = body.get("programs") or []
-    data_entities     = body.get("data_entities") or []
-    crud_relationships = body.get("crud_relationships") or []
-
-    counts = {
-        "systems": 0, "domains": 0, "macro_functions": 0,
-        "programs": 0, "data_entities": 0, "relationships": 0,
-    }
-
-    # Opérations CRUD → types de relation Neo4j (contrôlés — pas de risque d'injection)
-    _CRUD_REL = {"C": "CREATES", "R": "READS", "U": "UPDATES", "D": "DELETES"}
+    nodes     = body.get("nodes") or []
+    relations = body.get("relations") or []
+    counts: dict[str, int] = {}
+    now = datetime.now(timezone.utc).isoformat()
 
     try:
         driver = get_neo4j_driver()
         with driver.session() as session:
 
-            # ── System ────────────────────────────────────────────────────────
-            if system.get("id"):
-                session.run(
-                    """
-                    MERGE (sys:System {id: $id})
-                    ON CREATE SET sys.name = $name, sys.createdAt = datetime()
-                    ON MATCH  SET sys.name = $name, sys.updatedAt = datetime()
-                    """,
-                    id=system["id"], name=system.get("name", system["id"]),
-                )
-                counts["systems"] += 1
-
-            # ── Domaines fonctionnels → :FunctionalDomain:FunctionalNode ─────
-            # Multi-label Neo4j : :FunctionalDomain conserve le label domaine-métier ;
-            # :FunctionalNode est le label standard lu par get_nodes(). La propriété
-            # `domain` (attendue par _functional_node_dto) est mappée depuis `name`.
-            for d in functional_domains:
-                if not d.get("id"):
+            # ── Nœuds ─────────────────────────────────────────────────────────
+            for n in nodes:
+                node_id = n.get("id")
+                label = n.get("label")
+                if not node_id or label not in ALLOWED_NODE_LABELS:
+                    logger.warning("import_entities: nœud ignoré (id=%r, label=%r)", node_id, label)
                     continue
-                d_name = d.get("name", d["id"])
-                session.run(
-                    """
-                    MERGE (d:FunctionalDomain:FunctionalNode {id: $id})
-                    ON CREATE SET d.code = $code, d.name = $name, d.domain = $name,
-                                  d.description = $desc, d.systemId = $sys_id,
-                                  d.modernizationStatus = 'EXISTING',
-                                  d.createdAt = datetime()
-                    ON MATCH  SET d.name = $name, d.domain = $name,
-                                  d.description = $desc, d.updatedAt = datetime()
-                    """,
-                    id=d["id"], code=d.get("code"), name=d_name,
-                    desc=d.get("description"), sys_id=system.get("id"),
-                )
-                if system.get("id"):
-                    session.run(
-                        """
-                        MATCH (sys:System {id: $sys_id})
-                        MATCH (d:FunctionalDomain {id: $d_id})
-                        MERGE (sys)-[:HAS_DOMAIN]->(d)
-                        """,
-                        sys_id=system["id"], d_id=d["id"],
-                    )
-                counts["domains"] += 1
 
-            # ── Macro-fonctions → :MacroFunction:FunctionalNode ──────────────
-            for mf in macro_functions:
-                if not mf.get("id"):
-                    continue
-                mf_name = mf.get("name", mf["id"])
-                session.run(
-                    """
-                    MERGE (mf:MacroFunction:FunctionalNode {id: $id})
-                    ON CREATE SET mf.code = $code, mf.name = $name, mf.domain = $name,
-                                  mf.mode = $mode, mf.description = $desc,
-                                  mf.modernizationStatus = 'EXISTING',
-                                  mf.createdAt = datetime()
-                    ON MATCH  SET mf.name = $name, mf.domain = $name,
-                                  mf.mode = $mode, mf.description = $desc,
-                                  mf.updatedAt = datetime()
-                    """,
-                    id=mf["id"], code=mf.get("code"), name=mf_name,
-                    mode=mf.get("mode"), desc=mf.get("description"),
-                )
-                if mf.get("domain_id"):
-                    session.run(
-                        """
-                        MATCH (d:FunctionalDomain {id: $d_id})
-                        MATCH (mf:MacroFunction {id: $mf_id})
-                        MERGE (d)-[:HAS_MACROFUNCTION]->(mf)
-                        """,
-                        d_id=mf["domain_id"], mf_id=mf["id"],
-                    )
-                    session.run(
-                        """
-                        MATCH (d:FunctionalDomain {id: $d_id}), (mf:MacroFunction {id: $mf_id})
-                        MERGE (d)-[dep:DEPENDS_ON {id: $arc_id}]->(mf)
-                        ON CREATE SET dep.arcType = 'FUNCTIONAL', dep.direction = 'UNIDIRECTIONAL', dep.criticality = 'LOW'
-                        """,
-                        d_id=mf["domain_id"], mf_id=mf["id"],
-                        arc_id=f"fn-{mf['domain_id']}-{mf['id']}",
-                    )
-                counts["macro_functions"] += 1
+                props = dict(n.get("properties") or {})
+                props["id"] = node_id
+                fiabilite = props.get("fiabilite")
+                if fiabilite not in _FIABILITE_RANK:
+                    fiabilite = _DEFAULT_FIABILITE
+                props["fiabilite"] = fiabilite
 
-            # ── Programmes → :Program:TechnicalNode ──────────────────────────
-            # Les programmes (COBOL, JCL…) sont des composants techniques : label
-            # :TechnicalNode pour get_nodes(). `id` et `componentName` mappés depuis
-            # `name` (identifiant canonique du programme).
-            for p in programs:
-                if not p.get("name"):
-                    continue
-                session.run(
-                    """
-                    MERGE (p:Program:TechnicalNode {id: $name})
-                    ON CREATE SET p.name = $name, p.componentName = $name,
-                                  p.technology = $tech, p.mode = $mode,
-                                  p.description = $desc, p.candidate7R = 'UNQUALIFIED',
-                                  p.isGhost = false, p.criticalityScore = 0,
-                                  p.betweenness = 0.0, p.isSPOF = false,
-                                  p.createdAt = datetime()
-                    ON MATCH  SET p.componentName = $name, p.technology = $tech,
-                                  p.mode = $mode, p.description = $desc,
-                                  p.updatedAt = datetime()
-                    """,
-                    name=p["name"], tech=p.get("technology"),
-                    mode=p.get("mode"), desc=p.get("description"),
-                )
-                for mf_id in (p.get("macro_function_ids") or []):
-                    session.run(
-                        """
-                        MATCH (mf:MacroFunction {id: $mf_id})
-                        MATCH (p:Program {id: $p_id})
-                        MERGE (mf)-[:IMPLEMENTED_BY]->(p)
-                        """,
-                        mf_id=mf_id, p_id=p["name"],
-                    )
-                    session.run(
-                        """
-                        MATCH (mf:MacroFunction {id: $mf_id}), (p:Program {id: $p_id})
-                        MERGE (mf)-[dep:DEPENDS_ON {id: $arc_id}]->(p)
-                        ON CREATE SET dep.arcType = 'FUNCTIONAL', dep.direction = 'UNIDIRECTIONAL', dep.criticality = 'MEDIUM'
-                        """,
-                        mf_id=mf_id, p_id=p["name"],
-                        arc_id=f"fn-{mf_id}-{p['name']}",
-                    )
-                counts["programs"] += 1
+                on_create = dict(props)
+                on_create["createdAt"] = now
+                on_match = {k: v for k, v in props.items() if k != "fiabilite"}
+                on_match["updatedAt"] = now
 
-            # ── Entités de données → :DataEntity:FunctionalNode ──────────────
-            for e in data_entities:
-                if not e.get("name"):
-                    continue
                 session.run(
-                    """
-                    MERGE (e:DataEntity:FunctionalNode {id: $name})
-                    ON CREATE SET e.name = $name, e.domain = $name,
-                                  e.type = $type, e.description = $desc,
-                                  e.modernizationStatus = 'EXISTING',
-                                  e.createdAt = datetime()
-                    ON MATCH  SET e.type = $type, e.description = $desc,
-                                  e.domain = $name, e.updatedAt = datetime()
+                    f"""
+                    MERGE (node:{label} {{id: $id}})
+                    ON CREATE SET node += $onCreate
+                    ON MATCH SET node += $onMatch
+                    WITH node, coalesce($fiabiliteRank[node.fiabilite], -1) AS existingRank
+                    SET node.fiabilite = CASE WHEN $incomingRank > existingRank
+                                              THEN $incomingFiabilite ELSE node.fiabilite END
                     """,
-                    name=e["name"], type=e.get("type"), desc=e.get("description"),
-                )
-                counts["data_entities"] += 1
+                    {
+                        "id": node_id,
+                        "onCreate": on_create, "onMatch": on_match,
+                        "fiabiliteRank": _FIABILITE_RANK,
+                        "incomingRank": _FIABILITE_RANK[fiabilite],
+                        "incomingFiabilite": fiabilite,
+                    },
+                ).consume()
+                counts[label] = counts.get(label, 0) + 1
 
-            # ── Relations CRUD ────────────────────────────────────────────────
-            for cr in crud_relationships:
-                p_name = cr.get("program_name")
-                e_name = cr.get("entity_name")
-                ops    = cr.get("operations") or []
-                if not p_name or not e_name:
+            # ── Relations ─────────────────────────────────────────────────────
+            for r in relations:
+                from_id, to_id, rel_type = r.get("from"), r.get("to"), r.get("type")
+                if not from_id or not to_id or rel_type not in ALLOWED_REL_TYPES:
+                    logger.warning("import_entities: relation ignorée (from=%r, to=%r, type=%r)",
+                                    from_id, to_id, rel_type)
                     continue
-                # Garantit l'existence de l'entité même si absente de data_entities
-                session.run(
-                    "MERGE (e:DataEntity:FunctionalNode {id: $name}) ON CREATE SET e.name = $name, e.domain = $name",
-                    name=e_name,
-                )
-                for op in ops:
-                    rel_type = _CRUD_REL.get(str(op).upper())
-                    if not rel_type:
-                        continue
-                    session.run(
-                        f"MATCH (p:Program {{id: $p}}) MATCH (e:DataEntity {{id: $e}}) MERGE (p)-[:{rel_type}]->(e)",
-                        p=p_name, e=e_name,
-                    )
-                    counts["relationships"] += 1
-                # Un seul DEPENDS_ON par paire (program, entity) pour la vue graphe
-                session.run(
-                    """
-                    MATCH (p:Program {id: $p}), (e:DataEntity {id: $e})
-                    MERGE (p)-[dep:DEPENDS_ON {id: $arc_id}]->(e)
-                    ON CREATE SET dep.arcType = 'DATA_FLOW', dep.direction = 'UNIDIRECTIONAL', dep.criticality = 'MEDIUM'
+
+                props = dict(r.get("properties") or {})
+                fiabilite = props.get("fiabilite")
+                if fiabilite not in _FIABILITE_RANK:
+                    fiabilite = _DEFAULT_FIABILITE
+                props["fiabilite"] = fiabilite
+
+                on_create = dict(props)
+                on_create["createdAt"] = now
+                on_match = {k: v for k, v in props.items() if k != "fiabilite"}
+                on_match["updatedAt"] = now
+
+                result = session.run(
+                    f"""
+                    MATCH (a {{id: $from}}), (b {{id: $to}})
+                    MERGE (a)-[rel:{rel_type}]->(b)
+                    ON CREATE SET rel += $onCreate
+                    ON MATCH SET rel += $onMatch
+                    WITH rel, coalesce($fiabiliteRank[rel.fiabilite], -1) AS existingRank
+                    SET rel.fiabilite = CASE WHEN $incomingRank > existingRank
+                                             THEN $incomingFiabilite ELSE rel.fiabilite END
+                    RETURN rel
                     """,
-                    p=p_name, e=e_name, arc_id=f"data-{p_name}-{e_name}",
+                    {
+                        "from": from_id, "to": to_id,
+                        "onCreate": on_create, "onMatch": on_match,
+                        "fiabiliteRank": _FIABILITE_RANK,
+                        "incomingRank": _FIABILITE_RANK[fiabilite],
+                        "incomingFiabilite": fiabilite,
+                    },
                 )
+                if not list(result):
+                    logger.warning("import_entities: relation %s -[%s]-> %s ignorée (nœud(s) introuvable(s))",
+                                    from_id, rel_type, to_id)
+                    continue
+                counts["relations"] = counts.get("relations", 0) + 1
 
     except Exception as exc:
         logger.error(f"import_entities failed: {exc}")
@@ -1143,7 +1167,7 @@ def import_entities(req: func.HttpRequest) -> func.HttpResponse:
         json.dumps({
             "status": "ok",
             "imported": counts,
-            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "timestamp": now,
         }),
         status_code=200,
         mimetype="application/json",
