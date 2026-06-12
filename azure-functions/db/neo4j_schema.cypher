@@ -1,57 +1,107 @@
 // ============================================================================
-// Neo4j — Schéma ADG-M v1 (SDD_ADG-M_v1.md §2.1)
-// Remplace le modèle smoke-test Sprint 0 (:Component/:Domain) par le modèle
-// bi-plan réel : :TechnicalNode / :FunctionalNode / DEPENDS_ON / REALIZED_BY.
-// Exécuter via cypher-shell ou Neo4j Browser sur neo4j-dev (ACI).
+// Neo4j — Schéma ADG-M v2 (taxonomie GraphRAG Legacy-Modernisation v2.0, voir
+// notebooklm-azure/glossaire-taxonomie-graphrag-legacy-modernisation.md)
+// Remplace le modèle bi-plan v1 (:TechnicalNode/:FunctionalNode/DEPENDS_ON) par les
+// 20 labels Phase-1 de la taxonomie, mergés génériquement par `id` (function_app.py
+// import_entities / ALLOWED_NODE_LABELS). Exécuter via cypher-shell ou Neo4j Browser.
 // ============================================================================
 
 // ----------------------------------------------------------------------------
-// 1) Nettoyage du smoke-test Sprint 0 (fixture FL + CardDemo, modèle :Component)
+// 1) Nettoyage du schéma v1
 // ----------------------------------------------------------------------------
-DROP CONSTRAINT node_id IF EXISTS;
-DROP CONSTRAINT domain_id IF EXISTS;
-DROP INDEX node_name_idx IF EXISTS;
-DROP INDEX node_type_idx IF EXISTS;
-DROP INDEX depends_idx IF EXISTS;
+DROP CONSTRAINT functional_node_id IF EXISTS;
+DROP CONSTRAINT technical_node_id IF EXISTS;
+DROP CONSTRAINT technical_component_name IF EXISTS;
+DROP CONSTRAINT arc_id IF EXISTS;
 
-MATCH (n:Component) DETACH DELETE n;
-MATCH (d:Domain) DETACH DELETE d;
+// Processus_Metier renommé Processus_Fonctionnel (taxonomie révisée) — ancienne contrainte
+DROP CONSTRAINT processus_metier_id IF EXISTS;
 
-// ----------------------------------------------------------------------------
-// 2) Schéma cible SDD ADG-M §2.1 — contraintes d'unicité
-// ----------------------------------------------------------------------------
-CREATE CONSTRAINT functional_node_id IF NOT EXISTS
-FOR (n:FunctionalNode) REQUIRE n.id IS UNIQUE;
-
-CREATE CONSTRAINT technical_node_id IF NOT EXISTS
-FOR (n:TechnicalNode) REQUIRE n.id IS UNIQUE;
-
-// Unicité métier secondaire : un composant technique = un componentName unique
-CREATE CONSTRAINT technical_component_name IF NOT EXISTS
-FOR (n:TechnicalNode) REQUIRE n.componentName IS UNIQUE;
-
-// Unicité d'arc (Neo4j 5.7+ — relationship uniqueness constraint).
-// Fallback si non supporté par l'édition : unicité gérée applicativement à l'ingestion.
-CREATE CONSTRAINT arc_id IF NOT EXISTS
-FOR ()-[r:DEPENDS_ON]-() REQUIRE r.id IS UNIQUE;
+DROP INDEX functional_domain IF EXISTS;
+DROP INDEX functional_status IF EXISTS;
+DROP INDEX technical_candidate7r IF EXISTS;
+DROP INDEX technical_technology IF EXISTS;
+DROP INDEX technical_isghost IF EXISTS;
 
 // ----------------------------------------------------------------------------
-// 3) Index de performance
+// 2) Schéma cible — une contrainte d'unicité .id par label (ALLOWED_NODE_LABELS,
+//    function_app.py). MERGE-by-id (taxonomie F.2) ⇒ idempotence.
 // ----------------------------------------------------------------------------
-CREATE INDEX functional_domain IF NOT EXISTS
-FOR (n:FunctionalNode) ON (n.domain);
+CREATE CONSTRAINT system_id IF NOT EXISTS
+FOR (n:System) REQUIRE n.id IS UNIQUE;
 
-CREATE INDEX functional_status IF NOT EXISTS
-FOR (n:FunctionalNode) ON (n.modernizationStatus);
+CREATE CONSTRAINT domaine_fonctionnel_id IF NOT EXISTS
+FOR (n:Domaine_Fonctionnel) REQUIRE n.id IS UNIQUE;
 
-CREATE INDEX technical_candidate7r IF NOT EXISTS
-FOR (n:TechnicalNode) ON (n.candidate7R);
+CREATE CONSTRAINT fonction_id IF NOT EXISTS
+FOR (n:Fonction) REQUIRE n.id IS UNIQUE;
 
-CREATE INDEX technical_technology IF NOT EXISTS
-FOR (n:TechnicalNode) ON (n.technology);
+CREATE CONSTRAINT regle_metier_id IF NOT EXISTS
+FOR (n:Regle_Metier) REQUIRE n.id IS UNIQUE;
 
-CREATE INDEX technical_isghost IF NOT EXISTS
-FOR (n:TechnicalNode) ON (n.isGhost);
+CREATE CONSTRAINT processus_fonctionnel_id IF NOT EXISTS
+FOR (n:Processus_Fonctionnel) REQUIRE n.id IS UNIQUE;
+
+CREATE CONSTRAINT domaine_technique_id IF NOT EXISTS
+FOR (n:Domaine_Technique) REQUIRE n.id IS UNIQUE;
+
+CREATE CONSTRAINT composant_id IF NOT EXISTS
+FOR (n:Composant) REQUIRE n.id IS UNIQUE;
+
+CREATE CONSTRAINT point_entree_id IF NOT EXISTS
+FOR (n:Point_Entree) REQUIRE n.id IS UNIQUE;
+
+CREATE CONSTRAINT interface_utilisateur_id IF NOT EXISTS
+FOR (n:Interface_Utilisateur) REQUIRE n.id IS UNIQUE;
+
+CREATE CONSTRAINT job_batch_id IF NOT EXISTS
+FOR (n:Job_Batch) REQUIRE n.id IS UNIQUE;
+
+CREATE CONSTRAINT unite_execution_id IF NOT EXISTS
+FOR (n:Unite_Execution) REQUIRE n.id IS UNIQUE;
+
+CREATE CONSTRAINT procedure_reutilisable_id IF NOT EXISTS
+FOR (n:Procedure_Reutilisable) REQUIRE n.id IS UNIQUE;
+
+CREATE CONSTRAINT structure_partagee_id IF NOT EXISTS
+FOR (n:Structure_Partagee) REQUIRE n.id IS UNIQUE;
+
+CREATE CONSTRAINT store_donnees_id IF NOT EXISTS
+FOR (n:Store_Donnees) REQUIRE n.id IS UNIQUE;
+
+CREATE CONSTRAINT store_echange_id IF NOT EXISTS
+FOR (n:Store_Echange) REQUIRE n.id IS UNIQUE;
+
+CREATE CONSTRAINT table_relationnelle_id IF NOT EXISTS
+FOR (n:Table_Relationnelle) REQUIRE n.id IS UNIQUE;
+
+CREATE CONSTRAINT store_hierarchique_id IF NOT EXISTS
+FOR (n:Store_Hierarchique) REQUIRE n.id IS UNIQUE;
+
+CREATE CONSTRAINT entite_donnees_id IF NOT EXISTS
+FOR (n:Entite_Donnees) REQUIRE n.id IS UNIQUE;
+
+CREATE CONSTRAINT canal_messagerie_id IF NOT EXISTS
+FOR (n:Canal_Messagerie) REQUIRE n.id IS UNIQUE;
+
+CREATE CONSTRAINT zone_incertitude_id IF NOT EXISTS
+FOR (n:Zone_Incertitude) REQUIRE n.id IS UNIQUE;
+
+// ----------------------------------------------------------------------------
+// 3) Index de performance — propriétés calculées par GDS / qualification 7R
+//    (Composant) et triage des incertitudes (Zone_Incertitude).
+// ----------------------------------------------------------------------------
+CREATE INDEX composant_strategie7r IF NOT EXISTS
+FOR (n:Composant) ON (n.strategie7R);
+
+CREATE INDEX composant_is_spof IF NOT EXISTS
+FOR (n:Composant) ON (n.isSpof);
+
+CREATE INDEX composant_community_id IF NOT EXISTS
+FOR (n:Composant) ON (n.communityId);
+
+CREATE INDEX zone_incertitude_niveau_urgence IF NOT EXISTS
+FOR (n:Zone_Incertitude) ON (n.niveauUrgence);
 
 // ----------------------------------------------------------------------------
 // 4) Vérification (à exécuter séparément)
