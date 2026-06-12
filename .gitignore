@@ -46,3 +46,6 @@ api/data/
 
 # Corpus de référence — données sensibles
 doc-archimind/
+
+# Outillage spécifique à Claude Code (local, non nécessaire au fonctionnement de l'app)
+.claude/
