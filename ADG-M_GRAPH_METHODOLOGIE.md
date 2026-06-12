@@ -1,5 +1,13 @@
 # Graphe ADG-M — Méthodologie d'ingestion, typage et corrélation
 
+> **Note** : la section 2.2 (Phase 2 — Extraction Chat→Graph) décrit l'architecture initiale du
+> pipeline d'extraction (un appel GPT-4o unique par document, troncature à 14 000 caractères,
+> classification par nom de fichier, taxonomie C1-C7). Cette phase a depuis été refondue en un
+> pipeline multi-étapes par document (chunking par titres, inventaire → enrichissement par couche
+> et par sous-prompt → complétion, taxonomie GraphRAG Legacy-Modernisation v2.0 à 19 labels/15
+> relations). La référence à jour est la section "Bouton Mise à jour (ExtractButton)" de
+> `CLAUDE.md` et le code de `api/routers/extract.py`.
+
 ---
 
 ## Table des matières

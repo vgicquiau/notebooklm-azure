@@ -75,11 +75,11 @@ _CRITICITE_ARTICULATION_BONUS = 20
 # notebooklm-azure/glossaire-taxonomie-graphrag-legacy-modernisation.md)
 # ============================================================================
 
-# 19 labels de la taxonomie + System (racine, non-taxonomie, conservé). Préfixes d'id
+# 18 labels de la taxonomie + System (racine, non-taxonomie, conservé). Préfixes d'id
 # (Partie C, "<préfixe>:<nom>") documentés dans le system prompt extract.py.
 ALLOWED_NODE_LABELS = {
     "System", "Domaine_Fonctionnel", "Fonction", "Regle_Metier", "Processus_Fonctionnel",
-    "Domaine_Technique", "Composant", "Point_Entree", "Interface_Utilisateur",
+    "Composant", "Point_Entree", "Interface_Utilisateur",
     "Job_Batch", "Unite_Execution", "Procedure_Reutilisable", "Structure_Partagee",
     "Store_Donnees", "Store_Echange", "Table_Relationnelle", "Store_Hierarchique",
     "Entite_Donnees", "Canal_Messagerie", "Zone_Incertitude",
@@ -89,9 +89,8 @@ ALLOWED_NODE_LABELS = {
 # accents retirés des identifiants Cypher, plan decision #3) + CORRESPOND_A (B.2,
 # Entite_Donnees -> stores). from -> to attendus (non vérifiés à l'exécution — le moteur
 # d'import est générique/label-driven, plan decision #1) :
-#   CONTIENT            Domaine_Fonctionnel->Processus_Fonctionnel | Domaine_Technique
-#                        ->{Composant,Job_Batch,Procedure_Reutilisable} | System->
-#                        {Domaine_Fonctionnel,Domaine_Technique}  (2e/3e groupes = Ext #2)
+#   CONTIENT            Domaine_Fonctionnel->Processus_Fonctionnel | System->
+#                        Domaine_Fonctionnel  (2e groupe = Ext #2)
 #   CATALOGUE           Domaine_Fonctionnel->Fonction  (rattachement logique au catalogue,
 #                        indépendant de l'exécution — distinct de CONTIENT)
 #   PORTE_REGLE         Fonction->Regle_Metier
@@ -108,10 +107,15 @@ ALLOWED_NODE_LABELS = {
 #   CONTIENT_STEP       Job_Batch->Unite_Execution
 #   CORRESPOND_A        Entite_Donnees->{Store_Donnees,Table_Relationnelle,Store_Hierarchique}
 #   GENERE_INCERTITUDE  <tout nœud>->Zone_Incertitude
+#   DEPEND_DE           Domaine_Fonctionnel->Domaine_Fonctionnel | Fonction->Fonction |
+#                        Processus_Fonctionnel->Processus_Fonctionnel  (relation générique
+#                        même-label, ext. dépendances inter-domaines/fonctions/processus ;
+#                        props : fiabilite, nature [DONNEES|ORDONNANCEMENT|APPEL|
+#                        DECLENCHEMENT|GOUVERNANCE], description optionnelle)
 ALLOWED_REL_TYPES = {
     "CONTIENT", "CATALOGUE", "PORTE_REGLE", "ORCHESTRE", "ORIENTE_PAR", "IMPLEMENTE",
     "ENCODE_REGLE", "APPELLE", "INCLUT", "ACCEDE_A", "DECLENCHE", "CONTIENT_STEP",
-    "CORRESPOND_A", "GENERE_INCERTITUDE",
+    "CORRESPOND_A", "GENERE_INCERTITUDE", "DEPEND_DE",
 }
 
 # F.2 — fiabilite : priorité d'upgrade FAIT > HYPOTHÈSE > SUPPOSÉ > MANQUANT. Une ré-extraction
@@ -125,7 +129,7 @@ _PLANE_BY_LABEL = {
     "System": "global",
     "Domaine_Fonctionnel": "functional", "Fonction": "functional",
     "Regle_Metier": "functional", "Processus_Fonctionnel": "functional",
-    "Domaine_Technique": "technical", "Composant": "technical",
+    "Composant": "technical",
     "Point_Entree": "technical", "Interface_Utilisateur": "technical",
     "Job_Batch": "technical", "Unite_Execution": "technical",
     "Procedure_Reutilisable": "technical",

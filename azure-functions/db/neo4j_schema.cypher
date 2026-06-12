@@ -42,9 +42,6 @@ FOR (n:Regle_Metier) REQUIRE n.id IS UNIQUE;
 CREATE CONSTRAINT processus_fonctionnel_id IF NOT EXISTS
 FOR (n:Processus_Fonctionnel) REQUIRE n.id IS UNIQUE;
 
-CREATE CONSTRAINT domaine_technique_id IF NOT EXISTS
-FOR (n:Domaine_Technique) REQUIRE n.id IS UNIQUE;
-
 CREATE CONSTRAINT composant_id IF NOT EXISTS
 FOR (n:Composant) REQUIRE n.id IS UNIQUE;
 
