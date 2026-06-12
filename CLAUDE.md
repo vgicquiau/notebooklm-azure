@@ -132,7 +132,7 @@ Le switch supérieur (`LayerSwitch`, `GraphPage.jsx`) propose une vue par couche
 | Couche | Nom dans l'UI | Contenu |
 |---|---|---|
 | 1 — Fonctionnelle | Fonctionnel | `Domaine_Fonctionnel`, `Fonction`, `Regle_Metier`, `Processus_Fonctionnel` |
-| 2 — Applicative | Applicatif | `Composant`, `Domaine_Technique`, `Point_Entree`, `Interface_Utilisateur`, `Job_Batch`, `Unite_Execution`, `Procedure_Reutilisable` |
+| 2 — Applicative | Applicatif | `Composant`, `Point_Entree`, `Interface_Utilisateur`, `Job_Batch`, `Unite_Execution`, `Procedure_Reutilisable` |
 | 3 — Données | Données | `Structure_Partagee`, `Store_Donnees`, `Store_Echange`, `Table_Relationnelle`, `Store_Hierarchique`, `Entite_Donnees`, `Canal_Messagerie` |
 | 4 — Intégration | Intégration | Pas de nœuds dédiés (Flux/Dépendance = relations, décision F.3 Option A) — état vide avec renvoi vers le mode exploration |
 | 5 — Architecture DDD | Architecture cible | Non implémenté (`Bounded_Context` etc., Phase 3 de la feuille de route) — état vide |
@@ -144,15 +144,20 @@ La Couche 0 (Méta-fiabilité) n'a pas de vue dédiée : c'est la propriété `f
 
 ### Schéma — taxonomie GraphRAG Legacy-Modernisation v2.0
 
-Le schéma Neo4j (labels de nœuds, types de relations, propriétés universelles `fiabilite`/`nom`/`source`/etc.) est défini par `notebooklm-azure/glossaire-taxonomie-graphrag-legacy-modernisation.md` — c'est la **référence canonique**. `function_app.py` l'opérationnalise via deux ensembles fermés, `ALLOWED_NODE_LABELS` (19 labels Phase-1 + `System`) et `ALLOWED_REL_TYPES` (14 types) ; `extract.py` (`_EXTRACT_SYSTEM`) instruit le LLM à produire le contrat générique `{nodes:[{id,label,properties}], relations:[{from,to,type,properties}]}`. `neo4j_schema.cypher` porte une contrainte `IS UNIQUE` sur `.id` par label.
+Le schéma Neo4j (labels de nœuds, types de relations, propriétés universelles `fiabilite`/`nom`/`source`/etc.) est défini par `notebooklm-azure/glossaire-taxonomie-graphrag-legacy-modernisation.md` — c'est la **référence canonique**. `function_app.py` l'opérationnalise via deux ensembles fermés, `ALLOWED_NODE_LABELS` (18 labels Phase-1 + `System`) et `ALLOWED_REL_TYPES` (15 types) ; `extract.py` (`_EXTRACT_SYSTEM`) instruit le LLM à produire le contrat générique `{nodes:[{id,label,properties}], relations:[{from,to,type,properties}]}`. `neo4j_schema.cypher` porte une contrainte `IS UNIQUE` sur `.id` par label.
 
 `Domaine_Fonctionnel` a un double rôle : `CONTIENT` structurellement ses `Processus_Fonctionnel`, et `CATALOGUE` logiquement ses `Fonction` (indépendamment de leur exécution). `Regle_Metier` a aussi un double rôle : `PORTE_REGLE` (logique interne d'une `Fonction`) et `ORIENTE_PAR` (un `Processus_Fonctionnel` est orienté par la règle pour son routage/branchement, propriété `typeRoutage: BRANCHEMENT|BOUCLE|CONDITION_SORTIE`).
 
-Deux extensions, additives par rapport à la taxonomie :
+Trois extensions, additives par rapport à la taxonomie :
 - **Ext #1** : `ACCEDE_A` porte une propriété `operations: [C,R,U,D]` en plus de `mode: R|W|RW` (granularité CRUD).
-- **Ext #2** : `CONTIENT` est réutilisé pour `Domaine_Technique → {Composant,Job_Batch,Procedure_Reutilisable}` (non défini dans la taxonomie, qui ne couvre que `Domaine_Fonctionnel → Processus_Fonctionnel`). `CORRESPOND_A` (`Entite_Donnees → {Store_Donnees,Table_Relationnelle,Store_Hierarchique}`) est également une relation additive.
+- **Ext #2** : `CONTIENT` est réutilisé pour `System → Domaine_Fonctionnel` (non défini dans la taxonomie, qui ne couvre que `Domaine_Fonctionnel → Processus_Fonctionnel`). `CORRESPOND_A` (`Entite_Donnees → {Store_Donnees,Table_Relationnelle,Store_Hierarchique}`) est également une relation additive.
+- **Ext #3** : `DEPEND_DE` est une relation générique reliant deux entités du même label (comme `APPELLE` pour `Composant→Composant`, jusqu'ici le seul cas "même type" de la taxonomie). Autorisée pour `Domaine_Fonctionnel→Domaine_Fonctionnel`, `Fonction→Fonction` et `Processus_Fonctionnel→Processus_Fonctionnel`. Propriété `nature` : `DONNEES`/`ORDONNANCEMENT`/`GOUVERNANCE` (entre domaines : flux de données, dépendance d'ordonnancement, ou gouvernance), `APPEL` (entre fonctions), `DECLENCHEMENT` (entre processus).
 
 `fiabilite` (`FAIT|HYPOTHÈSE|SUPPOSÉ|MANQUANT`) est portée par chaque nœud/relation et fusionnée en upgrade-only lors d'une ré-extraction (FAIT > HYPOTHÈSE > SUPPOSÉ > MANQUANT).
+
+Génération d'`id` (`extract.py`) pour `Domaine_Fonctionnel` (`df:`), `Fonction` (`mf:`), `Regle_Metier` (`rg:`) et `Processus_Fonctionnel` (`pm:`) : priorité au code/identifiant du corpus s'il existe (ex. `DF-01`, `BC4` → `df:BC4`), sinon slug déterministe du nom canonique (minuscules, accents retirés, non-alphanumériques → `-`, tirets fusionnés/trimés, ex. `df:referentiel-article`). Le caractère déterministe garantit la fusion par `id` (MERGE Neo4j) entre chunks/documents. Un code `XX-NN` (ex `RG-03`) n'est utilisé QUE s'il apparaît littéralement dans le texte du fragment — le prompt d'inventaire interdit explicitement d'inventer une numérotation séquentielle de ce type pour les entités sans code explicite (slug obligatoire dans ce cas).
+
+`Domaine_Technique` (`dt:`) n'existe plus dans la taxonomie : tout regroupement de niveau "domaine"/"bounded context", quelle que soit sa nature (Core/Supporting/Generic, métier/technique/transverse), est un `Domaine_Fonctionnel`.
 
 ### Composants impliqués
 
@@ -197,9 +202,23 @@ sans redémarrage du serveur.
 
 1. `DELETE /api/graph/admin/functional-entities` — supprime tout le graphe SAUF les nœuds `:Composant`/`:System` (et leurs relations vers `:Composant`), préservant ainsi la qualification 7R et les propriétés calculées par GDS (`isSpof`, `communityId`, etc.)
 2. Lit **tous** les chunks de l'index Azure AI Search, groupés par `source_file`
-3. Pour chaque document : appel GPT-4o (extraction JSON structurée) → `POST /api/graph/admin/import-entities`
+3. Pour chaque document (jusqu'à 5 en parallèle), `_process_document` (`extract.py`) exécute un
+   pipeline en 3 étapes :
+   - **Inventaire** (par chunk de `_split_into_chunks`, séquentiel, registre cumulatif
+     `{id,label,nom}` par document, `temperature=0` pour un découpage déterministe) : repère
+     exhaustivement les entités du fragment et la/les couches d'enrichissement pertinentes
+     (`fonctionnel`/`applicatif`/`donnees`).
+   - **Enrichissement** (par chunk × couche, `temperature=0`) : produit propriétés/relations
+     complètes. Les couches `fonctionnel` et `applicatif` sont scindées en plusieurs sous-prompts
+     dédiés (nœuds par label / relations) car un appel combinant nœuds+relations sur un grand
+     registre alterne entre "tous les nœuds, 0 relation" et l'inverse selon les runs — chaque
+     sous-prompt porte sur un périmètre disjoint pour fiabiliser l'exhaustivité.
+   - **Complétion** (par document, registre complet) : relations inter-chunks.
+   - Import via `POST /api/graph/admin/import-entities` après chaque appel.
 
-Résultat : dataset cohérent sur l'intégralité du corpus, pas seulement une mise à jour delta.
+Résultat : dataset cohérent sur l'intégralité du corpus, pas seulement une mise à jour delta. Le
+champ `coverage` du statut de job (`api/coverage.py`) compare les codes métier (`RG-NN`, `MF-NN`,
+noms de programmes…) trouvés par regex dans le texte source aux ids effectivement importés.
 
 ### Bouton "Reset" (ResetButton)
 

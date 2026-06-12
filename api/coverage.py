@@ -17,12 +17,45 @@ _ADGM_BASE = os.environ.get(
 
 # Préfixes de codes métier réutilisés tels qu'écrits dans le corpus (taxonomie v2.0)
 _CODE_PATTERNS = {
-    "df": re.compile(r"\bDF-\d+\b"),
-    "mf": re.compile(r"\bMF-\d+\b"),
-    "rg": re.compile(r"\bRG-\d+\b"),
-    "pm": re.compile(r"\bPM-\d+\b"),
-    "dt": re.compile(r"\bDT-\d+\b"),
+    "df": [re.compile(r"\bDF-\d+\b")],
+    "mf": [re.compile(r"\bMF-\d+\b")],
+    "rg": [re.compile(r"\bRG-\d+\b")],
+    "pm": [re.compile(r"\bPM-\d+\b")],
 }
+
+
+def _parse_extra_patterns() -> dict[str, list[re.Pattern]]:
+    """Parse COVERAGE_EXTRA_PATTERNS (format `prefixe:regex,prefixe:regex,...`).
+
+    Patterns additionnels par préfixe, en complément (union) des patterns par défaut de
+    `_CODE_PATTERNS`. Gestion robuste si la variable est absente/vide ou mal formée :
+    une entrée invalide est ignorée sans interrompre le chargement du module.
+    """
+    raw = os.environ.get("COVERAGE_EXTRA_PATTERNS", "")
+    extra: dict[str, list[re.Pattern]] = {}
+    if not raw.strip():
+        return extra
+    for entry in raw.split(","):
+        entry = entry.strip()
+        if not entry or ":" not in entry:
+            continue
+        prefix, _, pattern_str = entry.partition(":")
+        prefix = prefix.strip().lower()
+        pattern_str = pattern_str.strip()
+        if not prefix or not pattern_str:
+            continue
+        try:
+            compiled = re.compile(pattern_str)
+        except re.error:
+            continue
+        extra.setdefault(prefix, []).append(compiled)
+    return extra
+
+
+# Fusionne les patterns additionnels configurés via env (union, sans écraser les défauts)
+for _prefix, _patterns in _parse_extra_patterns().items():
+    _CODE_PATTERNS.setdefault(_prefix, [])
+    _CODE_PATTERNS[_prefix].extend(_patterns)
 
 # Heuristique noms de programmes COBOL : token majuscule de 6-8 caractères contenant au
 # moins un chiffre (ex COSGN00C, CBACT01C) — exclut les acronymes/mots-clés purement alpha.
@@ -33,14 +66,33 @@ _LABEL_BY_PREFIX = {
     "mf": "Fonction",
     "rg": "Regle_Metier",
     "pm": "Processus_Fonctionnel",
-    "dt": "Domaine_Technique",
     "comp": "Composant",
 }
 
 
+def _normalize_code(code: str) -> str:
+    """Normalise la partie numérique d'un code `<PREFIXE>-<chiffres>`.
+
+    Supprime les zéros de tête du suffixe numérique pour permettre la comparaison entre
+    formats avec/sans zero-padding (ex `RG-001` et `RG-01` deviennent tous deux `RG-1`).
+    Les codes ne correspondant pas à ce format (ex noms de programmes COBOL) sont
+    retournés inchangés.
+    """
+    match = re.match(r"^(.*-)(\d+)$", code)
+    if not match:
+        return code
+    prefix_part, digits = match.groups()
+    return f"{prefix_part}{int(digits)}"
+
+
 def scan_codes(text: str) -> dict[str, set[str]]:
     """Scanne un texte source et retourne les codes/noms trouvés par préfixe."""
-    found = {prefix: set(pattern.findall(text)) for prefix, pattern in _CODE_PATTERNS.items()}
+    found: dict[str, set[str]] = {}
+    for prefix, patterns in _CODE_PATTERNS.items():
+        codes: set[str] = set()
+        for pattern in patterns:
+            codes |= set(pattern.findall(text))
+        found[prefix] = codes
     found["comp"] = {
         tok for tok in _PROGRAM_PATTERN.findall(text) if any(c.isdigit() for c in tok)
     }
@@ -87,11 +139,13 @@ def compute_coverage(source_texts: dict[str, str]) -> dict:
     for prefix, codes in all_found.items():
         label = _LABEL_BY_PREFIX[prefix]
         imported_codes = _fetch_imported_ids(label)
-        missing = sorted(codes - imported_codes)
+        imported_normalized = {_normalize_code(c) for c in imported_codes}
+        missing = sorted(c for c in codes if _normalize_code(c) not in imported_normalized)
+        imported_count = sum(1 for c in codes if _normalize_code(c) in imported_normalized)
         report[prefix] = {
             "label": label,
             "found": len(codes),
-            "imported": len(codes & imported_codes),
+            "imported": imported_count,
             "missing": missing[:50],
         }
     return report

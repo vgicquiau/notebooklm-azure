@@ -22,7 +22,7 @@
 |---|--------|---------------------|-------------------------|
 | 0 | **Méta-fiabilité** | Propriétés transverses — qualifient toute assertion du graphe | `fiabilite`, `source`, `incertitude` |
 | 1 | **Fonctionnelle** | Domaines, règles et processus fonctionnels | `Domaine_Fonctionnel`, `Processus_Fonctionnel`, `Fonction`, `Regle_Metier` |
-| 2 | **Applicative** | Artefacts exécutables (programmes, jobs, transactions) | `Composant`, `Point_Entree`, `Interface_Utilisateur`, `Job_Batch`, `Unite_Execution`, `Procedure_Reutilisable`, `Domaine_Technique` |
+| 2 | **Applicative** | Artefacts exécutables (programmes, jobs, transactions) | `Composant`, `Point_Entree`, `Interface_Utilisateur`, `Job_Batch`, `Unite_Execution`, `Procedure_Reutilisable` |
 | 3 | **Données** | Stores physiques et structures partagées | `Store_Donnees`, `Store_Echange`, `Table_Relationnelle`, `Store_Hierarchique`, `Structure_Partagee`, `Entite_Donnees`, `Canal_Messagerie` |
 | 4 | **Intégration** | Liens et flux entre composants | `Flux`, `Interface`, `Dependance`, `Point_Integration` |
 | 5 | **Architecture DDD** | Découpage cible et patterns de décomposition | `Bounded_Context`, `Aggregate`, `Anti_Corruption_Layer`, `Evenement_Domaine`, `Context_Map` |
@@ -61,11 +61,10 @@
 
 | Label Neo4j | Définition | Signal d'identification dans le corpus | Exemple illustratif | Type graphe |
 |-------------|------------|----------------------------------------|---------------------|-------------|
-| `Domaine_Fonctionnel` | **Cadre majeur** — grand ensemble cohérent de l'activité d'une organisation. Joue un double rôle : (1) il **contient structurellement** un ou plusieurs `Processus_Fonctionnel` ; (2) il **catalogue logiquement** des `Fonction`, indépendamment du moment où elles sont exécutées. Frontière de cohérence sémantique indépendante de la technologie. | Section de document intitulée "Domaine [N]", "Périmètre [métier]" ou "Secteur d'activité". Regroupement de processus et fonctions autour d'un même objet métier. Identifiant type `D-[NOM]` ou `DOM-[NNN]`. | `D-VENTES` (Gestion des Ventes), `D-RH` (Ressources Humaines), `D-COMPTA` (Comptabilité) | **[Nœud]** |
+| `Domaine_Fonctionnel` | **Cadre majeur** — grand ensemble cohérent de l'activité d'une organisation. Joue un double rôle : (1) il **contient structurellement** un ou plusieurs `Processus_Fonctionnel` ; (2) il **catalogue logiquement** des `Fonction`, indépendamment du moment où elles sont exécutées. Frontière de cohérence sémantique indépendante de la technologie. C'est le **seul label de regroupement de niveau "domaine"/"bounded context"** : un domaine qualifié de "générique", "technique", "transverse" ou "support" dans le corpus (ex un domaine de reporting, d'interfaces ou d'exploitation) reste un `Domaine_Fonctionnel` — sa nature (Core/Supporting/Generic) peut être portée par la propriété `domaineDDD`, pas par un label distinct. | Section de document intitulée "Domaine [N]", "Périmètre [métier]" ou "Secteur d'activité". Regroupement de processus et fonctions autour d'un même objet métier. Identifiant type `D-[NOM]` ou `DOM-[NNN]`. | `D-VENTES` (Gestion des Ventes), `D-RH` (Ressources Humaines), `D-COMPTA` (Comptabilité) | **[Nœud]** |
 | `Processus_Fonctionnel` | **Suite ordonnée d'activités déclenchée par un événement**, visant à produire un résultat de valeur. Le processus est le "comment" et le "quand" : il donne le sens logique, le timing et l'ordre d'enchaînement des `Fonction`. Ses **branchements sont orientés par des `Regle_Metier`** (conditions de routage : "si dossier incomplet, retourner à l'étape précédente"). Peut mobiliser des fonctions d'un même domaine ou de domaines différents. | Description d'un workflow déclenché par un événement ("clic sur Acheter", "réception d'un virement", "fin de mois"). Diagramme de séquence ou d'activité. Section de documentation de cinématique applicative ou d'ordonnancement. | `Passer une commande en ligne` (déclencheur : clic "Acheter"), `Intégration d'un nouveau collaborateur` (déclencheur : signature contrat), `Clôture mensuelle` (déclencheur : fin de mois) | **[Nœud]** |
 | `Fonction` | **Action élémentaire et réutilisable** que le système doit être capable de réaliser — le "quoi" à la granularité d'une opération. Une même fonction peut être **appelée par plusieurs processus fonctionnels différents** (réutilisabilité). Elle applique des `Regle_Metier` pour exécuter correctement son traitement algorithmique. Appartient au catalogue d'un `Domaine_Fonctionnel` indépendamment de tout processus. **Ne pas agréger** : chaque opération identifiable est une fonction distincte. | Verbe métier + objet dans un titre, une option de menu ou une spécification : "Calculer la TVA", "Émettre une alerte", "Valider un paiement". Identifiant type `F-[NNN]`. Capacité citée dans plusieurs processus différents = signal de réutilisabilité. | `F-042 — Calculer les frais de port`, `F-071 — Valider l'autorisation de paiement`, `F-018 — Générer un relevé de compte` | **[Nœud]** |
 | `Regle_Metier` | Contrainte, calcul ou directive métier textuelle régissant le comportement de l'entreprise. **Double rôle selon le contexte** : (1) appliquée à une `Fonction` — dicte sa logique interne (calcul exact, critères de validation) ; (2) appliquée à un `Processus_Fonctionnel` — dicte les conditions de routage (les choix aux aiguillages du flux). Invariant fonctionnel qui doit survivre à la modernisation. Propriété du domaine, pas du composant — même si elle est encodée dans le code. Peut être explicite ou implicite (connaissance tacite d'un expert). | Identifiant `RG-[NNN]`. Formulation normative : "doit", "ne peut pas", "si X alors Y", "est interdit si". Condition de validation dans le code (`IF`, `WHEN`, `CASE`). Contrainte énoncée dans la documentation métier. | `RG-015 : frais de port = 0 si commande > 50 €` (logique interne de `F-042`), `RG-032 : si dossier incomplet → retour étape validation` (routage dans le processus `Passer une commande en ligne`) | **[Nœud]** |
-| `Domaine_Technique` | Ensemble cohérent de composants, jobs et structures de données partageant une technologie et une responsabilité d'exécution. **Frontière architecturale de groupement — pas une capacité métier.** Un domaine technique peut recouper plusieurs domaines fonctionnels, et inversement. | Identifiant `DT-[NN]`. Regroupement de sources dans un répertoire ou un projet de build commun. Section "domaine technique" ou "couche applicative" dans une cartographie. | `DT-01 — Servicing online`, `DT-05 — Traitements batch de clôture` | **[Nœud]** |
 
 ---
 
@@ -187,6 +186,7 @@
 | `APPARTIENT_COMMUNAUTE` | Tout nœud → `Communaute_Louvain` | Résultat de clustering Louvain | `communityId: integer`, `modularity: float` |
 | `PRODUIT` | `Composant`, `Bounded_Context` → `Evenement_Domaine` | Ce composant produit cet événement | `fiabilite` |
 | `CONSOMME_EVENEMENT` | `Composant`, `Bounded_Context` → `Evenement_Domaine` | Ce composant consomme cet événement | `fiabilite` |
+| `DEPEND_DE` *(Ext #3 — extension additive)* | `Domaine_Fonctionnel`→`Domaine_Fonctionnel`, `Fonction`→`Fonction`, `Processus_Fonctionnel`→`Processus_Fonctionnel` | Dépendance générique entre deux entités du même label. `nature` précise le type de dépendance : `DONNEES` (flux de données entre domaines), `ORDONNANCEMENT` (dépendance d'exécution entre domaines), `GOUVERNANCE` (un domaine gouverne/pilote un autre), `APPEL` (une fonction invoque une autre fonction), `DECLENCHEMENT` (un processus déclenche un autre processus) | `fiabilite`, `nature: DONNEES\|ORDONNANCEMENT\|APPEL\|DECLENCHEMENT\|GOUVERNANCE`, `description` (optionnelle) |
 
 ---
 
@@ -235,7 +235,6 @@
 :Job_Batch
 :Unite_Execution
 :Procedure_Reutilisable
-:Domaine_Technique
 
 // Couche 3 — Données
 :Store_Donnees
@@ -373,7 +372,7 @@ LABELS DE NŒUDS RECONNUS :
 Domaine_Fonctionnel, Fonction, Regle_Metier, Processus_Fonctionnel,
 // Couche applicative
 Composant, Point_Entree, Interface_Utilisateur, Job_Batch, Unite_Execution,
-Procedure_Reutilisable, Domaine_Technique,
+Procedure_Reutilisable,
 // Couche données
 Store_Donnees, Store_Echange, Table_Relationnelle, Store_Hierarchique,
 Structure_Partagee, Entite_Donnees, Canal_Messagerie,
@@ -396,7 +395,10 @@ ENCODE_REGLE (Composant→Regle_Metier),
 APPARTIENT_AU_CONTEXTE, APPELLE, INCLUT, ACCEDE_A, DÉCLENCHE, CONTIENT_STEP,
 EXPOSE, CONSOMME, PROTEGE_PAR, CORRESPOND_A, EST_RACINE_DE,
 DECLENCHE_DECISION, RÉSOUT_INCERTITUDE, GENERE_INCERTITUDE,
-CANDIDATE_STRATEGIE, EST_SPOF, PRODUIT, CONSOMME_EVENEMENT
+CANDIDATE_STRATEGIE, EST_SPOF, PRODUIT, CONSOMME_EVENEMENT,
+DEPEND_DE (Domaine_Fonctionnel→Domaine_Fonctionnel | Fonction→Fonction |     // Ext #3, extension additive
+           Processus_Fonctionnel→Processus_Fonctionnel, propriété nature:
+           DONNEES|ORDONNANCEMENT|APPEL|DECLENCHEMENT|GOUVERNANCE)
 
 RÈGLE DE FIABILITÉ (obligatoire sur tout nœud et toute relation) :
 - FAIT : information directement observable dans le texte source (instruction 

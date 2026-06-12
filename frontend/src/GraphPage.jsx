@@ -174,6 +174,17 @@ const GRAPH_STYLE = [
     style: { 'border-style': 'dashed', 'background-opacity': 0.5 } },
   { selector: "edge[fiabilite = 'SUPPOSÉ'], edge[fiabilite = 'MANQUANT']",
     style: { 'line-style': 'dashed', 'opacity': 0.5 } },
+  // DEPEND_DE (Ext #3) — relation transversale entre pairs de même label (Domaine_
+  // Fonctionnel/Fonction/Processus_Fonctionnel → lui-même), à distinguer des
+  // relations hiérarchiques/structurelles (CONTIENT, CATALOGUE, ORCHESTRE, en
+  // trait plein) : trait pointillé + couleur neutre T.sub plutôt que la couleur
+  // par défaut des arêtes (#e1ded7).
+  { selector: 'edge[type = "DEPEND_DE"]',
+    style: { 'line-style': 'dotted', 'line-color': T.sub, 'target-arrow-color': T.sub, 'width': 1.5 } },
+  // Variante d'épaisseur selon `nature` — ORDONNANCEMENT/DECLENCHEMENT (couplage
+  // de flux de contrôle) ressortent davantage que DONNEES/APPEL/GOUVERNANCE.
+  { selector: 'edge[type = "DEPEND_DE"][nature = "ORDONNANCEMENT"], edge[type = "DEPEND_DE"][nature = "DECLENCHEMENT"]',
+    style: { 'width': 2.5 } },
   // ── Halo de cluster (ajout T15 UI, hors SDD — cf. ClusterToggle plus bas) :
   // overlay-* ne touche ni au remplissage (7R/statut) ni à la bordure (réservée
   // au badge isSpof) — les encodages se superposent sans collision visuelle.
@@ -1086,6 +1097,7 @@ const GraphPage = ({ apiFetch }) => {
             target:     e.targetNodeId,
             fiabilite:  e.fiabilite,
             relLabel:   e.type,  // affiché sur l'arête en mode exploration
+            type:       e.type,  // pour le style des relations transversales (ex. DEPEND_DE)
           },
         }));
 
@@ -1127,7 +1139,10 @@ const GraphPage = ({ apiFetch }) => {
       data: {
         id: a.id, source: a.sourceNodeId, target: a.targetNodeId,
         fiabilite: a.fiabilite,
-        // pas de relLabel en vue plan → labels absents du style
+        // type + nature exposés pour le style des relations transversales
+        // (ex. DEPEND_DE, cf. GRAPH_STYLE) — pas de relLabel en vue plan → labels absents
+        type: a.type,
+        nature: a.properties?.nature,
       },
     }));
 
