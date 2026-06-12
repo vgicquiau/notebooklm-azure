@@ -49,3 +49,4 @@ doc-archimind/
 
 # Outillage spécifique à Claude Code (local, non nécessaire au fonctionnement de l'app)
 .claude/
+CLAUDE.md

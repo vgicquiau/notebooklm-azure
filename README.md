@@ -13,7 +13,6 @@ Agent RAG (Retrieval-Augmented Generation) à interface conversationnelle, inspi
 | [ADG-M_GRAPH_METHODOLOGIE.md](ADG-M_GRAPH_METHODOLOGIE.md) | Méthodologie du Graphe ADG-M : pipeline d'extraction, typage des nœuds Neo4j, glossaire |
 | [GUIDE-DEPLOIEMENT.md](GUIDE-DEPLOIEMENT.md) | Déploiement pas-à-pas sur Azure (infra Bicep, App Service, Docker) |
 | [azure-functions/README.md](azure-functions/README.md) | Backend du Graphe ADG-M (`fn-adgm-graph`, `fn-adgm-ingest`) — config, schémas DB, déploiement |
-| [CLAUDE.md](CLAUDE.md) | Guide de développement (structure du code, conventions git) |
 | [docs/specs/](docs/specs/) | Spécifications produit détaillées (SDD) |
 
 ---
@@ -265,8 +264,6 @@ git commit -m "feat: description courte"
 git push -u origin feature/ma-fonctionnalite
 gh pr create
 ```
-
-Voir [CLAUDE.md](CLAUDE.md) pour les conventions de commit et les règles de branche.
 
 ---
 
