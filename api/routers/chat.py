@@ -1,46 +1,14 @@
 import logging
-import time
-import uuid
-from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request
 
 from api.models.schemas import ChatRequest, ChatResponse, SourceReference
+from api.services import compactor, session_store
 from api.services.retriever import Retriever
 from api.services.generator import Generator
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
-
-MAX_SESSION_TURNS = 20
-SESSION_TTL_SECONDS = 86_400  # 24 heures d'inactivité
-
-# Stockage in-memory — remplacer par Redis pour les déploiements multi-workers
-_sessions: dict[str, dict[str, Any]] = {}
-
-
-def _now() -> float:
-    return time.monotonic()
-
-
-def _cleanup_stale_sessions() -> None:
-    """Purge les sessions inactives depuis plus de SESSION_TTL_SECONDS."""
-    cutoff = _now() - SESSION_TTL_SECONDS
-    stale = [sid for sid, s in _sessions.items() if s["last_access"] < cutoff]
-    for sid in stale:
-        del _sessions[sid]
-    if stale:
-        logger.debug("Sessions expirées supprimées : %d", len(stale))
-
-
-def get_or_create_session(session_id: str | None) -> tuple[str, list]:
-    _cleanup_stale_sessions()
-    sid = session_id or str(uuid.uuid4())
-    if sid not in _sessions:
-        _sessions[sid] = {"history": [], "last_access": _now()}
-    else:
-        _sessions[sid]["last_access"] = _now()
-    return sid, _sessions[sid]["history"]
 
 
 @router.post("/chat", response_model=ChatResponse)
@@ -48,7 +16,9 @@ async def chat(request_data: ChatRequest, request: Request):
     retriever: Retriever = request.app.state.retriever
     generator: Generator = request.app.state.generator
 
-    session_id, history = get_or_create_session(request_data.session_id)
+    session_store.cleanup_stale_sessions()
+    session_id = session_store.get_or_create_session(request_data.session_id)
+    history = session_store.get_history_for_llm(session_id)
 
     try:
         chunks = retriever.retrieve(request_data.message, top_k=request_data.top_k)
@@ -76,12 +46,6 @@ async def chat(request_data: ChatRequest, request: Request):
         logger.exception("Erreur lors de la génération : %s", e)
         raise HTTPException(status_code=503, detail="Service de génération temporairement indisponible.")
 
-    history.append({"role": "user", "content": request_data.message})
-    history.append({"role": "assistant", "content": answer})
-
-    if len(history) > MAX_SESSION_TURNS * 2:
-        _sessions[session_id]["history"] = history[-(MAX_SESSION_TURNS * 2):]
-
     sources = [
         SourceReference(
             file=c.source_file,
@@ -93,6 +57,17 @@ async def chat(request_data: ChatRequest, request: Request):
         for c in chunks
     ]
 
+    session_store.append_message(session_id, "user", request_data.message, mode=request_data.mode)
+    session_store.append_message(
+        session_id, "assistant", answer,
+        citations=[s.model_dump() for s in sources],
+        mode=request_data.mode,
+        tokens_used=tokens_used,
+    )
+
+    if compactor.should_compact(session_id):
+        compactor.compact_session(session_id, generator)
+
     return ChatResponse(
         answer=answer,
         session_id=session_id,
@@ -101,10 +76,19 @@ async def chat(request_data: ChatRequest, request: Request):
     )
 
 
+@router.get("/chat/history/{session_id}")
+async def get_chat_history(session_id: str):
+    """Historique complet d'une session, pour ré-hydrater le frontend après un reload."""
+    return {
+        "messages": session_store.get_full_history_for_ui(session_id),
+        "summary": session_store.get_summary(session_id),
+    }
+
+
 @router.post("/chat/clear")
 async def clear_session(request: Request):
     """Purge l'historique d'une session. Le session_id est passé dans le body JSON (SEC-015)."""
     body = await request.json()
     session_id = body.get("session_id", "")
-    _sessions.pop(session_id, None)
+    session_store.clear_session(session_id)
     return {"status": "cleared", "session_id": session_id}

@@ -1,15 +1,32 @@
 // src/NotesRail.jsx — Rail droit : notes enregistrées
-// Props: notes[], onDelete(id), onAddBlank(), blankActive, onBlankConfirm, onBlankCancel, onIngestNote(note)
+// Props: notes[], onDelete(id), onEditNote(id, text), onAddBlank(), blankActive, onBlankConfirm, onBlankCancel, onIngestNote(note)
 
 const NOTE_MAX_CHARS = 140;
 
 // ── Modal de lecture d'une note ────────────────────────────────
-const NoteModal = ({ note, onClose, onIngest }) => {
+const NoteModal = ({ note, onClose, onIngest, onSave, startInEdit }) => {
+  const [editing, setEditing] = React.useState(!!startInEdit);
+  const [draft, setDraft]     = React.useState(note.text);
+  const textareaRef           = React.useRef(null);
+
+  React.useEffect(() => { if (editing) textareaRef.current?.focus(); }, [editing]);
+
   React.useEffect(() => {
-    const handler = (e) => { if (e.key === 'Escape') onClose(); };
+    const handler = (e) => {
+      if (e.key !== 'Escape') return;
+      if (editing) setEditing(false);
+      else onClose();
+    };
     document.addEventListener('keydown', handler);
     return () => document.removeEventListener('keydown', handler);
-  }, [onClose]);
+  }, [onClose, editing]);
+
+  const cancelEdit = () => { setDraft(note.text); setEditing(false); };
+  const saveEdit = () => {
+    const trimmed = draft.trim();
+    if (trimmed && trimmed !== note.text) onSave(note.id, trimmed);
+    setEditing(false);
+  };
 
   const dateStr = new Date(note.timestamp).toLocaleString('fr-FR', {
     day: '2-digit', month: 'long', year: 'numeric',
@@ -61,54 +78,127 @@ const NoteModal = ({ note, onClose, onIngest }) => {
             )}
             <span style={{ fontSize: 11.5, color: T.muted, fontFamily: T.font }}>{dateStr}</span>
           </div>
-          <button
-            onClick={onClose}
-            title="Fermer (Échap)"
-            style={{
-              display: 'grid', placeItems: 'center', flexShrink: 0,
-              width: 30, height: 30, borderRadius: 8,
-              border: 'none', background: 'transparent',
-              color: T.muted, cursor: 'pointer',
-              transition: 'background .12s, color .12s',
-            }}
-            onMouseEnter={e => { e.currentTarget.style.background = T.panel; e.currentTarget.style.color = T.ink; }}
-            onMouseLeave={e => { e.currentTarget.style.background = 'transparent'; e.currentTarget.style.color = T.muted; }}
-          >
-            <Ic.Close s={16} />
-          </button>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 4, flexShrink: 0 }}>
+            <button
+              onClick={() => setEditing(e => !e)}
+              title={editing ? 'Annuler la modification' : 'Modifier cette note'}
+              style={{
+                display: 'grid', placeItems: 'center',
+                width: 30, height: 30, borderRadius: 8,
+                border: 'none', background: editing ? T.panel : 'transparent',
+                color: editing ? T.ink : T.muted, cursor: 'pointer',
+                transition: 'background .12s, color .12s',
+              }}
+              onMouseEnter={e => { e.currentTarget.style.background = T.panel; e.currentTarget.style.color = T.ink; }}
+              onMouseLeave={e => { e.currentTarget.style.background = editing ? T.panel : 'transparent'; e.currentTarget.style.color = editing ? T.ink : T.muted; }}
+            >
+              <Ic.Edit s={15} />
+            </button>
+            <button
+              onClick={onClose}
+              title="Fermer (Échap)"
+              style={{
+                display: 'grid', placeItems: 'center',
+                width: 30, height: 30, borderRadius: 8,
+                border: 'none', background: 'transparent',
+                color: T.muted, cursor: 'pointer',
+                transition: 'background .12s, color .12s',
+              }}
+              onMouseEnter={e => { e.currentTarget.style.background = T.panel; e.currentTarget.style.color = T.ink; }}
+              onMouseLeave={e => { e.currentTarget.style.background = 'transparent'; e.currentTarget.style.color = T.muted; }}
+            >
+              <Ic.Close s={16} />
+            </button>
+          </div>
         </div>
 
         {/* Corps */}
         <div style={{ flex: 1, overflowY: 'auto', padding: '22px 24px' }}>
-          <MarkdownContent text={note.text} />
+          {editing ? (
+            <textarea
+              ref={textareaRef}
+              value={draft}
+              onChange={e => setDraft(e.target.value)}
+              onKeyDown={e => { if (e.key === 'Escape') { e.stopPropagation(); cancelEdit(); } }}
+              rows={12}
+              style={{
+                width: '100%', height: '100%', minHeight: 200, boxSizing: 'border-box',
+                border: `1px solid ${T.border}`, borderRadius: T.radiusMd, outline: 'none',
+                resize: 'vertical', padding: '10px 12px',
+                fontFamily: T.font, fontSize: 13.5, lineHeight: 1.6, color: T.ink,
+              }}
+            />
+          ) : (
+            <MarkdownContent text={note.text} />
+          )}
         </div>
 
         {/* Footer */}
         <div style={{
           padding: '12px 20px',
           borderTop: `1px solid ${T.border}`,
-          display: 'flex', justifyContent: 'flex-end',
+          display: 'flex', justifyContent: 'flex-end', gap: 8,
           flexShrink: 0,
         }}>
-          <button
-            onClick={() => { onIngest(note); onClose(); }}
-            style={{
-              display: 'flex', alignItems: 'center', gap: 7,
-              height: 34, padding: '0 16px',
-              borderRadius: T.radiusPill,
-              border: `1px solid ${T.azureBorder}`,
-              background: T.azureSoft,
-              color: T.azureInk,
-              fontFamily: T.font, fontSize: 13, fontWeight: 500,
-              cursor: 'pointer', transition: 'all .12s',
-            }}
-            onMouseEnter={e => { e.currentTarget.style.background = T.azureBorder; e.currentTarget.style.borderColor = T.azure; }}
-            onMouseLeave={e => { e.currentTarget.style.background = T.azureSoft; e.currentTarget.style.borderColor = T.azureBorder; }}
-            title="Indexer cette note dans Azure AI Search comme une source"
-          >
-            <Ic.Upload s={14} />
-            Indexer comme source
-          </button>
+          {editing ? (
+            <>
+              <button
+                onClick={cancelEdit}
+                style={{
+                  display: 'flex', alignItems: 'center', gap: 7,
+                  height: 34, padding: '0 16px',
+                  borderRadius: T.radiusPill,
+                  border: `1px solid ${T.border}`,
+                  background: 'transparent',
+                  color: T.sub,
+                  fontFamily: T.font, fontSize: 13, fontWeight: 500,
+                  cursor: 'pointer', transition: 'all .12s',
+                }}
+                onMouseEnter={e => { e.currentTarget.style.background = T.panel; }}
+                onMouseLeave={e => { e.currentTarget.style.background = 'transparent'; }}
+              >
+                Annuler
+              </button>
+              <button
+                onClick={saveEdit}
+                style={{
+                  display: 'flex', alignItems: 'center', gap: 7,
+                  height: 34, padding: '0 16px',
+                  borderRadius: T.radiusPill,
+                  border: `1px solid ${T.azureBorder}`,
+                  background: T.azureSoft,
+                  color: T.azureInk,
+                  fontFamily: T.font, fontSize: 13, fontWeight: 500,
+                  cursor: 'pointer', transition: 'all .12s',
+                }}
+                onMouseEnter={e => { e.currentTarget.style.background = T.azureBorder; e.currentTarget.style.borderColor = T.azure; }}
+                onMouseLeave={e => { e.currentTarget.style.background = T.azureSoft; e.currentTarget.style.borderColor = T.azureBorder; }}
+              >
+                <Ic.Check s={14} />
+                Enregistrer
+              </button>
+            </>
+          ) : (
+            <button
+              onClick={() => { onIngest(note); onClose(); }}
+              style={{
+                display: 'flex', alignItems: 'center', gap: 7,
+                height: 34, padding: '0 16px',
+                borderRadius: T.radiusPill,
+                border: `1px solid ${T.azureBorder}`,
+                background: T.azureSoft,
+                color: T.azureInk,
+                fontFamily: T.font, fontSize: 13, fontWeight: 500,
+                cursor: 'pointer', transition: 'all .12s',
+              }}
+              onMouseEnter={e => { e.currentTarget.style.background = T.azureBorder; e.currentTarget.style.borderColor = T.azure; }}
+              onMouseLeave={e => { e.currentTarget.style.background = T.azureSoft; e.currentTarget.style.borderColor = T.azureBorder; }}
+              title="Indexer cette note dans Azure AI Search comme une source"
+            >
+              <Ic.Upload s={14} />
+              Indexer comme source
+            </button>
+          )}
         </div>
       </div>
 
@@ -121,7 +211,7 @@ const NoteModal = ({ note, onClose, onIngest }) => {
 };
 
 // ── Carte de note ──────────────────────────────────────────────
-const NoteCard = ({ note, onDelete, onOpen, onIngest }) => {
+const NoteCard = ({ note, onDelete, onOpen, onEdit, onIngest }) => {
   const [hovered, setHovered] = React.useState(false);
 
   const plainText = note.preview ?? note.text;
@@ -148,6 +238,25 @@ const NoteCard = ({ note, onDelete, onOpen, onIngest }) => {
       onClick={() => onOpen(note)}
       title="Cliquer pour lire"
     >
+      {/* Bouton modifier */}
+      <button
+        onClick={e => { e.stopPropagation(); onEdit(note); }}
+        title="Modifier cette note"
+        style={{
+          position: 'absolute', top: 9, right: 35,
+          display: 'grid', placeItems: 'center',
+          width: 22, height: 22, borderRadius: 6,
+          border: 'none', background: hovered ? T.panel2 : 'transparent',
+          color: T.muted, cursor: 'pointer',
+          opacity: hovered ? 1 : 0,
+          transition: 'opacity .12s, background .12s, color .12s',
+        }}
+        onMouseEnter={e => { e.currentTarget.style.color = T.azure; e.currentTarget.style.background = T.azureSoft; }}
+        onMouseLeave={e => { e.currentTarget.style.color = T.muted; e.currentTarget.style.background = T.panel2; }}
+      >
+        <Ic.Edit s={12} />
+      </button>
+
       {/* Bouton supprimer */}
       <button
         onClick={e => { e.stopPropagation(); onDelete(note.id); }}
@@ -169,7 +278,7 @@ const NoteCard = ({ note, onDelete, onOpen, onIngest }) => {
 
       {/* Aperçu texte */}
       <p style={{
-        margin: '0 20px 8px 0',
+        margin: '0 46px 8px 0',
         fontSize: 13.5, lineHeight: 1.5,
         color: T.ink, fontFamily: T.font,
         wordBreak: 'break-word',
@@ -255,8 +364,10 @@ const BlankNoteCard = ({ onConfirm, onCancel }) => {
 };
 
 // ── Rail principal ─────────────────────────────────────────────
-const NotesRail = ({ notes, onDelete, onAddBlank, blankActive, onBlankConfirm, onBlankCancel, onIngestNote }) => {
-  const [openNote, setOpenNote]           = React.useState(null);
+const NotesRail = ({ notes, onDelete, onEditNote, onAddBlank, blankActive, onBlankConfirm, onBlankCancel, onIngestNote }) => {
+  const [openNoteId, setOpenNoteId]       = React.useState(null);
+  const [openInEdit, setOpenInEdit]       = React.useState(false);
+  const openNote = notes.find(n => n.id === openNoteId) ?? null;
   const [width, setWidth]                 = React.useState(264);
   const [handleHovered, setHandleHovered] = React.useState(false);
   const isDragging                        = React.useRef(false);
@@ -319,9 +430,12 @@ const NotesRail = ({ notes, onDelete, onAddBlank, blankActive, onBlankConfirm, o
       {/* Modal lecture */}
       {openNote && (
         <NoteModal
+          key={openNote.id}
           note={openNote}
-          onClose={() => setOpenNote(null)}
+          onClose={() => { setOpenNoteId(null); setOpenInEdit(false); }}
           onIngest={onIngestNote}
+          onSave={onEditNote}
+          startInEdit={openInEdit}
         />
       )}
 
@@ -386,7 +500,8 @@ const NotesRail = ({ notes, onDelete, onAddBlank, blankActive, onBlankConfirm, o
               key={note.id}
               note={note}
               onDelete={onDelete}
-              onOpen={setOpenNote}
+              onOpen={n => { setOpenNoteId(n.id); setOpenInEdit(false); }}
+              onEdit={n => { setOpenNoteId(n.id); setOpenInEdit(true); }}
               onIngest={onIngestNote}
             />
           ))}
