@@ -22,10 +22,37 @@ const loadNotes = () => {
 };
 const saveNotes = (notes) => localStorage.setItem('nlaz-notes', JSON.stringify(notes));
 
+// Cache local des messages — restitution instantanée au reload, en attendant
+// l'hydratation depuis l'historique persisté côté serveur (cf. fetchHistory)
+const MESSAGES_CACHE_LIMIT = 50;
+const loadMessagesCache = () => {
+  try { return JSON.parse(localStorage.getItem('nlaz-messages') ?? '[]'); }
+  catch { return []; }
+};
+const saveMessagesCache = (messages) =>
+  localStorage.setItem('nlaz-messages', JSON.stringify(messages.slice(-MESSAGES_CACHE_LIMIT)));
+
 const getOrCreateSessionId = () => {
   let sid = localStorage.getItem('nlaz-session');
   if (!sid) { sid = uid(); localStorage.setItem('nlaz-session', sid); }
   return sid;
+};
+
+// ── Utilitaire : formate le détail d'erreur renvoyé par l'API ─
+// FastAPI renvoie soit une chaîne, soit une liste d'erreurs de
+// validation Pydantic ([{ loc, msg, type }, ...])
+const formatApiError = (detail) => {
+  if (!detail) return '';
+  if (typeof detail === 'string') return detail;
+  if (Array.isArray(detail)) {
+    return detail
+      .map(e => {
+        const field = Array.isArray(e?.loc) ? e.loc.filter(p => p !== 'body').join('.') : '';
+        return field ? `${field} : ${e.msg}` : e.msg;
+      })
+      .join(' · ');
+  }
+  return JSON.stringify(detail);
 };
 
 // ── Utilitaire : Markdown → texte brut (pour aperçu note) ─────
@@ -42,7 +69,7 @@ const markdownToPlain = (md) => {
 // ── Composant principal ────────────────────────────────────────
 const App = () => {
   const [view,          setView]          = React.useState('chat');
-  const [messages,      setMessages]      = React.useState([]);
+  const [messages,      setMessages]      = React.useState(loadMessagesCache);
   const [notes,         setNotes]         = React.useState(loadNotes);
   const [isLoading,     setIsLoading]     = React.useState(false);
   const [input,         setInput]         = React.useState('');
@@ -64,13 +91,20 @@ const App = () => {
     finally { setLoadingSources(false); }
   }, []);
 
-  // Charge la clé API puis les sources au démarrage
+  // Charge la clé API, puis les sources et l'historique de chat au démarrage
   React.useEffect(() => {
     fetch(`${API_BASE}/config`)
       .then(r => r.json())
       .then(cfg => { if (cfg.apiKey) _apiKey = cfg.apiKey; })
       .catch(() => {})
-      .then(() => fetchSources());
+      .then(() => {
+        fetchSources();
+        return _apiFetch(`${API_BASE}/chat/history/${sessionId}`)
+          .then(r => r.ok ? r.json() : null)
+          .then(data => { if (data?.messages?.length) setMessages(data.messages); })
+          .catch(() => { /* le cache local reste affiché en cas d'échec */ });
+      });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [fetchSources]);
 
   // Actualise les sources dès qu'une ingestion se termine
@@ -80,6 +114,9 @@ const App = () => {
 
   // Persiste les notes à chaque changement
   React.useEffect(() => { saveNotes(notes); }, [notes]);
+
+  // Persiste les messages (cache local — restitution instantanée au reload)
+  React.useEffect(() => { saveMessagesCache(messages); }, [messages]);
 
   // ── Envoi d'un message ─────────────────────────────────────
   const sendMessage = React.useCallback(async () => {
@@ -108,7 +145,7 @@ const App = () => {
 
       if (!res.ok) {
         const err = await res.json().catch(() => ({ detail: res.statusText }));
-        throw new Error(err.detail || `HTTP ${res.status}`);
+        throw new Error(formatApiError(err.detail) || `HTTP ${res.status}`);
       }
 
       const data = await res.json();
@@ -188,6 +225,15 @@ const App = () => {
     setNotes(prev => prev.filter(n => n.id !== id));
   }, []);
 
+  // ── Modifier une note ───────────────────────────────────────
+  const handleEditNote = React.useCallback((id, text) => {
+    setNotes(prev => prev.map(n => {
+      if (n.id !== id) return n;
+      const { preview, ...rest } = n;
+      return { ...rest, text };
+    }));
+  }, []);
+
   // ── Nouvelle note manuelle ─────────────────────────────────
   const handleBlankConfirm = React.useCallback((text) => {
     setNotes(prev => [{
@@ -211,7 +257,7 @@ const App = () => {
       const res = await _apiFetch(`${API_BASE}/ingest`, { method: 'POST', body: formData });
       if (!res.ok) {
         const err = await res.json().catch(() => ({ detail: res.statusText }));
-        throw new Error(err.detail || `HTTP ${res.status}`);
+        throw new Error(formatApiError(err.detail) || `HTTP ${res.status}`);
       }
       const job = await res.json();
       setIngestJob(job);
@@ -253,6 +299,7 @@ const App = () => {
     setSessionId(newSid);
     localStorage.setItem('nlaz-session', newSid);
     setMessages([]);
+    localStorage.removeItem('nlaz-messages');
     setInput('');
   }, [sessionId]);
 
@@ -268,6 +315,8 @@ const App = () => {
         onClearSession={clearSession}
         view={view}
         onViewChange={setView}
+        apiFetch={_apiFetch}
+        apiBase={API_BASE}
       />
 
       {view === 'graph' ? (
@@ -296,6 +345,7 @@ const App = () => {
           <NotesRail
             notes={notes}
             onDelete={handleDeleteNote}
+            onEditNote={handleEditNote}
             onAddBlank={() => setBlankActive(true)}
             blankActive={blankActive}
             onBlankConfirm={handleBlankConfirm}
