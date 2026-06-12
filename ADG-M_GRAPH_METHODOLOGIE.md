@@ -5,8 +5,8 @@
 > classification par nom de fichier, taxonomie C1-C7). Cette phase a depuis été refondue en un
 > pipeline multi-étapes par document (chunking par titres, inventaire → enrichissement par couche
 > et par sous-prompt → complétion, taxonomie GraphRAG Legacy-Modernisation v2.0 à 19 labels/15
-> relations). La référence à jour est la section "Bouton Mise à jour (ExtractButton)" de
-> `CLAUDE.md` et le code de `api/routers/extract.py`.
+> relations). La référence à jour est le code de `api/routers/extract.py`
+> (`_run_extract_job`, `_ALL_LABELS_BLOCK`, `_ENRICH_TEMPLATES`).
 
 ---
 
