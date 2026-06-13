@@ -6,7 +6,7 @@
 // une couche par entrée des Couches 1-7 de la taxonomie GraphRAG Legacy-Modernisation
 // v2.0 (Couche 0 — Méta-fiabilité — n'a pas de vue dédiée, cf. LAYER_SUBTYPES) + Global.
 
-// ── Couleurs/formes/libellés par sous-type de nœud (taxonomie v2.0, 20 labels Phase-1) ──
+// ── Couleurs/formes/libellés par sous-type de nœud (taxonomie v2.0, 19 labels Phase-1) ──
 // `subtype` = label.lower() (cf. _generic_node_dto, function_app.py 1A) — un sous-type par
 // label de ALLOWED_NODE_LABELS. `composant` n'a pas de couleur fixe : il encode le 7R
 // (R7_COLORS) comme l'ancien `component`/`program`.
@@ -29,7 +29,6 @@ const SUBTYPE_COLORS = {
   fonction:               '#64b5f6',
   regle_metier:           '#ffb74d',
   processus_fonctionnel:  '#4db6ac',
-  domaine_technique:      '#5e35b1',
   composant:              '#ffffff',
   point_entree:           '#fff176',
   interface_utilisateur:  '#ba68c8',
@@ -52,7 +51,6 @@ const SUBTYPE_SHAPES = {
   fonction:               'round-rectangle',
   regle_metier:           'diamond',
   processus_fonctionnel:  'hexagon',
-  domaine_technique:      'ellipse',
   composant:              'ellipse',
   point_entree:           'vee',
   interface_utilisateur:  'tag',
@@ -74,7 +72,6 @@ const SUBTYPE_LABELS = {
   fonction:               'Fonction',
   regle_metier:           'Règle métier',
   processus_fonctionnel:  'Processus fonctionnel',
-  domaine_technique:      'Domaine technique',
   composant:              'Composant',
   point_entree:           "Point d'entrée",
   interface_utilisateur:  'Interface utilisateur',
@@ -117,7 +114,7 @@ const LAYER_LAYOUTS = {
 // gérés par un état vide explicite (cf. LAYER_EMPTY_INFO).
 const LAYER_SUBTYPES = {
   fonctionnel:        ['domaine_fonctionnel', 'fonction', 'regle_metier', 'processus_fonctionnel'],
-  applicatif:         ['composant', 'domaine_technique', 'point_entree', 'interface_utilisateur', 'job_batch', 'unite_execution', 'procedure_reutilisable'],
+  applicatif:         ['composant', 'point_entree', 'interface_utilisateur', 'job_batch', 'unite_execution', 'procedure_reutilisable'],
   donnees:            ['structure_partagee', 'store_donnees', 'store_echange', 'table_relationnelle', 'store_hierarchique', 'entite_donnees', 'canal_messagerie'],
   integration:        [],
   architecture_cible: [],

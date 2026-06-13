@@ -25,6 +25,7 @@ from api.routers.exploration import router as exploration_router
 from api.routers.extract import router as extract_router
 from api.routers.graph import router as graph_router
 from api.routers.ingest import router as ingest_router
+from api.routers.legacykb import router as legacykb_router
 from api.routers.sources import router as sources_router
 from api.services.retriever import Retriever
 from api.services.generator import Generator
@@ -117,6 +118,7 @@ def _load_secrets_from_keyvault():
             "search-endpoint": "AZURE_SEARCH_ENDPOINT",
             "docint-endpoint": "AZURE_DOCINT_ENDPOINT",
             "storage-account-name": "AZURE_STORAGE_ACCOUNT_NAME",
+            "neo4j-legacykb-password": "NEO4J_LEGACYKB_PASSWORD",
         }
 
         for secret_name, env_var in secret_map.items():
@@ -180,6 +182,7 @@ app.include_router(exploration_router, prefix="/api")
 app.include_router(extract_router,     prefix="/api")
 app.include_router(graph_router,       prefix="/api")
 app.include_router(ingest_router,      prefix="/api")
+app.include_router(legacykb_router,    prefix="/api")
 app.include_router(sources_router,     prefix="/api")
 
 
