@@ -6,6 +6,7 @@ const VIEW_OPTIONS = [
   { key: 'chat',        label: 'Chat' },
   { key: 'graph',       label: 'Graphe ADG-M' },
   { key: 'exploration', label: 'Exploration' },
+  { key: 'legacykb',    label: 'Legacy KB' },
 ];
 
 const ViewSwitch = ({ view, onChange }) => (

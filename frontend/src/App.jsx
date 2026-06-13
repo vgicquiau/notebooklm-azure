@@ -323,6 +323,8 @@ const App = () => {
         <GraphPage apiFetch={_apiFetch} />
       ) : view === 'exploration' ? (
         <ExplorationPage apiFetch={_apiFetch} />
+      ) : view === 'legacykb' ? (
+        <LegacyKbPage apiFetch={_apiFetch} />
       ) : (
         <div style={{ flex: 1, display: 'flex', overflow: 'hidden' }}>
           <SourcesRail

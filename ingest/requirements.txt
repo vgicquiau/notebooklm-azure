@@ -12,3 +12,6 @@ click==8.1.7
 tenacity==9.0.0
 python-dotenv==1.0.1
 tqdm==4.67.0
+
+# graphrag_to_adgm.py — lecture du graphe neo4j-legacykb
+neo4j==6.2.0

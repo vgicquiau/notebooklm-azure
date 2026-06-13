@@ -26,10 +26,17 @@ import json
 import logging
 import math
 import os
+import sys
 import uuid
 from datetime import datetime, timezone
 from neo4j import GraphDatabase
 
+# Le worker Python du modèle V1 (function.json + scriptFile) n'ajoute pas
+# systématiquement le dossier de la function au sys.path — sans ce répertoire,
+# `import archimate_taxonomy` lève ModuleNotFoundError en production bien que le
+# fichier soit déployé à côté de function_app.py (fonctionne en local car le cwd
+# y est déjà).
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import archimate_taxonomy as archimate
 try:
     import pyodbc
@@ -115,10 +122,20 @@ ALLOWED_NODE_LABELS = {
 #                        même-label, ext. dépendances inter-domaines/fonctions/processus ;
 #                        props : fiabilite, nature [DONNEES|ORDONNANCEMENT|APPEL|
 #                        DECLENCHEMENT|GOUVERNANCE], description optionnelle)
+#   APPARTIENT_DOMAINE  {Composant,Job_Batch,Structure_Partagee,Store_Echange}->
+#                        Domaine_Fonctionnel  (Ext #4, extension additive — rattachement
+#                        d'un artefact applicatif/données à son domaine fonctionnel,
+#                        typiquement issu d'un clustering automatique (communautés
+#                        GraphRAG/Louvain) ; fiabilite généralement HYPOTHÈSE)
+#   CONTIENT_PROGRAMME  Job_Batch->Composant  (Ext #4, extension additive — ce job batch
+#                        exécute ce composant ; distinct de CONTIENT_STEP qui passe par un
+#                        Unite_Execution intermédiaire, absent de certaines sources
+#                        automatiques (ex. GraphRAG))
 ALLOWED_REL_TYPES = {
     "CONTIENT", "CATALOGUE", "PORTE_REGLE", "ORCHESTRE", "ORIENTE_PAR", "IMPLEMENTE",
     "ENCODE_REGLE", "APPELLE", "INCLUT", "ACCEDE_A", "DECLENCHE", "CONTIENT_STEP",
     "CORRESPOND_A", "GENERE_INCERTITUDE", "DEPEND_DE",
+    "APPARTIENT_DOMAINE", "CONTIENT_PROGRAMME",
 }
 
 # F.2 — fiabilite : priorité d'upgrade FAIT > HYPOTHÈSE > SUPPOSÉ > MANQUANT. Une ré-extraction
@@ -1329,7 +1346,7 @@ def list_exploration_nodes(req: func.HttpRequest) -> func.HttpResponse:
             records = session.run(
                 f"""
                 MATCH (n:ArchiMateElement) {where_clause}
-                WITH n, size((n)--()) AS relCount
+                WITH n, COUNT {{ (n)--() }} AS relCount
                 RETURN n, relCount
                 ORDER BY n.layer ASC, n.name ASC
                 SKIP $skip LIMIT $limit
@@ -1595,7 +1612,7 @@ def delete_exploration_node(req: func.HttpRequest, node_id: str) -> func.HttpRes
                 )
 
             check = session.run(
-                "MATCH (n:ArchiMateElement {id: $id}) RETURN n, size((n)--()) AS relCount",
+                "MATCH (n:ArchiMateElement {id: $id}) RETURN n, COUNT { (n)--() } AS relCount",
                 id=node_id,
             ).single()
 
