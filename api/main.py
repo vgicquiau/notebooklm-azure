@@ -21,6 +21,7 @@ from fastapi.staticfiles import StaticFiles
 from starlette.middleware.base import BaseHTTPMiddleware
 
 from api.routers.chat import router as chat_router
+from api.routers.exploration import router as exploration_router
 from api.routers.extract import router as extract_router
 from api.routers.graph import router as graph_router
 from api.routers.ingest import router as ingest_router
@@ -174,11 +175,12 @@ if _allowed_origins:
         allow_headers=["Authorization", "Content-Type", "X-API-Key"],
     )
 
-app.include_router(chat_router,    prefix="/api")
-app.include_router(extract_router, prefix="/api")
-app.include_router(graph_router,   prefix="/api")
-app.include_router(ingest_router,  prefix="/api")
-app.include_router(sources_router, prefix="/api")
+app.include_router(chat_router,        prefix="/api")
+app.include_router(exploration_router, prefix="/api")
+app.include_router(extract_router,     prefix="/api")
+app.include_router(graph_router,       prefix="/api")
+app.include_router(ingest_router,      prefix="/api")
+app.include_router(sources_router,     prefix="/api")
 
 
 @app.get("/health")

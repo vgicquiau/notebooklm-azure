@@ -321,6 +321,8 @@ const App = () => {
 
       {view === 'graph' ? (
         <GraphPage apiFetch={_apiFetch} />
+      ) : view === 'exploration' ? (
+        <ExplorationPage apiFetch={_apiFetch} />
       ) : (
         <div style={{ flex: 1, display: 'flex', overflow: 'hidden' }}>
           <SourcesRail

@@ -97,13 +97,19 @@
   <!-- Cytoscape.js — rendu du graphe ADG-M (GraphPage), expose window.cytoscape -->
   <script src="vendor/cytoscape.min.js"></script>
 
-  <!-- Composants React (ordre impératif : tokens → Header → SourcesRail → NotesRail → ChatPanel → GraphPage → App) -->
+  <!-- Composants React (ordre impératif : tokens → Header → SourcesRail → NotesRail → ChatPanel → GraphPage → ExplorationPage → App) -->
   <script type="text/babel" src="src/tokens.jsx"></script>
   <script type="text/babel" src="src/Header.jsx"></script>
   <script type="text/babel" src="src/SourcesRail.jsx"></script>
   <script type="text/babel" src="src/NotesRail.jsx"></script>
   <script type="text/babel" src="src/ChatPanel.jsx"></script>
   <script type="text/babel" src="src/GraphPage.jsx"></script>
+
+  <!-- Module Exploration : taxonomie ArchiMate + client API, puis page (Object.assign(window, ...)) -->
+  <script src="src/archimateTaxonomy.js"></script>
+  <script src="src/explorationApi.js"></script>
+  <script type="text/babel" src="src/ExplorationPage.jsx"></script>
+
   <script type="text/babel" src="src/App.jsx"></script>
 </body>
 </html>

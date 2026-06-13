@@ -3,8 +3,9 @@
 
 // ── Switch de vue (Chat ⇄ Graphe ADG-M) ────────────────────────
 const VIEW_OPTIONS = [
-  { key: 'chat',  label: 'Chat' },
-  { key: 'graph', label: 'Graphe ADG-M' },
+  { key: 'chat',        label: 'Chat' },
+  { key: 'graph',       label: 'Graphe ADG-M' },
+  { key: 'exploration', label: 'Exploration' },
 ];
 
 const ViewSwitch = ({ view, onChange }) => (
