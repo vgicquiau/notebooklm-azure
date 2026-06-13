@@ -164,13 +164,14 @@ const App = () => {
       }
 
       setMessages(prev => [...prev, {
-        id:         uid(),
-        role:       'assistant',
-        content:    data.answer,
-        rawContent: data.answer,
+        id:             uid(),
+        role:           'assistant',
+        content:        data.answer,
+        rawContent:     data.answer,
         citations,
-        timestamp:  new Date().toISOString(),
-        saved:      false,
+        graphReferences: data.graph_references ?? [],
+        timestamp:      new Date().toISOString(),
+        saved:          false,
       }]);
 
     } catch (err) {
@@ -315,15 +316,9 @@ const App = () => {
         onClearSession={clearSession}
         view={view}
         onViewChange={setView}
-        apiFetch={_apiFetch}
-        apiBase={API_BASE}
       />
 
-      {view === 'graph' ? (
-        <GraphPage apiFetch={_apiFetch} />
-      ) : view === 'exploration' ? (
-        <ExplorationPage apiFetch={_apiFetch} />
-      ) : view === 'legacykb' ? (
+      {view === 'legacykb' ? (
         <LegacyKbPage apiFetch={_apiFetch} />
       ) : (
         <div style={{ flex: 1, display: 'flex', overflow: 'hidden' }}>

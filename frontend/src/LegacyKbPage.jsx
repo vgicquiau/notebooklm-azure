@@ -2,10 +2,22 @@
 // Props: apiFetch(url, options) — wrapper _apiFetch (injecte X-API-Key), fourni par App
 //
 // Lecture seule, via api/routers/legacykb.py (connexion directe à l'instance Neo4j
-// neo4j-legacykb, distincte du graphe ADG-M). Recherche par nom/titre, puis exploration
-// progressive du voisinage par double-clic (même pattern que GraphPage.jsx).
+// neo4j-legacykb, distincte du graphe ADG-M, retiré). Recherche par nom/titre, puis
+// exploration progressive du voisinage par double-clic. Rendu avec React Flow (xyflow,
+// window.ReactFlow) + dagre (window.dagre) pour le layout.
 
 const API_BASE = window.location.origin + '/api';
+
+const {
+  ReactFlow: ReactFlowCanvas,
+  ReactFlowProvider,
+  Background,
+  Controls,
+  Handle,
+  Position,
+  MarkerType,
+  useReactFlow,
+} = window.ReactFlow;
 
 // ── Couleurs/formes par type d'entité et niveau de communauté ─────────────────
 const ENTITY_COLORS = {
@@ -25,54 +37,40 @@ const ENTITY_TYPE_LABELS = {
   'External/Doc': 'Référence externe',
 };
 
-const LEGACYKB_STYLE = [
-  { selector: 'node', style: {
-      'background-color': 'data(color)',
-      'shape': 'data(shape)',
-      'border-color': '#e1ded7', 'border-width': 1,
-      'color': '#1c1b18', 'text-outline-width': 2, 'text-outline-color': '#ffffff',
-      'label': 'data(label)', 'font-size': 10, 'text-valign': 'center',
-  } },
-  { selector: 'edge', style: {
-      'width': 1.5, 'line-color': '#e1ded7', 'target-arrow-color': '#e1ded7',
-      'target-arrow-shape': 'triangle', 'curve-style': 'bezier', 'arrow-scale': 0.8,
-  } },
-  { selector: ':selected', style: { 'overlay-opacity': 0.2, 'overlay-color': '#2f6df0' } },
-  { selector: 'node[?center]', style: { 'border-width': 3, 'border-color': '#2f6df0' } },
-  { selector: 'edge[relLabel][?showLabel]', style: {
-      'label': 'data(relLabel)',
-      'font-size': 10, 'text-rotation': 'none',
-      'text-background-color': '#1e293b', 'text-background-opacity': 0.9, 'text-background-padding': '3px',
-      'text-border-width': 0, 'color': '#f1f5f9',
-      'text-halign': 'center', 'text-valign': 'center',
-  } },
-];
+const NODE_W = 220;
+const NODE_H = 44;
 
-const LAYOUT = { name: 'cose', idealEdgeLength: 200, nodeRepulsion: 80000, gravity: 0.2, padding: 60, animate: true };
+// ── Nœud custom — entité (pastille ronde) ou communauté (pastille carrée) ─────
+const LegacyNode = ({ data }) => {
+  const isEntity = data.kind === 'entity';
+  const color = isEntity
+    ? (ENTITY_COLORS[data.type] ?? '#9e9e9e')
+    : (COMMUNITY_COLORS[data.level] ?? '#bdbdbd');
 
-// ── Élément cytoscape pour un nœud "summary" (entity ou community) ─────────────
-const _toElement = (n, extra = {}) => {
-  if (n.kind === 'entity') {
-    return {
-      data: {
-        id: n.id,
-        label: n.nom,
-        color: ENTITY_COLORS[n.type] ?? '#9e9e9e',
-        shape: 'ellipse',
-        ...extra,
-      },
-    };
-  }
-  return {
-    data: {
-      id: n.id,
-      label: n.nom,
-      color: COMMUNITY_COLORS[n.level] ?? '#bdbdbd',
-      shape: 'hexagon',
-      ...extra,
-    },
-  };
+  return (
+    <div style={{
+      display: 'flex', alignItems: 'center', gap: 8,
+      width: NODE_W, height: NODE_H, padding: '0 12px', boxSizing: 'border-box',
+      borderRadius: isEntity ? 999 : 8,
+      border: data.isCenter ? `2px solid ${T.azure}` : `1px solid ${T.border}`,
+      background: T.white,
+      fontFamily: T.font, fontSize: 12, fontWeight: 600, color: T.ink,
+      boxShadow: '0 1px 2px rgba(0,0,0,0.06)',
+    }}>
+      <Handle type="target" position={Position.Left} style={{ background: color, border: 'none', width: 8, height: 8 }} />
+      <span style={{
+        width: 10, height: 10, borderRadius: isEntity ? '50%' : 2,
+        background: color, flexShrink: 0,
+      }} />
+      <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+        {data.nom}
+      </span>
+      <Handle type="source" position={Position.Right} style={{ background: color, border: 'none', width: 8, height: 8 }} />
+    </div>
+  );
 };
+
+const NODE_TYPES = { legacyNode: LegacyNode };
 
 // ── Panneau de détail ───────────────────────────────────────────────────────
 const NodeDetailPanel = ({ nodeId, apiFetch, onClose }) => {
@@ -151,10 +149,77 @@ const NodeDetailPanel = ({ nodeId, apiFetch, onClose }) => {
   );
 };
 
+// ── Calcule un layout dagre (gauche → droite) pour le bundle courant ──────────
+const _layout = (bundle, centerId) => {
+  if (!bundle) return { nodes: [], edges: [] };
+
+  const visibleIds = new Set(bundle.nodeMap.keys());
+  const edgeList = bundle.edgeList.filter(e => visibleIds.has(e.from) && visibleIds.has(e.to));
+
+  const g = new dagre.graphlib.Graph();
+  g.setGraph({ rankdir: 'LR', nodesep: 30, ranksep: 90 });
+  g.setDefaultEdgeLabel(() => ({}));
+
+  bundle.nodeMap.forEach(n => g.setNode(n.id, { width: NODE_W, height: NODE_H }));
+  edgeList.forEach(e => g.setEdge(e.from, e.to));
+
+  dagre.layout(g);
+
+  const nodes = [...bundle.nodeMap.values()].map(n => {
+    const pos = g.node(n.id);
+    return {
+      id: n.id,
+      type: 'legacyNode',
+      position: { x: pos.x - NODE_W / 2, y: pos.y - NODE_H / 2 },
+      data: { ...n, isCenter: n.id === centerId },
+    };
+  });
+
+  const edges = edgeList.map(e => ({
+    id: `${e.from}|${e.to}|${e.type}`,
+    source: e.from,
+    target: e.to,
+    label: e.type,
+    type: 'smoothstep',
+    markerEnd: { type: MarkerType.ArrowClosed, color: '#cbd5e1' },
+    style: { stroke: '#cbd5e1' },
+    labelStyle: { fontSize: 10, fill: T.muted },
+    labelBgStyle: { fill: T.white, fillOpacity: 0.9 },
+  }));
+
+  return { nodes, edges };
+};
+
+// ── Canvas React Flow — recadre la vue à chaque mise à jour du graphe ─────────
+const LegacyKbCanvas = ({ nodes, edges, onNodeClick, onNodeDoubleClick, onPaneClick }) => {
+  const { fitView } = useReactFlow();
+
+  React.useEffect(() => {
+    if (!nodes.length) return;
+    const id = requestAnimationFrame(() => fitView({ padding: 0.15, duration: 300 }));
+    return () => cancelAnimationFrame(id);
+  }, [nodes, fitView]);
+
+  return (
+    <ReactFlowCanvas
+      nodes={nodes}
+      edges={edges}
+      nodeTypes={NODE_TYPES}
+      onNodeClick={onNodeClick}
+      onNodeDoubleClick={onNodeDoubleClick}
+      onPaneClick={onPaneClick}
+      nodesDraggable={false}
+      nodesConnectable={false}
+      fitView
+    >
+      <Background color={T.border} gap={20} />
+      <Controls showInteractive={false} />
+    </ReactFlowCanvas>
+  );
+};
+
 // ── Page principale ─────────────────────────────────────────────────────────
 const LegacyKbPage = ({ apiFetch }) => {
-  const containerRef = React.useRef(null);
-  const cyRef        = React.useRef(null);
   const apiFetchRef  = React.useRef(apiFetch);
   apiFetchRef.current = apiFetch;
 
@@ -236,70 +301,14 @@ const LegacyKbPage = ({ apiFetch }) => {
     setSelectedId(null);
   }, []);
 
-  // ── Éléments cytoscape dérivés du bundle ──────────────────────────────────
-  const { elements, nodeCount, arcCount } = React.useMemo(() => {
-    if (!bundle) return { elements: [], nodeCount: 0, arcCount: 0 };
-    const nodeElements = [...bundle.nodeMap.values()].map(n =>
-      _toElement(n, n.id === centerId ? { center: true } : {})
-    );
-    const visibleIds = new Set(bundle.nodeMap.keys());
-    const edgeElements = bundle.edgeList
-      .filter(e => visibleIds.has(e.from) && visibleIds.has(e.to))
-      .map(e => ({
-        data: {
-          id: `${e.from}|${e.to}|${e.type}`,
-          source: e.from, target: e.to,
-          relLabel: e.type, type: e.type,
-        },
-      }));
-    return {
-      elements: [...nodeElements, ...edgeElements],
-      nodeCount: nodeElements.length,
-      arcCount: edgeElements.length,
-    };
-  }, [bundle, centerId]);
+  // ── Nœuds/arêtes React Flow dérivés du bundle (layout dagre) ──────────────
+  const { nodes, edges } = React.useMemo(() => _layout(bundle, centerId), [bundle, centerId]);
+  const nodeCount = nodes.length;
+  const arcCount = edges.length;
 
-  // ── Initialisation Cytoscape — une seule fois au mount ────────────────────
-  React.useEffect(() => {
-    if (!containerRef.current) return;
-    const cy = window.cytoscape({
-      container: containerRef.current,
-      elements: [],
-      style: LEGACYKB_STYLE,
-      wheelSensitivity: 0.25,
-    });
-
-    cy.on('tap', 'node', evt => setSelectedId(evt.target.id()));
-    cy.on('tap', evt => { if (evt.target === cy) setSelectedId(null); });
-    cy.on('dblclick', 'node', evt => exploreNode(evt.target.id()));
-
-    cy.on('mouseover', 'edge', evt => { if (evt.target.data('relLabel')) evt.target.data('showLabel', true); });
-    cy.on('mouseout',  'edge', evt => { evt.target.data('showLabel', null); });
-
-    cyRef.current = cy;
-    return () => { cy.destroy(); cyRef.current = null; };
-  }, [exploreNode]);
-
-  // ── Mise à jour du contenu — patche les éléments sans détruire cy ─────────
-  React.useEffect(() => {
-    const cy = cyRef.current;
-    if (!cy) return;
-    cy.elements().remove();
-    cy.add(elements);
-    const ly = cy.layout(LAYOUT);
-    ly.one('layoutstop', () => {
-      cy.fit(undefined, 80);
-      if (cy.zoom() > 1.0) { cy.zoom(1.0); cy.center(); }
-    });
-    ly.run();
-  }, [elements]);
-
-  // ── Redimensionnement ──────────────────────────────────────────────────
-  React.useEffect(() => {
-    const onResize = () => cyRef.current?.resize();
-    window.addEventListener('resize', onResize);
-    return () => window.removeEventListener('resize', onResize);
-  }, []);
+  const handleNodeClick = React.useCallback((_evt, node) => setSelectedId(node.id), []);
+  const handleNodeDoubleClick = React.useCallback((_evt, node) => exploreNode(node.id), [exploreNode]);
+  const handlePaneClick = React.useCallback(() => setSelectedId(null), []);
 
   return (
     <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden', minWidth: 0 }}>
@@ -409,9 +418,17 @@ const LegacyKbPage = ({ apiFetch }) => {
 
         {/* Canvas */}
         <div style={{ flex: 1, position: 'relative', background: T.panel, minHeight: 0 }}>
-          <div ref={containerRef} style={{ position: 'absolute', inset: 0 }} />
-
-          {!bundle && (
+          {bundle ? (
+            <ReactFlowProvider>
+              <LegacyKbCanvas
+                nodes={nodes}
+                edges={edges}
+                onNodeClick={handleNodeClick}
+                onNodeDoubleClick={handleNodeDoubleClick}
+                onPaneClick={handlePaneClick}
+              />
+            </ReactFlowProvider>
+          ) : (
             <div style={{
               position: 'absolute', inset: 0, display: 'flex', flexDirection: 'column',
               alignItems: 'center', justifyContent: 'center', gap: 8, padding: 24,

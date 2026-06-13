@@ -11,6 +11,9 @@
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Hanken+Grotesk:wght@400;500;600;700&display=swap" rel="stylesheet" />
 
+  <!-- React Flow (xyflow) — rendu du graphe Legacy KB (LegacyKbPage) -->
+  <link rel="stylesheet" href="vendor/xyflow-react.css" />
+
   <style>
     /* ── Reset ── */
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
@@ -94,21 +97,17 @@
     mermaid.initialize({ startOnLoad: false, theme: 'neutral', securityLevel: 'strict' });
   </script>
 
-  <!-- Cytoscape.js — rendu du graphe ADG-M (GraphPage), expose window.cytoscape -->
-  <script src="vendor/cytoscape.min.js"></script>
+  <!-- React Flow (xyflow) + dagre — rendu du graphe Legacy KB (LegacyKbPage), expose window.ReactFlow / window.dagre -->
+  <script src="vendor/jsx-runtime-shim.js"></script>
+  <script src="vendor/xyflow-react.umd.js"></script>
+  <script src="vendor/dagre.min.js"></script>
 
-  <!-- Composants React (ordre impératif : tokens → Header → SourcesRail → NotesRail → ChatPanel → GraphPage → ExplorationPage → App) -->
+  <!-- Composants React (ordre impératif : tokens → Header → SourcesRail → NotesRail → ChatPanel → LegacyKbPage → App) -->
   <script type="text/babel" src="src/tokens.jsx"></script>
   <script type="text/babel" src="src/Header.jsx"></script>
   <script type="text/babel" src="src/SourcesRail.jsx"></script>
   <script type="text/babel" src="src/NotesRail.jsx"></script>
   <script type="text/babel" src="src/ChatPanel.jsx"></script>
-  <script type="text/babel" src="src/GraphPage.jsx"></script>
-
-  <!-- Module Exploration : taxonomie ArchiMate + client API, puis page (Object.assign(window, ...)) -->
-  <script src="src/archimateTaxonomy.js"></script>
-  <script src="src/explorationApi.js"></script>
-  <script type="text/babel" src="src/ExplorationPage.jsx"></script>
 
   <!-- Legacy KB : exploration du graphe GraphRAG brut (neo4j-legacykb) -->
   <script type="text/babel" src="src/LegacyKbPage.jsx"></script>
