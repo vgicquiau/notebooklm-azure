@@ -5,9 +5,6 @@ api/.env
 ingest/.env
 azure-functions/local.settings.json
 
-# Configuration corpus locale (modale "Configuration corpus")
-api/extract_config.json
-
 # Python
 __pycache__/
 *.pyc
@@ -46,6 +43,10 @@ api/data/
 
 # Corpus de référence — données sensibles
 doc-archimind/
+
+# Exports/données générées par le pipeline GraphRAG (volumineux, régénérables)
+docs/extract/*.graphml
+ingest/graphrag_mapped.json
 
 # Outillage spécifique à Claude Code (local, non nécessaire au fonctionnement de l'app)
 .claude/
