@@ -53,6 +53,7 @@ L'interface s'ouvre automatiquement sur `http://127.0.0.1:8000`.
 - **Rail notes** : enregistrement des réponses de l'agent, indexation d'une note comme source
 - **Interface redimensionnable** : les deux rails sont redimensionnables par glisser-déposer
 - **Graphe ADG-M** : visualisation interactive de l'architecture applicative extraite du corpus — bi-plan switch (Fonctionnel/Technique), qualification 7R des composants, détection SPOF et clusters Louvain, exports JSON/CSV
+- **Module Exploration** : CRUD ArchiMate 3.x sur le graphe (nœuds, relations, suppression cascade, bulk-tag, orphelins), RBAC par rôle (Viewer/Architect/Admin) et journal d'audit — voir `ARCHITECTURE.md` §F8
 
 ---
 

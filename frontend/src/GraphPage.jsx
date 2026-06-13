@@ -984,6 +984,16 @@ const GraphPage = ({ apiFetch }) => {
   React.useEffect(() => { planRef.current     = plan;      }, [plan]);
   React.useEffect(() => { apiFetchRef.current = apiFetch;  }, [apiFetch]);
 
+  // ── Invalidation cross-onglets (T3-F-03) ───────────────────────
+  // Le module Exploration émet 'adgm:graph-changed' après chaque mutation
+  // (nœud/relation créé, modifié, supprimé, bulk-tag) — on rafraîchit le
+  // graphe sans intervention manuelle (F5).
+  React.useEffect(() => {
+    const onGraphChanged = () => setRefreshKey(k => k + 1);
+    window.addEventListener('adgm:graph-changed', onGraphChanged);
+    return () => window.removeEventListener('adgm:graph-changed', onGraphChanged);
+  }, []);
+
   // ── Reset graphe ───────────────────────────────────────────────
   const resetGraph = React.useCallback(async () => {
     setResetting(true);

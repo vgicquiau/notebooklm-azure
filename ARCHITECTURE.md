@@ -27,6 +27,7 @@
     - [F5 — Viewer de citation](#f5--viewer-de-citation)
     - [F6 — Upload de document](#f6--upload-de-document)
     - [F7 — Graphe ADG-M](#f7--graphe-adg-m)
+    - [F8 — Module Exploration](#f8--module-exploration)
 
 ---
 
@@ -1434,3 +1435,79 @@ La mise à jour est **idempotente** : MERGE sur les nœuds techniques permet de 
 | ExtractButton bloqué sur "running" | GPT-4o ou `import-entities` en erreur silencieuse | Vérifier les logs uvicorn (`WARNING import-entities returned ...`) |
 | `window.cytoscape` undefined | Script non chargé ou ordre incorrect dans `index.html` | Vérifier que `cytoscape.min.js` est avant `GraphPage.jsx` dans `index.html` |
 | `sql: "down"` dans `/graph/health` | `SQL_CONNECTION_STRING` au format ADO.NET au lieu de ODBC | Reformater en `Driver={ODBC Driver 18 for SQL Server};Server=tcp:...` |
+
+### F8 — Module Exploration
+
+#### I. Vue d'ensemble
+
+Le **Module Exploration**, troisième onglet de l'interface (`Exploration ArchiMate`, aux côtés de `Chat` et `Graphe ADG-M`), est une interface CRUD complète sur le graphe Neo4j pour les éléments et relations **ArchiMate 3.x** (`:ArchiMateElement`). Il permet de créer, consulter, modifier et supprimer des nœuds et relations à la main — en complément de l'extraction automatique GPT-4o (F7) — avec validations ArchiMate, RBAC par rôle et journal d'audit.
+
+Référence détaillée : `notebooklm-azure/docs/specs/SDD_Exploration_v1.md` et `PLAN_EXPLORATION_v1.md`.
+
+#### II. RBAC — rôles et en-tête `X-User-Role`
+
+Le sélecteur de rôle (`RoleSelector`, persistant en `localStorage`) place un en-tête `X-User-Role` sur chaque appel `explorationApi`. `fn-adgm-graph` (`function_app.py`) applique `require_role(req, ...)` par opération :
+
+| Rôle | Lecture (nœuds/relations/orphelins) | Création/modification/suppression simple | Suppression cascade | Bulk-tag | Audit (`/exploration/audit`) |
+|---|---|---|---|---|---|
+| `VIEWER` | ✅ | ❌ (403 `AUTH_INSUFFICIENT_ROLE`) | ❌ | ❌ | ❌ |
+| `ARCHITECT` | ✅ | ✅ | ❌ (403) | ✅ | ❌ |
+| `ADMIN` | ✅ | ✅ | ✅ | ✅ | ✅ |
+
+#### III. Endpoints `/api/graph/exploration/*`
+
+Tous relayés par le proxy `api/routers/graph.py` vers `fn-adgm-graph` (Azure Function).
+
+| Méthode | Route | Description |
+|---|---|---|
+| GET | `/exploration/nodes` | Liste paginée, filtres `layer`/`elementType`/`aspect`/`name`/`tags`/`orphansOnly` |
+| GET | `/exploration/nodes/{id}` | Détail nœud + relations entrantes/sortantes |
+| POST | `/exploration/nodes` | Création (ARCHITECT/ADMIN) |
+| PATCH | `/exploration/nodes/{id}` | Modification (ARCHITECT/ADMIN) |
+| DELETE | `/exploration/nodes/{id}` | Suppression — `?cascade=true` requiert ADMIN ; sans cascade, 409 `NODE_HAS_RELATIONS` si `relCount > 0` |
+| GET | `/exploration/orphans` | Nœuds sans aucune relation |
+| POST | `/exploration/nodes/bulk-tag` | Ajout/retrait d'un tag sur une liste de nœuds (ARCHITECT/ADMIN) |
+| GET | `/exploration/relations` | Liste paginée, filtres `relationType`/`sourceId`/`targetId`/`sourceLayer`/`targetLayer` |
+| GET | `/exploration/relations/{id}` | Détail relation |
+| POST | `/exploration/relations` | Création — valide ArchiMate (VAL-03/05/06/07/08), `confirmWarnings` pour outrepasser un avertissement 422 `ARCHIMATE_WARN` |
+| PATCH | `/exploration/relations/{id}` | Modification (`name`, `description`, `weight`, `accessType`) |
+| DELETE | `/exploration/relations/{id}` | Suppression directe |
+| GET | `/exploration/audit` | Journal `:AuditLog` (ADMIN) — filtres `entityId`/`entityType`/`operation`/`userId`/`since` |
+| GET | `/exploration/health` | Healthcheck |
+
+#### IV. Journal d'audit (`:AuditLog`)
+
+Chaque mutation (création/modification/suppression de nœud ou relation, suppression cascade, bulk-tag) écrit, dans la **même transaction Neo4j**, un nœud `:AuditLog { id, operation, entityType, entityId, userId, userRole, payload, timestamp, ipAddress }` via `_exploration_write_audit`. `payload` est un JSON `{before, after}` (`after: null` pour une suppression, `before: null` pour une création). `ipAddress` est masquée sur les deux derniers octets (`_exploration_client_ip`).
+
+`operation` ∈ `CREATE | UPDATE | DELETE | DELETE_CASCADE`. Pour `DELETE_CASCADE`, `payload.after.relCount` indique le nombre de relations supprimées avec le nœud.
+
+Consultable via la vue **Audit** (onglet visible uniquement pour `ADMIN`), avec filtres opération/type/ID/date et détail JSON dépliable par ligne.
+
+#### V. Invalidation cross-onglets
+
+Toute mutation Exploration émet `window.dispatchEvent(new CustomEvent('adgm:graph-changed'))`. `GraphPage.jsx` écoute cet événement et incrémente son `refreshKey`, déclenchant un refetch de `/graph/nodes` et `/graph/arcs` — sans rechargement de page (cf. `frontend/tests/e2e/exploration_cross_tab.md`).
+
+#### VI. Gestion des erreurs (toasts)
+
+`explorationApi.handleApiError(err)` normalise toute erreur HTTP en `{ message, retryable, retryAfter }` (cf. SDD §7) :
+
+- **403 / 404** (formulaires nœud/relation) : toast rouge + fermeture du formulaire (retour à la liste/détail) ; un 404 déclenche aussi `adgm:graph-changed`.
+- **404** (consultation détail nœud) : toast + retour automatique à la liste.
+- **500 / 503** : toast + bannière d'erreur inline avec bouton **Réessayer** (relance le `load()` du composant).
+- **429** : toast incluant le délai `Retry-After` si fourni par le serveur.
+- Erreur réseau (pas de réponse) : traitée comme 503 — toast + bouton Réessayer.
+
+Les toasts sont émis via l'événement `adgm:toast` (même convention que `adgm:graph-changed`) et affichés par `<ToastStack>` dans `ExplorationPage.jsx`, avec auto-dismiss après 6 s.
+
+#### VII. Composants frontend (`frontend/src/ExplorationPage.jsx`)
+
+| Composant | Rôle |
+|---|---|
+| `NodeListView` | Liste filtrable des nœuds, sélection multiple + bulk-tag (ARCHITECT/ADMIN) |
+| `NodeDetailView` | Détail nœud, relations entrantes/sortantes, actions édition/suppression |
+| `NodeFormView` | Création/édition d'un nœud (couche, type, aspect, tags, stéréotype, métadonnées) |
+| `OrphanListView` | Nœuds sans relation (N7) |
+| `RelListView` / `RelFormView` | Liste et formulaire de relations, avec avertissements ArchiMate (422) |
+| `AuditListView` | Journal d'audit (ADMIN uniquement) |
+| `DeleteConfirmModal` / `DeleteRelationConfirmModal` | Confirmation de suppression, avec option cascade pour ADMIN |
+| `ToastStack` | Notifications transversales (succès implicite via fermeture, erreurs via toasts) |

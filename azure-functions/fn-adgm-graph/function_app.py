@@ -26,8 +26,11 @@ import json
 import logging
 import math
 import os
+import uuid
 from datetime import datetime, timezone
 from neo4j import GraphDatabase
+
+import archimate_taxonomy as archimate
 try:
     import pyodbc
     _pyodbc_available = True
@@ -191,6 +194,34 @@ def error_response(message: str, status_code: int, **extra) -> func.HttpResponse
     body = {"error": message}
     body.update(extra)
     return func.HttpResponse(json.dumps(body), status_code=status_code, mimetype="application/json")
+
+# ============================================================================
+# Module Exploration — RBAC minimal (PLAN_EXPLORATION_v1.md T0-B-03)
+#
+# L'app n'a pas de JWT (usage local mono-utilisateur, cf. README). Le rôle est lu
+# depuis le header `X-User-Role` — whitelist VIEWER/ARCHITECT/ADMIN, défaut VIEWER
+# si absent/invalide. `resolve_role()` est le seul point à remplacer par une vraie
+# résolution JWT en v2 ; `require_role()` reste inchangé.
+# ============================================================================
+
+EXPLORATION_ROLES = ("VIEWER", "ARCHITECT", "ADMIN")
+
+
+def resolve_role(request: func.HttpRequest) -> str:
+    role = (request.headers.get("X-User-Role") or "").strip().upper()
+    return role if role in EXPLORATION_ROLES else "VIEWER"
+
+
+def require_role(request: func.HttpRequest, *allowed_roles: str):
+    """Retourne None si le rôle courant est autorisé, sinon une 403 AUTH_INSUFFICIENT_ROLE
+    (SDD §7/§8) prête à être `return`ée par le handler appelant."""
+    role = resolve_role(request)
+    if role not in allowed_roles:
+        return error_response(
+            "Opération non autorisée pour votre rôle", 403,
+            code="AUTH_INSUFFICIENT_ROLE", role=role,
+        )
+    return None
 
 def _parse_int_param(request: func.HttpRequest, name: str, default: int) -> int:
     raw = request.params.get(name)
@@ -1189,6 +1220,950 @@ def import_entities(req: func.HttpRequest) -> func.HttpResponse:
 
 
 # ============================================================================
+# Module Exploration — CRUD ArchiMate (PLAN_EXPLORATION_v1.md)
+#
+# Routes /exploration/* (préfixe /api/graph/exploration/* côté Function, relayé par
+# api/routers/exploration.py). Phase 1 : CRUD nœuds (N1-N7, T1-B-01..06). R1-R5 et
+# l'audit restent en 501 pour le moment, hors health-check.
+# ============================================================================
+
+def _exploration_not_implemented(task_id: str) -> func.HttpResponse:
+    return error_response(
+        f"Non implémenté — voir PLAN_EXPLORATION_v1.md ({task_id})", 501,
+    )
+
+
+def _exploration_node_dto(node, rel_count=None) -> dict:
+    """DTO nœud Exploration — propriétés brutes (dates converties via _to_json), avec
+    relCount optionnel (SDD §2.3 / §6 N1/N2/N7)."""
+    dto = {k: _to_json(v) for k, v in dict(node).items()}
+    if rel_count is not None:
+        dto["relCount"] = rel_count
+    return dto
+
+
+def _exploration_pagination(request: func.HttpRequest):
+    """skip/limit pour les endpoints de liste Exploration (N1/N7) — skip>=0,
+    1<=limit<=200, défaut limit=50 (PLAN_EXPLORATION_v1.md T1-B-01)."""
+    skip = max(0, _parse_int_param(request, "skip", 0))
+    limit = max(1, min(200, _parse_int_param(request, "limit", 50)))
+    return skip, limit
+
+
+def _exploration_client_ip(request: func.HttpRequest) -> str:
+    """Adresse IP masquée (SDD §4 AuditLog.ipAddress) — derniers octets remplacés par x.x."""
+    raw = (request.headers.get("X-Forwarded-For") or "").split(",")[0].strip()
+    parts = raw.split(".")
+    if len(parts) == 4:
+        return f"{parts[0]}.{parts[1]}.x.x"
+    return raw or "unknown"
+
+
+def _exploration_write_audit(tx, request, operation, entity_type, entity_id, before, after):
+    """Écrit un nœud :AuditLog dans la transaction courante (SDD §4)."""
+    tx.run(
+        """
+        CREATE (:AuditLog {
+          id: randomUUID(), operation: $operation, entityType: $entityType,
+          entityId: $entityId, userId: $userId, userRole: $userRole,
+          payload: $payload, timestamp: toString(datetime()), ipAddress: $ipAddress
+        })
+        """,
+        operation=operation, entityType=entity_type, entityId=entity_id,
+        userId=request.headers.get("X-User-Id") or "anonymous",
+        userRole=resolve_role(request),
+        payload=json.dumps({"before": before, "after": after}, default=str, ensure_ascii=False),
+        ipAddress=_exploration_client_ip(request),
+    )
+
+
+def list_exploration_nodes(req: func.HttpRequest) -> func.HttpResponse:
+    """GET /exploration/nodes — N1/N1b (T1-B-01)."""
+    layer = req.params.get("layer")
+    element_type = req.params.get("elementType")
+    aspect = req.params.get("aspect")
+    name_search = req.params.get("name")
+    tags_param = req.params.get("tags")
+    orphans_only = (req.params.get("orphansOnly") or "").lower() == "true"
+    skip, limit = _exploration_pagination(req)
+
+    if layer is not None and layer not in archimate.LAYERS:
+        return error_response("layer invalide", 400, code="VAL_LAYER")
+    if element_type is not None and element_type not in archimate.ALL_ELEMENT_TYPES:
+        return error_response("elementType invalide", 400, code="VAL_ELEMENT_TYPE")
+    if aspect is not None and aspect not in archimate.ASPECTS:
+        return error_response("aspect invalide", 400, code="VAL_ASPECT")
+
+    tags_filter = [t.strip() for t in tags_param.split(",") if t.strip()] if tags_param else None
+
+    conditions = []
+    params = {}
+    if layer is not None:
+        conditions.append("n.layer = $layer")
+        params["layer"] = layer
+    if element_type is not None:
+        conditions.append("n.elementType = $elementType")
+        params["elementType"] = element_type
+    if aspect is not None:
+        conditions.append("n.aspect = $aspect")
+        params["aspect"] = aspect
+    if name_search is not None:
+        conditions.append("toLower(n.name) CONTAINS toLower($nameSearch)")
+        params["nameSearch"] = name_search
+    if tags_filter:
+        conditions.append("ALL(tag IN $tagsFilter WHERE tag IN n.tags)")
+        params["tagsFilter"] = tags_filter
+    if orphans_only:
+        conditions.append("NOT (n)--()")
+
+    where_clause = ("WHERE " + " AND ".join(conditions)) if conditions else ""
+
+    try:
+        driver = get_neo4j_driver()
+        with driver.session() as session:
+            total = session.run(
+                f"MATCH (n:ArchiMateElement) {where_clause} RETURN count(n) AS total",
+                **params,
+            ).single()["total"]
+
+            records = session.run(
+                f"""
+                MATCH (n:ArchiMateElement) {where_clause}
+                WITH n, size((n)--()) AS relCount
+                RETURN n, relCount
+                ORDER BY n.layer ASC, n.name ASC
+                SKIP $skip LIMIT $limit
+                """,
+                skip=skip, limit=limit, **params,
+            )
+            items = [_exploration_node_dto(r["n"], rel_count=r["relCount"]) for r in records]
+    except Exception as e:
+        logger.error(f"list_exploration_nodes — erreur Neo4j : {e}")
+        return error_response("Erreur lors de la lecture du graphe", 500)
+
+    return func.HttpResponse(
+        json.dumps({"items": items, "total": total, "skip": skip, "limit": limit}),
+        status_code=200, mimetype="application/json",
+    )
+
+
+def get_exploration_node(req: func.HttpRequest, node_id: str) -> func.HttpResponse:
+    """GET /exploration/nodes/{id} — N2 (T1-B-02)."""
+    try:
+        driver = get_neo4j_driver()
+        with driver.session() as session:
+            record = session.run(
+                """
+                MATCH (n:ArchiMateElement {id: $id})
+                OPTIONAL MATCH (n)-[rOut]->(tgt:ArchiMateElement)
+                OPTIONAL MATCH (src:ArchiMateElement)-[rIn]->(n)
+                RETURN n,
+                  collect(DISTINCT CASE WHEN rOut IS NULL THEN NULL ELSE {
+                    relId: rOut.id, relType: type(rOut), relProps: properties(rOut),
+                    linkedNode: {id: tgt.id, name: tgt.name, elementType: tgt.elementType, layer: tgt.layer}
+                  } END) AS outgoing,
+                  collect(DISTINCT CASE WHEN rIn IS NULL THEN NULL ELSE {
+                    relId: rIn.id, relType: type(rIn), relProps: properties(rIn),
+                    linkedNode: {id: src.id, name: src.name, elementType: src.elementType, layer: src.layer}
+                  } END) AS incoming
+                """,
+                id=node_id,
+            ).single()
+    except Exception as e:
+        logger.error(f"get_exploration_node — erreur Neo4j : {e}")
+        return error_response("Erreur lors de la lecture du graphe", 500)
+
+    if record is None or record["n"] is None:
+        return error_response("Nœud introuvable", 404, code="NODE_NOT_FOUND")
+
+    def _clean(entries):
+        out = []
+        for entry in entries:
+            if entry is None:
+                continue
+            entry = dict(entry)
+            entry["relProps"] = {k: _to_json(v) for k, v in dict(entry["relProps"]).items()}
+            out.append(entry)
+        return out
+
+    return func.HttpResponse(
+        json.dumps({
+            "node": _exploration_node_dto(record["n"]),
+            "outgoing": _clean(record["outgoing"]),
+            "incoming": _clean(record["incoming"]),
+        }),
+        status_code=200, mimetype="application/json",
+    )
+
+
+def create_exploration_node(req: func.HttpRequest) -> func.HttpResponse:
+    """POST /exploration/nodes — N3 (T1-B-03)."""
+    denied = require_role(req, "ARCHITECT", "ADMIN")
+    if denied:
+        return denied
+
+    try:
+        body = req.get_json()
+    except ValueError:
+        body = {}
+
+    layer = body.get("layer")
+    element_type = body.get("elementType")
+    name = body.get("name")
+    aspect = body.get("aspect")
+    description = body.get("description")
+    stereotype = body.get("stereotype")
+    tags = body.get("tags")
+    metadata = body.get("metadata")
+
+    if layer not in archimate.LAYERS or not archimate.validate_element_type(layer, element_type):
+        return error_response("elementType invalide pour ce layer", 400, code="VAL_ELEMENT_TYPE")
+    if not isinstance(name, str) or not (1 <= len(name) <= 256):
+        return error_response("name requis (1-256 caractères)", 400, code="VAL_NAME_REQUIRED")
+    if aspect is not None and aspect not in archimate.ASPECTS:
+        return error_response("aspect invalide", 400, code="VAL_ASPECT")
+    if tags is not None and (not isinstance(tags, list) or not all(isinstance(t, str) for t in tags)):
+        return error_response("tags doit être une liste de chaînes", 400, code="VAL_TAGS")
+    if metadata is not None and not isinstance(metadata, str):
+        metadata = json.dumps(metadata, ensure_ascii=False)
+
+    extra_labels = [l for l in archimate.labels_for(layer, element_type) if l != "ArchiMateElement"]
+    label_clause = "".join(f" SET n:`{label}`" for label in extra_labels)
+
+    params = {
+        "elementType": element_type, "layer": layer, "aspect": aspect, "name": name,
+        "description": description, "stereotype": stereotype, "tags": tags, "metadata": metadata,
+    }
+
+    def _tx(tx):
+        node = tx.run(
+            f"""
+            CREATE (n:ArchiMateElement {{
+              id: randomUUID(), elementType: $elementType, layer: $layer, aspect: $aspect,
+              name: $name, description: $description, stereotype: $stereotype, tags: $tags,
+              metadata: $metadata, createdAt: toString(datetime()), updatedAt: toString(datetime())
+            }}){label_clause}
+            RETURN n
+            """,
+            **params,
+        ).single()["n"]
+        _exploration_write_audit(tx, req, "CREATE", "NODE", node["id"], None, dict(node))
+        return node
+
+    try:
+        driver = get_neo4j_driver()
+        with driver.session() as session:
+            node = session.execute_write(_tx)
+    except Exception as e:
+        logger.error(f"create_exploration_node — erreur Neo4j : {e}")
+        return error_response("Erreur lors de l'écriture du graphe", 500)
+
+    return func.HttpResponse(
+        json.dumps(_exploration_node_dto(node, rel_count=0)),
+        status_code=201, mimetype="application/json",
+    )
+
+
+def update_exploration_node(req: func.HttpRequest, node_id: str) -> func.HttpResponse:
+    """PATCH /exploration/nodes/{id} — N4 (T1-B-04)."""
+    denied = require_role(req, "ARCHITECT", "ADMIN")
+    if denied:
+        return denied
+
+    try:
+        body = req.get_json()
+    except ValueError:
+        body = {}
+
+    name = body.get("name")
+    aspect = body.get("aspect")
+    tags = body.get("tags")
+    metadata = body.get("metadata")
+
+    if "name" in body and (not isinstance(name, str) or not (1 <= len(name) <= 256)):
+        return error_response("name doit faire 1-256 caractères", 400, code="VAL_NAME_REQUIRED")
+    if "aspect" in body and aspect is not None and aspect not in archimate.ASPECTS:
+        return error_response("aspect invalide", 400, code="VAL_ASPECT")
+    if "tags" in body and tags is not None and (not isinstance(tags, list) or not all(isinstance(t, str) for t in tags)):
+        return error_response("tags doit être une liste de chaînes", 400, code="VAL_TAGS")
+    if "metadata" in body and metadata is not None and not isinstance(metadata, str):
+        metadata = json.dumps(metadata, ensure_ascii=False)
+
+    params = {
+        "id": node_id,
+        "name": body.get("name"),
+        "description": body.get("description"),
+        "aspect": body.get("aspect"),
+        "stereotype": body.get("stereotype"),
+        "tags": body.get("tags"),
+        "metadata": metadata,
+    }
+
+    def _tx(tx):
+        before_record = tx.run("MATCH (n:ArchiMateElement {id: $id}) RETURN n", id=node_id).single()
+        if before_record is None:
+            return None, None
+        before = dict(before_record["n"])
+
+        after = tx.run(
+            """
+            MATCH (n:ArchiMateElement {id: $id})
+            SET n.name = COALESCE($name, n.name),
+                n.description = COALESCE($description, n.description),
+                n.aspect = COALESCE($aspect, n.aspect),
+                n.stereotype = COALESCE($stereotype, n.stereotype),
+                n.tags = COALESCE($tags, n.tags),
+                n.metadata = COALESCE($metadata, n.metadata),
+                n.updatedAt = toString(datetime())
+            RETURN n
+            """,
+            **params,
+        ).single()["n"]
+
+        _exploration_write_audit(tx, req, "UPDATE", "NODE", node_id, before, dict(after))
+        return before, after
+
+    try:
+        driver = get_neo4j_driver()
+        with driver.session() as session:
+            before, after = session.execute_write(_tx)
+    except Exception as e:
+        logger.error(f"update_exploration_node — erreur Neo4j : {e}")
+        return error_response("Erreur lors de l'écriture du graphe", 500)
+
+    if after is None:
+        return error_response("Nœud introuvable", 404, code="NODE_NOT_FOUND")
+
+    return func.HttpResponse(
+        json.dumps(_exploration_node_dto(after)),
+        status_code=200, mimetype="application/json",
+    )
+
+
+def delete_exploration_node(req: func.HttpRequest, node_id: str) -> func.HttpResponse:
+    """DELETE /exploration/nodes/{id} — N5 (safe) / N6 (cascade, ?cascade=true, ADMIN)
+    (T1-B-05 / T3-B-01)."""
+    cascade = (req.params.get("cascade") or "").lower() == "true"
+
+    if cascade:
+        denied = require_role(req, "ADMIN")
+        if denied:
+            return denied
+    else:
+        denied = require_role(req, "ARCHITECT", "ADMIN")
+        if denied:
+            return denied
+
+    try:
+        driver = get_neo4j_driver()
+        with driver.session() as session:
+            if cascade:
+                def _tx(tx):
+                    check = tx.run(
+                        "MATCH (n:ArchiMateElement {id: $id}) "
+                        "OPTIONAL MATCH (n)-[r]-() "
+                        "RETURN n, count(r) AS relCount",
+                        id=node_id,
+                    ).single()
+                    if check is None or check["n"] is None:
+                        return None, None
+
+                    before = dict(check["n"])
+                    rel_count = check["relCount"]
+
+                    tx.run(
+                        "MATCH (n:ArchiMateElement {id: $id}) "
+                        "OPTIONAL MATCH (n)-[r]-() "
+                        "DELETE r, n",
+                        id=node_id,
+                    )
+
+                    audit_payload = dict(before)
+                    audit_payload["relCount"] = rel_count
+                    _exploration_write_audit(
+                        tx, req, "DELETE_CASCADE", "NODE", node_id, before, audit_payload,
+                    )
+                    return before, rel_count
+
+                before, rel_count = session.execute_write(_tx)
+                if before is None:
+                    return error_response("Nœud introuvable", 404, code="NODE_NOT_FOUND")
+
+                return func.HttpResponse(
+                    json.dumps({"deleted": True, "relCount": rel_count}),
+                    status_code=200, mimetype="application/json",
+                )
+
+            check = session.run(
+                "MATCH (n:ArchiMateElement {id: $id}) RETURN n, size((n)--()) AS relCount",
+                id=node_id,
+            ).single()
+
+            if check is None:
+                return error_response("Nœud introuvable", 404, code="NODE_NOT_FOUND")
+
+            rel_count = check["relCount"]
+            if rel_count > 0:
+                return error_response(
+                    "Le nœud a des relations — suppression refusée", 409,
+                    code="NODE_HAS_RELATIONS", relCount=rel_count,
+                )
+
+            before = dict(check["n"])
+
+            def _tx(tx):
+                tx.run("MATCH (n:ArchiMateElement {id: $id}) DELETE n", id=node_id)
+                _exploration_write_audit(tx, req, "DELETE", "NODE", node_id, before, None)
+
+            session.execute_write(_tx)
+    except Exception as e:
+        logger.error(f"delete_exploration_node — erreur Neo4j : {e}")
+        return error_response("Erreur lors de l'écriture du graphe", 500)
+
+    return func.HttpResponse(
+        json.dumps({"deleted": True}),
+        status_code=200, mimetype="application/json",
+    )
+
+
+def list_exploration_orphans(req: func.HttpRequest) -> func.HttpResponse:
+    """GET /exploration/orphans — N7 (T1-B-06)."""
+    denied = require_role(req, "ARCHITECT", "ADMIN")
+    if denied:
+        return denied
+
+    skip, limit = _exploration_pagination(req)
+
+    try:
+        driver = get_neo4j_driver()
+        with driver.session() as session:
+            total = session.run(
+                "MATCH (n:ArchiMateElement) WHERE NOT (n)--() RETURN count(n) AS total"
+            ).single()["total"]
+
+            records = session.run(
+                """
+                MATCH (n:ArchiMateElement) WHERE NOT (n)--()
+                RETURN n
+                ORDER BY n.layer ASC, n.createdAt DESC
+                SKIP $skip LIMIT $limit
+                """,
+                skip=skip, limit=limit,
+            )
+            items = [_exploration_node_dto(r["n"], rel_count=0) for r in records]
+    except Exception as e:
+        logger.error(f"list_exploration_orphans — erreur Neo4j : {e}")
+        return error_response("Erreur lors de la lecture du graphe", 500)
+
+    return func.HttpResponse(
+        json.dumps({"items": items, "total": total, "skip": skip, "limit": limit}),
+        status_code=200, mimetype="application/json",
+    )
+
+
+def bulk_tag_exploration_nodes(req: func.HttpRequest) -> func.HttpResponse:
+    """POST /exploration/nodes/bulk-tag — N8 (T3-B-02)."""
+    denied = require_role(req, "ARCHITECT", "ADMIN")
+    if denied:
+        return denied
+
+    try:
+        body = req.get_json()
+    except ValueError:
+        body = {}
+
+    node_ids = body.get("nodeIds")
+    action = body.get("action")
+    tag = body.get("tag")
+
+    if not isinstance(node_ids, list) or not node_ids or not all(isinstance(i, str) for i in node_ids):
+        return error_response("nodeIds doit être une liste non vide d'identifiants", 400, code="VAL_BULK_TAG_NODE_IDS")
+    if action not in ("add", "remove"):
+        return error_response("action doit être 'add' ou 'remove'", 400, code="VAL_BULK_TAG_ACTION")
+    if not isinstance(tag, str) or not (1 <= len(tag) <= 64):
+        return error_response("tag doit être une chaîne non vide (1-64 caractères)", 400, code="VAL_BULK_TAG_TAG")
+
+    def _tx(tx):
+        updated = 0
+        for node_id in node_ids:
+            record = tx.run("MATCH (n:ArchiMateElement {id: $id}) RETURN n", id=node_id).single()
+            if record is None:
+                continue
+
+            before = dict(record["n"])
+            tags = list(before.get("tags") or [])
+
+            if action == "add":
+                if tag not in tags:
+                    tags.append(tag)
+            else:
+                if tag in tags:
+                    tags = [t for t in tags if t != tag]
+
+            after_record = tx.run(
+                """
+                MATCH (n:ArchiMateElement {id: $id})
+                SET n.tags = $tags, n.updatedAt = toString(datetime())
+                RETURN n
+                """,
+                id=node_id, tags=tags,
+            ).single()["n"]
+
+            _exploration_write_audit(tx, req, "UPDATE", "NODE", node_id, before, dict(after_record))
+            updated += 1
+        return updated
+
+    try:
+        driver = get_neo4j_driver()
+        with driver.session() as session:
+            updated = session.execute_write(_tx)
+    except Exception as e:
+        logger.error(f"bulk_tag_exploration_nodes — erreur Neo4j : {e}")
+        return error_response("Erreur lors de l'écriture du graphe", 500)
+
+    return func.HttpResponse(
+        json.dumps({"updated": updated, "action": action, "tag": tag}),
+        status_code=200, mimetype="application/json",
+    )
+
+
+def list_exploration_relations(req: func.HttpRequest) -> func.HttpResponse:
+    """GET /exploration/relations — R1 (T2-B-01)."""
+    relation_type = req.params.get("relationType")
+    source_id = req.params.get("sourceId")
+    target_id = req.params.get("targetId")
+    source_layer = req.params.get("sourceLayer")
+    target_layer = req.params.get("targetLayer")
+    skip, limit = _exploration_pagination(req)
+
+    if relation_type is not None and relation_type not in archimate.RELATION_TYPES:
+        return error_response("relationType invalide", 400, code="VAL_RELATION_TYPE")
+    if source_layer is not None and source_layer not in archimate.LAYERS:
+        return error_response("sourceLayer invalide", 400, code="VAL_LAYER")
+    if target_layer is not None and target_layer not in archimate.LAYERS:
+        return error_response("targetLayer invalide", 400, code="VAL_LAYER")
+
+    conditions = []
+    params = {}
+    if relation_type is not None:
+        conditions.append("type(r) = $relationType")
+        params["relationType"] = relation_type
+    if source_id is not None:
+        conditions.append("src.id = $sourceId")
+        params["sourceId"] = source_id
+    if target_id is not None:
+        conditions.append("tgt.id = $targetId")
+        params["targetId"] = target_id
+    if source_layer is not None:
+        conditions.append("src.layer = $sourceLayer")
+        params["sourceLayer"] = source_layer
+    if target_layer is not None:
+        conditions.append("tgt.layer = $targetLayer")
+        params["targetLayer"] = target_layer
+
+    where_clause = ("WHERE " + " AND ".join(conditions)) if conditions else ""
+
+    try:
+        driver = get_neo4j_driver()
+        with driver.session() as session:
+            total = session.run(
+                f"""
+                MATCH (src:ArchiMateElement)-[r]->(tgt:ArchiMateElement) {where_clause}
+                RETURN count(r) AS total
+                """,
+                **params,
+            ).single()["total"]
+
+            records = session.run(
+                f"""
+                MATCH (src:ArchiMateElement)-[r]->(tgt:ArchiMateElement) {where_clause}
+                RETURN properties(r) AS rel, type(r) AS relationType,
+                       src {{.id, .name, .elementType, .layer}} AS source,
+                       tgt {{.id, .name, .elementType, .layer}} AS target
+                ORDER BY r.createdAt DESC
+                SKIP $skip LIMIT $limit
+                """,
+                skip=skip, limit=limit, **params,
+            )
+            items = []
+            for r in records:
+                item = {k: _to_json(v) for k, v in dict(r["rel"]).items()}
+                item["relationType"] = r["relationType"]
+                item["source"] = dict(r["source"])
+                item["target"] = dict(r["target"])
+                items.append(item)
+    except Exception as e:
+        logger.error(f"list_exploration_relations — erreur Neo4j : {e}")
+        return error_response("Erreur lors de la lecture du graphe", 500)
+
+    return func.HttpResponse(
+        json.dumps({"items": items, "total": total, "skip": skip, "limit": limit}),
+        status_code=200, mimetype="application/json",
+    )
+
+
+def get_exploration_relation(req: func.HttpRequest, rel_id: str) -> func.HttpResponse:
+    """GET /exploration/relations/{id} — R2 (T2-B-02)."""
+    try:
+        driver = get_neo4j_driver()
+        with driver.session() as session:
+            record = session.run(
+                """
+                MATCH (src:ArchiMateElement)-[r {id: $id}]->(tgt:ArchiMateElement)
+                RETURN properties(r) AS rel, type(r) AS relationType,
+                       src {.id, .name, .elementType, .layer, .aspect} AS source,
+                       tgt {.id, .name, .elementType, .layer, .aspect} AS target
+                """,
+                id=rel_id,
+            ).single()
+    except Exception as e:
+        logger.error(f"get_exploration_relation — erreur Neo4j : {e}")
+        return error_response("Erreur lors de la lecture du graphe", 500)
+
+    if record is None:
+        return error_response("Relation introuvable", 404, code="RELATION_NOT_FOUND")
+
+    item = {k: _to_json(v) for k, v in dict(record["rel"]).items()}
+    item["relationType"] = record["relationType"]
+    item["source"] = dict(record["source"])
+    item["target"] = dict(record["target"])
+
+    return func.HttpResponse(
+        json.dumps(item),
+        status_code=200, mimetype="application/json",
+    )
+
+
+def _exploration_weight_valid(weight) -> bool:
+    return isinstance(weight, (int, float)) and not isinstance(weight, bool) and 0.0 <= weight <= 1.0
+
+
+def create_exploration_relation(req: func.HttpRequest) -> func.HttpResponse:
+    """POST /exploration/relations — R3 + R-CHECK + VAL-03/05/06/07/08 (T2-B-03)."""
+    denied = require_role(req, "ARCHITECT", "ADMIN")
+    if denied:
+        return denied
+
+    try:
+        body = req.get_json()
+    except ValueError:
+        body = {}
+
+    relation_type = body.get("relationType")
+    source_id = body.get("sourceId")
+    target_id = body.get("targetId")
+    access_type = body.get("accessType")
+    weight = body.get("weight")
+    name = body.get("name")
+    description = body.get("description")
+    confirm_warnings = body.get("confirmWarnings") is True
+
+    if relation_type not in archimate.RELATION_TYPES:
+        return error_response("relationType invalide", 400, code="VAL_RELATION_TYPE")
+
+    if relation_type == "Access":
+        if access_type is None:
+            return error_response("accessType requis pour une relation Access", 400, code="VAL_ACCESS_TYPE")
+        if access_type not in archimate.ACCESS_TYPES:
+            return error_response("accessType invalide", 400, code="VAL_ACCESS_TYPE_VALUE")
+    else:
+        access_type = None
+
+    if weight is not None and not _exploration_weight_valid(weight):
+        return error_response("weight doit être un nombre entre 0.0 et 1.0", 400, code="VAL_WEIGHT_RANGE")
+
+    try:
+        driver = get_neo4j_driver()
+        with driver.session() as session:
+            endpoints = session.run(
+                """
+                OPTIONAL MATCH (src:ArchiMateElement {id: $sourceId})
+                OPTIONAL MATCH (tgt:ArchiMateElement {id: $targetId})
+                RETURN src, tgt
+                """,
+                sourceId=source_id, targetId=target_id,
+            ).single()
+
+            src, tgt = endpoints["src"], endpoints["tgt"]
+            if src is None or tgt is None:
+                return error_response("Nœud source ou cible introuvable", 404, code="NODE_NOT_FOUND")
+
+            warnings = []
+
+            duplicate = session.run(
+                """
+                MATCH (src {id: $sourceId})-[r]->(tgt {id: $targetId})
+                WHERE type(r) = $relationType
+                RETURN r.id AS existingRelId LIMIT 1
+                """,
+                sourceId=source_id, targetId=target_id, relationType=relation_type,
+            ).single()
+            if duplicate is not None:
+                warnings.append({
+                    "code": "VAL_DUPLICATE_REL", "level": "WARN",
+                    "message": f"Une relation {relation_type} existe déjà entre ces deux éléments.",
+                    "existingRelId": duplicate["existingRelId"],
+                })
+
+            if relation_type == "Assignment" and src["aspect"] != "ActiveStructure":
+                warnings.append({
+                    "code": "VAL_ASSIGNMENT_ASPECT", "level": "WARN",
+                    "message": "Une relation Assignment part généralement d'un élément ActiveStructure.",
+                })
+
+            if relation_type == "Realization":
+                src_rank = archimate.realization_layer_rank(src["layer"])
+                tgt_rank = archimate.realization_layer_rank(tgt["layer"])
+                if src_rank is not None and tgt_rank is not None and tgt_rank < src_rank:
+                    warnings.append({
+                        "code": "VAL_REALIZATION_LAYER", "level": "WARN",
+                        "message": "L'élément cible appartient à une couche inférieure à la couche source.",
+                    })
+
+            if relation_type in ("Composition", "Aggregation") and src["layer"] != tgt["layer"]:
+                warnings.append({
+                    "code": "VAL_STRUCTURAL_CROSS_LAYER", "level": "INFO",
+                    "message": "Relation structurelle entre deux éléments de couches différentes.",
+                })
+
+            if warnings and not confirm_warnings:
+                return error_response(
+                    "Avertissements ArchiMate — confirmation requise", 422,
+                    code="ARCHIMATE_WARN", warnings=warnings,
+                )
+
+            def _tx(tx):
+                rel = tx.run(
+                    f"""
+                    MATCH (src:ArchiMateElement {{id: $sourceId}}), (tgt:ArchiMateElement {{id: $targetId}})
+                    CREATE (src)-[r:`{relation_type}`]->(tgt)
+                    SET r.id = randomUUID(),
+                        r.name = $name,
+                        r.description = $description,
+                        r.accessType = $accessType,
+                        r.weight = $weight,
+                        r.createdAt = toString(datetime()),
+                        r.updatedAt = toString(datetime())
+                    RETURN properties(r) AS rel
+                    """,
+                    sourceId=source_id, targetId=target_id, name=name,
+                    description=description, accessType=access_type, weight=weight,
+                ).single()["rel"]
+                after = {k: _to_json(v) for k, v in dict(rel).items()}
+                after["relationType"] = relation_type
+                audit_after = dict(after)
+                if warnings:
+                    audit_after["warnings"] = warnings
+                _exploration_write_audit(tx, req, "CREATE", "RELATION", after["id"], None, audit_after)
+                return after
+
+            after = session.execute_write(_tx)
+    except Exception as e:
+        logger.error(f"create_exploration_relation — erreur Neo4j : {e}")
+        return error_response("Erreur lors de l'écriture du graphe", 500)
+
+    return func.HttpResponse(
+        json.dumps({
+            **after,
+            "source": {"id": src["id"], "name": src["name"]},
+            "target": {"id": tgt["id"], "name": tgt["name"]},
+        }),
+        status_code=201, mimetype="application/json",
+    )
+
+
+def update_exploration_relation(req: func.HttpRequest, rel_id: str) -> func.HttpResponse:
+    """PATCH /exploration/relations/{id} — R4 (T2-B-04)."""
+    denied = require_role(req, "ARCHITECT", "ADMIN")
+    if denied:
+        return denied
+
+    try:
+        body = req.get_json()
+    except ValueError:
+        body = {}
+
+    if "weight" in body and body["weight"] is not None and not _exploration_weight_valid(body["weight"]):
+        return error_response("weight doit être un nombre entre 0.0 et 1.0", 400, code="VAL_WEIGHT_RANGE")
+
+    try:
+        driver = get_neo4j_driver()
+        with driver.session() as session:
+            current = session.run(
+                "MATCH ()-[r {id: $id}]->() RETURN properties(r) AS rel, type(r) AS relationType",
+                id=rel_id,
+            ).single()
+            if current is None:
+                return error_response("Relation introuvable", 404, code="RELATION_NOT_FOUND")
+
+            relation_type = current["relationType"]
+            before = {k: _to_json(v) for k, v in dict(current["rel"]).items()}
+            before["relationType"] = relation_type
+
+            if relation_type == "Access":
+                new_access_type = body["accessType"] if "accessType" in body else before.get("accessType")
+                if new_access_type is None:
+                    return error_response("accessType requis pour une relation Access", 400, code="VAL_ACCESS_TYPE")
+                if new_access_type not in archimate.ACCESS_TYPES:
+                    return error_response("accessType invalide", 400, code="VAL_ACCESS_TYPE_VALUE")
+
+            def _tx(tx):
+                rel = tx.run(
+                    """
+                    MATCH ()-[r {id: $id}]->()
+                    SET r.name = COALESCE($name, r.name),
+                        r.description = COALESCE($description, r.description),
+                        r.weight = COALESCE($weight, r.weight),
+                        r.accessType = COALESCE($accessType, r.accessType),
+                        r.updatedAt = toString(datetime())
+                    RETURN properties(r) AS rel
+                    """,
+                    id=rel_id, name=body.get("name"), description=body.get("description"),
+                    weight=body.get("weight"), accessType=body.get("accessType"),
+                ).single()["rel"]
+                after = {k: _to_json(v) for k, v in dict(rel).items()}
+                after["relationType"] = relation_type
+                _exploration_write_audit(tx, req, "UPDATE", "RELATION", rel_id, before, after)
+                return after
+
+            after = session.execute_write(_tx)
+    except Exception as e:
+        logger.error(f"update_exploration_relation — erreur Neo4j : {e}")
+        return error_response("Erreur lors de l'écriture du graphe", 500)
+
+    return func.HttpResponse(
+        json.dumps(after),
+        status_code=200, mimetype="application/json",
+    )
+
+
+def delete_exploration_relation(req: func.HttpRequest, rel_id: str) -> func.HttpResponse:
+    """DELETE /exploration/relations/{id} — R5 (T2-B-05)."""
+    denied = require_role(req, "ARCHITECT", "ADMIN")
+    if denied:
+        return denied
+
+    try:
+        driver = get_neo4j_driver()
+        with driver.session() as session:
+            current = session.run(
+                "MATCH ()-[r {id: $id}]->() RETURN properties(r) AS rel, type(r) AS relationType",
+                id=rel_id,
+            ).single()
+            if current is None:
+                return error_response("Relation introuvable", 404, code="RELATION_NOT_FOUND")
+
+            before = {k: _to_json(v) for k, v in dict(current["rel"]).items()}
+            before["relationType"] = current["relationType"]
+
+            def _tx(tx):
+                tx.run("MATCH ()-[r {id: $id}]->() DELETE r", id=rel_id)
+                _exploration_write_audit(tx, req, "DELETE", "RELATION", rel_id, before, None)
+
+            session.execute_write(_tx)
+    except Exception as e:
+        logger.error(f"delete_exploration_relation — erreur Neo4j : {e}")
+        return error_response("Erreur lors de l'écriture du graphe", 500)
+
+    return func.HttpResponse(
+        json.dumps({"deleted": True}),
+        status_code=200, mimetype="application/json",
+    )
+
+
+def list_exploration_audit(req: func.HttpRequest) -> func.HttpResponse:
+    """GET /exploration/audit — consultation AuditLog, ADMIN uniquement (T4-B-02).
+    Filtres : entityId, entityType, operation, userId, since (ISO 8601),
+    pagination skip/limit. Tri par timestamp DESC."""
+    denied = require_role(req, "ADMIN")
+    if denied:
+        return denied
+
+    entity_id = req.params.get("entityId")
+    entity_type = req.params.get("entityType")
+    operation = req.params.get("operation")
+    user_id = req.params.get("userId")
+    since = req.params.get("since")
+
+    if operation is not None and operation not in ("CREATE", "UPDATE", "DELETE", "DELETE_CASCADE"):
+        return error_response("operation invalide", 400, code="VAL_AUDIT_OPERATION")
+    if entity_type is not None and entity_type not in ("NODE", "RELATION"):
+        return error_response("entityType invalide", 400, code="VAL_AUDIT_ENTITY_TYPE")
+
+    skip, limit = _exploration_pagination(req)
+
+    try:
+        driver = get_neo4j_driver()
+        with driver.session() as session:
+            total = session.run(
+                """
+                MATCH (log:AuditLog)
+                WHERE ($entityId IS NULL OR log.entityId = $entityId)
+                  AND ($entityType IS NULL OR log.entityType = $entityType)
+                  AND ($operation IS NULL OR log.operation = $operation)
+                  AND ($userId IS NULL OR log.userId = $userId)
+                  AND ($since IS NULL OR log.timestamp >= $since)
+                RETURN count(log) AS total
+                """,
+                entityId=entity_id, entityType=entity_type, operation=operation,
+                userId=user_id, since=since,
+            ).single()["total"]
+
+            records = session.run(
+                """
+                MATCH (log:AuditLog)
+                WHERE ($entityId IS NULL OR log.entityId = $entityId)
+                  AND ($entityType IS NULL OR log.entityType = $entityType)
+                  AND ($operation IS NULL OR log.operation = $operation)
+                  AND ($userId IS NULL OR log.userId = $userId)
+                  AND ($since IS NULL OR log.timestamp >= $since)
+                RETURN log
+                ORDER BY log.timestamp DESC
+                SKIP $skip LIMIT $limit
+                """,
+                entityId=entity_id, entityType=entity_type, operation=operation,
+                userId=user_id, since=since, skip=skip, limit=limit,
+            )
+
+            items = []
+            for r in records:
+                entry = {k: _to_json(v) for k, v in dict(r["log"]).items()}
+                try:
+                    entry["payload"] = json.loads(entry["payload"])
+                except (TypeError, ValueError, KeyError):
+                    pass
+                items.append(entry)
+    except Exception as e:
+        logger.error(f"list_exploration_audit — erreur Neo4j : {e}")
+        return error_response("Erreur lors de la lecture du graphe", 500)
+
+    return func.HttpResponse(
+        json.dumps({"items": items, "total": total, "skip": skip, "limit": limit}),
+        status_code=200, mimetype="application/json",
+    )
+
+
+def get_exploration_health() -> func.HttpResponse:
+    """GET /exploration/health — sonde triviale (toujours up si le code est atteint ;
+    réutilise get_neo4j_driver pour vérifier la connectivité comme get_health)."""
+    try:
+        driver = get_neo4j_driver()
+        with driver.session() as session:
+            session.run("RETURN 1").consume()
+        neo4j_status = "up"
+    except Exception as e:
+        logger.error(f"get_exploration_health — Neo4j injoignable : {e}")
+        neo4j_status = "down"
+
+    if neo4j_status == "up":
+        return func.HttpResponse(
+            json.dumps({"status": "ok", "neo4j": neo4j_status, "version": APP_VERSION}),
+            status_code=200, mimetype="application/json",
+        )
+    return error_response("Dépendance indisponible", 503, neo4j=neo4j_status)
+
+
+# ============================================================================
 # Main HTTP Trigger (routing)
 # ============================================================================
 
@@ -1232,6 +2207,50 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
     if method == "PATCH":
         if len(parts) == 3 and parts[0] == "nodes" and parts[2] == "qualification":
             return patch_node_qualification(req, parts[1])
+
+    # ------------------------------------------------------------------
+    # Module Exploration — /exploration/* (PLAN_EXPLORATION_v1.md)
+    # ------------------------------------------------------------------
+    if parts and parts[0] == "exploration":
+        sub = parts[1:]
+
+        if method == "GET":
+            if sub == ["health"]:
+                return get_exploration_health()
+            if sub == ["nodes"]:
+                return list_exploration_nodes(req)
+            if len(sub) == 2 and sub[0] == "nodes":
+                return get_exploration_node(req, sub[1])
+            if sub == ["orphans"]:
+                return list_exploration_orphans(req)
+            if sub == ["relations"]:
+                return list_exploration_relations(req)
+            if len(sub) == 2 and sub[0] == "relations":
+                return get_exploration_relation(req, sub[1])
+            if sub == ["audit"]:
+                return list_exploration_audit(req)
+
+        if method == "POST":
+            if sub == ["nodes"]:
+                return create_exploration_node(req)
+            if sub == ["nodes", "bulk-tag"]:
+                return bulk_tag_exploration_nodes(req)
+            if sub == ["relations"]:
+                return create_exploration_relation(req)
+
+        if method == "PATCH":
+            if len(sub) == 2 and sub[0] == "nodes":
+                return update_exploration_node(req, sub[1])
+            if len(sub) == 2 and sub[0] == "relations":
+                return update_exploration_relation(req, sub[1])
+
+        if method == "DELETE":
+            if len(sub) == 2 and sub[0] == "nodes":
+                return delete_exploration_node(req, sub[1])
+            if len(sub) == 2 and sub[0] == "relations":
+                return delete_exploration_relation(req, sub[1])
+
+        return error_response("Not found", 404)
 
     return error_response("Not found", 404)
 
