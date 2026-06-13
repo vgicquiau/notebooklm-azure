@@ -1,3 +1,8 @@
+> **OBSOLÈTE (2026-06-13)** — Le module Exploration (CRUD `:ArchiMateElement`) dépendait
+> du graphe ADG-M et de la classification ArchiMate, tous deux retirés (refonte "golden
+> source", scénario 3 — cf. `NOTE_devenir_ADGM_golden_source.md`). Document conservé pour
+> mémoire.
+
 # Software Design Document — Module Exploration
 
 **Neo4j + ArchiMate 3.x CRUD Interface**  

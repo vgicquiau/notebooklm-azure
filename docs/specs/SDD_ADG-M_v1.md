@@ -1,3 +1,7 @@
+> **OBSOLÈTE (2026-06-13)** — Le graphe ADG-M (neo4j-dev) et son pipeline d'extraction
+> sont retirés (refonte "golden source", scénario 3 — cf.
+> `NOTE_devenir_ADGM_golden_source.md`). Document conservé pour mémoire.
+
 # SDD — Architecture Dependency Graph for Modernization (v1)
 **Module** : ADG-M  **Priorité** : P0  **Dernière mise à jour** : 2026-06-06
 

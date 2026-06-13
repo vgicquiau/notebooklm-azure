@@ -1,5 +1,9 @@
 # Plan d'action — Module Exploration (Neo4j + ArchiMate)
 
+> **OBSOLÈTE (2026-06-13)** — Module retiré avec le graphe ADG-M (refonte "golden
+> source", scénario 3 — cf. `NOTE_devenir_ADGM_golden_source.md`). Document conservé pour
+> mémoire.
+
 > Basé sur [SDD_Exploration_v1.md](SDD_Exploration_v1.md) (v1.0, juin 2026). Plan exécutable pour une équipe de 2-4 développeurs.
 
 ---

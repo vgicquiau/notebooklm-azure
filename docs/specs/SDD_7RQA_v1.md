@@ -1,3 +1,7 @@
+> **OBSOLÈTE (2026-06-13)** — Le scoring 7R s'appuyait sur le graphe ADG-M (neo4j-dev),
+> retiré (refonte "golden source", scénario 3 — cf.
+> `NOTE_devenir_ADGM_golden_source.md`). Document conservé pour mémoire.
+
 # SDD — 7R Qualification Assistant (v1)
 **Module** : 7RQA  **Priorité** : P0  **Dernière mise à jour** : 2026-06-06
 
