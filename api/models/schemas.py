@@ -18,8 +18,16 @@ class SourceReference(BaseModel):
     content: str = ""
 
 
+class GraphReference(BaseModel):
+    id: str
+    kind: Literal["entity", "community"]
+    type: Optional[str] = None
+    nom: str
+
+
 class ChatResponse(BaseModel):
     answer: str
     session_id: str
     sources: list[SourceReference]
     tokens_used: int
+    graph_references: list[GraphReference] = Field(default_factory=list)

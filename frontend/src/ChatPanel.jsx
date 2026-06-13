@@ -217,6 +217,44 @@ const SourceCard = ({ citation, onClick }) => {
   );
 };
 
+// ── Fiche "base de connaissances consultée" (legacy KB, neo4j-legacykb) ──────────
+const GraphRefCard = ({ ref }) => {
+  const [hovered, setHovered] = React.useState(false);
+  return (
+    <div
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
+      style={{
+        display: 'flex', alignItems: 'center', gap: 10, padding: '11px 13px',
+        border: `1px solid ${hovered ? T.azureBorder : T.border}`,
+        borderRadius: T.radiusMd,
+        background: hovered ? T.azureSoft : T.white,
+        transition: 'background .12s, border-color .12s',
+      }}
+      title={ref.id}
+    >
+      <span style={{
+        display: 'grid', placeItems: 'center',
+        width: 20, height: 20, borderRadius: 6, flexShrink: 0,
+        background: T.azure, color: '#fff', fontSize: 10.5, fontWeight: 700,
+      }}>
+        <Ic.Doc s={12} />
+      </span>
+      <div style={{ minWidth: 0 }}>
+        <div style={{
+          fontSize: 12.5, fontWeight: 600, color: T.ink,
+          overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+        }}>
+          {ref.nom}
+        </div>
+        {ref.type && (
+          <div style={{ fontSize: 12, color: T.sub }}>{ref.type}</div>
+        )}
+      </div>
+    </div>
+  );
+};
+
 // ── Message assistant ──────────────────────────────────────────
 const AssistantMessage = ({ msg, onSaveNote }) => {
   const [copied,        setCopied]        = React.useState(false);
@@ -276,6 +314,23 @@ const AssistantMessage = ({ msg, onSaveNote }) => {
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(210px, 1fr))', gap: 10 }}>
               {visibleCitations.map(c => (
                 <SourceCard key={c.id} citation={c} onClick={() => setOpenCitation(c)} />
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* Base de connaissances legacy consultée (neo4j-legacykb, via tools) */}
+        {(msg.graphReferences ?? []).length > 0 && (
+          <div style={{ marginTop: 14, marginBottom: 14 }}>
+            <div style={{
+              fontSize: 11.5, fontWeight: 700, letterSpacing: 0.6,
+              textTransform: 'uppercase', color: T.muted, marginBottom: 9,
+            }}>
+              Base de connaissances consultée
+            </div>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(210px, 1fr))', gap: 10 }}>
+              {msg.graphReferences.map(ref => (
+                <GraphRefCard key={ref.id} ref={ref} />
               ))}
             </div>
           </div>
