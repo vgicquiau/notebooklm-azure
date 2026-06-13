@@ -8,14 +8,62 @@ from openai import AzureOpenAI
 from tenacity import retry, stop_after_attempt, wait_exponential
 
 from .retriever import RetrievedChunk
+from .graph_tools import LEGACYKB_TOOL_DEFINITIONS, execute_legacykb_tool
 
 logger = logging.getLogger(__name__)
+
+
+def _extract_graph_refs(tool_name: str, result: dict[str, Any]) -> list[dict[str, Any]]:
+    """Extrait les références (id/kind/type/nom) des nœuds de la legacy KB effectivement
+    consultés via un appel de tool, pour traçabilité (`ChatResponse.graph_references`)."""
+    if "error" in result:
+        return []
+    if tool_name == "legacykb_get_entity":
+        if result.get("id"):
+            return [{"id": result["id"], "kind": result.get("kind"), "type": result.get("type"), "nom": result.get("nom")}]
+        return []
+    if tool_name == "legacykb_get_relations":
+        center = result.get("center")
+        if center and center.get("id"):
+            return [{"id": center["id"], "kind": center.get("kind"), "type": center.get("type"), "nom": center.get("nom")}]
+        return []
+    return []
+
+
+# Bloc décrivant la base de connaissances legacy CardDemo (neo4j-legacykb), accessible
+# via les tools legacykb_search / legacykb_get_entity / legacykb_get_relations.
+_LEGACYKB_TOOLS_BLOCK = """
+
+## Base de connaissances legacy (outils)
+
+En complément des documents fournis en contexte, tu as accès en lecture à la base de
+connaissances legacy du système CardDemo (graphe issu d'une analyse GraphRAG du code COBOL) :
+programmes, copybooks, batch jobs, fichiers/tables, et domaines fonctionnels, avec leurs
+descriptions et leurs relations (appels entre programmes, inclusions de copybooks, accès aux
+fichiers en lecture/écriture, appartenance à un domaine fonctionnel, exécution par un job).
+
+Utilise les outils `legacykb_search`, `legacykb_get_entity` et `legacykb_get_relations` quand
+l'utilisateur mentionne un nom (même partiel) de programme/copybook/job/fichier, ou pose une
+question sur des dépendances, chaînes d'appel, accès aux données ou domaines fonctionnels du
+système CardDemo. Commence par `legacykb_search` pour retrouver l'identifiant, puis
+`legacykb_get_entity`/`legacykb_get_relations` pour le détail.
+
+Quand un fait provient de cette base de connaissances, signale-le par `(base de connaissances : NOM)`
+— ne le numérote pas comme une source documentaire `[n]`."""
+
+_LEGACYKB_TOOLS_BLOCK_RAPIDE = """
+
+## Base de connaissances legacy (outils)
+
+Si la question porte sur un programme/copybook/job/fichier nommé du système CardDemo, ou sur ses
+dépendances/appels/accès aux données, utilise `legacykb_search` puis `legacykb_get_entity`/
+`legacykb_get_relations` pour répondre précisément. Signale ces faits par `(base de connaissances : NOM)`."""
 
 _PROMPT_RAPIDE = """Tu es un assistant documentaire concis.
 Réponds en 2-4 phrases maximum, directement au point, sans introduction ni conclusion.
 Pour citer une source, utilise uniquement son numéro entre crochets : [1], [2]… (les numéros correspondent aux sources du contexte).
 Si l'information est absente, dis-le en une phrase.
-Langue : français."""
+Langue : français.""" + _LEGACYKB_TOOLS_BLOCK_RAPIDE
 
 _PROMPT_STANDARD = """Tu es un assistant expert en analyse documentaire pour une équipe de modernisation d'applications métier.
 Tu analyses un corpus de documents techniques et fonctionnels : cahiers des charges, spécifications, règles métier, documentation legacy.
@@ -26,7 +74,7 @@ Pour chaque question :
 - Utilise des listes ou sections ## pour les réponses complexes.
 - Si une information manque, dis-le brièvement puis apporte ce que tu peux déduire du contexte.
 - Si tu fais une inférence, signale-la avec *(déduit du contexte)*.
-Langue : français."""
+Langue : français.""" + _LEGACYKB_TOOLS_BLOCK
 
 _PROMPT_APPROFONDI = """Tu es un analyste expert en modernisation d'applications métier. Tu travailles sur un corpus documentaire fourni en contexte (cahiers des charges, spécifications fonctionnelles, règles métier, documentation technique, annexes).
 
@@ -58,7 +106,7 @@ Tu ne te contentes pas de restituer — tu **raisonnes**. Avant de répondre, tu
 
 **Contradictions** : signale explicitement toute incohérence entre documents avec les deux numéros de source en regard.
 
-**Langue** : français. Conserve les termes métier du corpus tels quels."""
+**Langue** : français. Conserve les termes métier du corpus tels quels.""" + _LEGACYKB_TOOLS_BLOCK
 
 _MODE_CONFIG = {
     "rapide":     {"prompt": _PROMPT_RAPIDE,     "max_tokens": 600,  "temperature": 0.2},
@@ -170,6 +218,58 @@ class Generator:
         )
         return response.choices[0].message.content, response.usage.total_tokens
 
+    def _complete_with_tools(
+        self, messages: list[dict[str, Any]], temperature: float, max_tokens: int, max_rounds: int = 3
+    ) -> tuple[str, int, list[dict[str, Any]]]:
+        """Comme `_complete`, mais autorise le LLM à appeler les tools de la legacy KB
+        (`legacykb_search`/`legacykb_get_entity`/`legacykb_get_relations`) en boucle, jusqu'à
+        `max_rounds` aller-retours. Renvoie en plus `graph_refs`, la liste dédupliquée des
+        entités/domaines consultés."""
+        total_tokens = 0
+        graph_refs: dict[str, dict[str, Any]] = {}
+
+        for _ in range(max_rounds):
+            response = self.client.chat.completions.create(
+                model=self.model,
+                messages=messages,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                seed=42,
+                tools=LEGACYKB_TOOL_DEFINITIONS,
+                tool_choice="auto",
+            )
+            total_tokens += response.usage.total_tokens
+            message = response.choices[0].message
+
+            if not message.tool_calls:
+                return message.content, total_tokens, list(graph_refs.values())
+
+            messages.append(message.model_dump(exclude_unset=True))
+            for tool_call in message.tool_calls:
+                try:
+                    arguments = json.loads(tool_call.function.arguments)
+                except (json.JSONDecodeError, TypeError):
+                    arguments = {}
+                result = execute_legacykb_tool(tool_call.function.name, arguments)
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": tool_call.id,
+                    "content": json.dumps(result, ensure_ascii=False),
+                })
+                for ref in _extract_graph_refs(tool_call.function.name, result):
+                    graph_refs[ref["id"]] = ref
+
+        # Dernier essai sans tools pour forcer une réponse texte si max_rounds est atteint
+        response = self.client.chat.completions.create(
+            model=self.model,
+            messages=messages,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            seed=42,
+        )
+        total_tokens += response.usage.total_tokens
+        return response.choices[0].message.content, total_tokens, list(graph_refs.values())
+
     def generate(
         self,
         query: str,
@@ -177,7 +277,7 @@ class Generator:
         conversation_history: list[dict[str, Any]],
         mode: Literal["rapide", "standard", "approfondi"] = "standard",
         injected_notes: Optional[list[str]] = None,
-    ) -> tuple[str, int]:
+    ) -> tuple[str, int, list[dict[str, Any]]]:
         if mode == "approfondi" and self.classify_query(query) == "extraction":
             return self.generate_deep_extraction(query, chunks, conversation_history, injected_notes)
         return self._generate_single_pass(query, chunks, conversation_history, mode, injected_notes)
@@ -189,7 +289,7 @@ class Generator:
         conversation_history: list[dict[str, Any]],
         mode: Literal["rapide", "standard", "approfondi"],
         injected_notes: Optional[list[str]],
-    ) -> tuple[str, int]:
+    ) -> tuple[str, int, list[dict[str, Any]]]:
         cfg = _MODE_CONFIG[mode]
         context = self._build_context(chunks, injected_notes)
 
@@ -205,7 +305,7 @@ Question : {query}"""
             {"role": "user", "content": user_message},
         ]
 
-        return self._complete(messages, temperature=cfg["temperature"], max_tokens=cfg["max_tokens"])
+        return self._complete_with_tools(messages, temperature=cfg["temperature"], max_tokens=cfg["max_tokens"])
 
     def summarize(self, messages: list[dict[str, str]], existing_summary: Optional[str]) -> str:
         """Résume un lot de messages, fusionné avec un résumé existant éventuel."""
@@ -302,7 +402,7 @@ Question initiale de l'utilisateur : {query}"""
         chunks: list[RetrievedChunk],
         conversation_history: list[dict[str, Any]],
         injected_notes: Optional[list[str]] = None,
-    ) -> tuple[str, int]:
+    ) -> tuple[str, int, list[dict[str, Any]]]:
         """Pipeline map-reduce pour les requêtes d'extraction/inventaire en mode 'approfondi' :
         extraction par lots de chunks (avec tag de fiabilité) -> fusion -> synthèse finale."""
         total_tokens = 0
@@ -325,4 +425,4 @@ Question initiale de l'utilisateur : {query}"""
 
         answer, tokens = self._synthesize_final(query, merged_items, conversation_history)
         total_tokens += tokens
-        return answer, total_tokens
+        return answer, total_tokens, []
