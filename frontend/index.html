@@ -49,6 +49,9 @@
     .nlaz-md td { padding: 8px 14px; border: 1px solid #eceae5; color: #1c1b18; }
     .nlaz-md tr:hover td { background: #f6f6f3; }
 
+    /* ── Surlignage du passage cité (modale source) ── */
+    .nlaz-md mark.nlaz-highlight { background: #fef08a; color: inherit; padding: 1px 2px; border-radius: 3px; }
+
     /* ── Badge citation inline [N] ── */
     .nlaz-cite {
       display: inline-flex; align-items: center; justify-content: center;
@@ -63,9 +66,33 @@
     .nlaz-cite:hover { background: #2257d4; transform: scale(1.15); }
 
     /* ── Mermaid ── */
-    .nlaz-mermaid { margin: 12px 0; text-align: center; background: #f6f6f3; border: 1px solid #eceae5; border-radius: 10px; padding: 20px; overflow-x: auto; }
+    .nlaz-mermaid { position: relative; margin: 12px 0; text-align: center; background: #f6f6f3; border: 1px solid #eceae5; border-radius: 10px; padding: 20px; overflow-x: auto; cursor: zoom-in; transition: border-color .12s, background .12s; }
+    .nlaz-mermaid:hover { border-color: #d2e0fc; background: #f0f4fe; }
     .nlaz-mermaid svg { max-width: 100%; height: auto; }
     .nlaz-mermaid-error { border-left: 3px solid #dc2626 !important; }
+
+    /* ── Modale zoom Mermaid ── */
+    /* Le SVG mermaid porte un style inline "max-width: NNpx" + width="100%" :
+       sans largeur définie sur ce conteneur, le SVG se résout à 0x0 (taille de
+       remplacement circulaire). On lui donne une taille définie (90vw/86vh) et
+       on force le SVG à la remplir (!important pour passer devant le style
+       inline), le viewBox préserve le ratio. */
+    .nlaz-mermaid-zoom { padding: 24px; box-sizing: border-box; width: 90vw; height: 86vh; }
+    .nlaz-mermaid-zoom svg { width: 100% !important; height: 100% !important; max-width: none !important; max-height: none !important; }
+
+    /* ── Bouton copie code Mermaid (visible au survol du diagramme) ── */
+    .nlaz-mermaid-copy {
+      position: absolute; top: 8px; right: 8px;
+      display: flex; align-items: center; justify-content: center;
+      width: 28px; height: 28px; padding: 0;
+      border-radius: 6px; border: 1px solid #eceae5;
+      background: #fff; color: #6b6963;
+      cursor: pointer; opacity: 0;
+      transition: opacity .12s, background .12s, color .12s, border-color .12s;
+    }
+    .nlaz-mermaid:hover .nlaz-mermaid-copy { opacity: 1; }
+    .nlaz-mermaid-copy:hover { background: #f0efeb; color: #1c1b18; border-color: #d4d2cc; }
+    .nlaz-mermaid-copy--done { opacity: 1; color: #059669; border-color: #a7f3d0; background: #ecfdf5; }
 
     /* ── Mode tags (injectés dynamiquement) ── */
     .nlaz-mode-tag {

@@ -1,5 +1,5 @@
 // src/Header.jsx — Barre supérieure
-// Props: onClearSession(), view, onViewChange(view)
+// Props: onClearSession(), view, onViewChange(view), apiFetch(url, options)
 
 // ── Switch de vue (Chat ⇄ Legacy KB) ────────────────────────────
 const VIEW_OPTIONS = [
@@ -37,7 +37,38 @@ const ViewSwitch = ({ view, onChange }) => (
   </div>
 );
 
-const Header = ({ onClearSession, view, onViewChange }) => {
+// ── Voyant de connexion à neo4j-legacykb ────────────────────────
+const LegacyKbStatus = ({ apiFetch }) => {
+  const [status, setStatus] = React.useState('loading'); // 'loading' | 'ok' | 'error'
+
+  React.useEffect(() => {
+    let cancelled = false;
+    const check = () => {
+      apiFetch(`${window.location.origin}/api/legacykb/health`)
+        .then(r => { if (!cancelled) setStatus(r.ok ? 'ok' : 'error'); })
+        .catch(() => { if (!cancelled) setStatus('error'); });
+    };
+    check();
+    const id = setInterval(check, 30000);
+    return () => { cancelled = true; clearInterval(id); };
+  }, [apiFetch]);
+
+  const color = status === 'ok' ? T.success : status === 'error' ? T.danger : T.muted;
+  const label = status === 'ok'
+    ? 'Legacy KB (neo4j) — connectée'
+    : status === 'error'
+      ? 'Legacy KB (neo4j) — injoignable'
+      : 'Legacy KB (neo4j) — vérification…';
+
+  return (
+    <span title={label} style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, color: T.muted, whiteSpace: 'nowrap' }}>
+      <span style={{ width: 8, height: 8, borderRadius: '50%', background: color, flexShrink: 0 }} />
+      Legacy KB
+    </span>
+  );
+};
+
+const Header = ({ onClearSession, view, onViewChange, apiFetch }) => {
   const btnBase = {
     display: 'flex', alignItems: 'center', gap: 7,
     height: 34, padding: '0 14px',
@@ -78,7 +109,8 @@ const Header = ({ onClearSession, view, onViewChange }) => {
       <ViewSwitch view={view} onChange={onViewChange} />
 
       {/* Actions */}
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'flex-end', gap: 8 }}>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'flex-end', gap: 14 }}>
+        <LegacyKbStatus apiFetch={apiFetch} />
         <button
           onClick={onClearSession}
           style={{ ...btnBase, color: T.sub }}
