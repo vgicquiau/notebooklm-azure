@@ -30,6 +30,36 @@ def _extract_graph_refs(tool_name: str, result: dict[str, Any]) -> list[dict[str
     return []
 
 
+def _extract_graph_action(tool_name: str, result: dict[str, Any]) -> Optional[dict[str, Any]]:
+    """Construit le payload de pilotage du canvas (`ChatResponse.graph_action`) à partir
+    du résultat d'un appel à legacykb_highlight/legacykb_impact_paths. `None` pour les
+    autres tools (ou en cas d'erreur du tool)."""
+    if "error" in result:
+        return None
+    if tool_name == "legacykb_highlight":
+        return {
+            "type": "highlight",
+            "node_ids": result.get("node_ids", []),
+            "edges": [],
+            "reason": result.get("reason", ""),
+            "query_info": None,
+        }
+    if tool_name == "legacykb_impact_paths":
+        center = result.get("center") or {}
+        neighbors = [n for n in result.get("nodes", []) if n.get("id")]
+        nodes = [center, *neighbors] if center.get("id") else neighbors
+        node_ids = [n["id"] for n in nodes]
+        return {
+            "type": "impact_paths",
+            "node_ids": node_ids,
+            "nodes": nodes,
+            "edges": result.get("edges", []),
+            "reason": f"Impact de {center.get('nom', '?')}",
+            "query_info": {"cypher": result.get("cypher"), "params": result.get("params")},
+        }
+    return None
+
+
 # Bloc décrivant la base de connaissances legacy CardDemo (neo4j-legacykb), accessible
 # via les tools legacykb_search / legacykb_get_entity / legacykb_get_relations.
 _LEGACYKB_TOOLS_BLOCK = """
@@ -48,6 +78,12 @@ question sur des dépendances, chaînes d'appel, accès aux données ou domaines
 système CardDemo. Commence par `legacykb_search` pour retrouver l'identifiant, puis
 `legacykb_get_entity`/`legacykb_get_relations` pour le détail.
 
+Si l'utilisateur est sur la vue Legacy KB et demande de **montrer/surligner/isoler** des
+éléments dans le graphe, utilise `legacykb_highlight` après les avoir identifiés. Pour une
+question d'**impact** ("qu'est-ce qui dépend de X", "que casse-t-on si on modifie X"), utilise
+`legacykb_impact_paths`. Ces deux outils pilotent directement le canvas — pas besoin de lister
+leur résultat en détail dans ta réponse texte, une courte phrase de confirmation suffit.
+
 Quand un fait provient de cette base de connaissances, signale-le par `(base de connaissances : NOM)`
 — ne le numérote pas comme une source documentaire `[n]`."""
 
@@ -57,7 +93,9 @@ _LEGACYKB_TOOLS_BLOCK_RAPIDE = """
 
 Si la question porte sur un programme/copybook/job/fichier nommé du système CardDemo, ou sur ses
 dépendances/appels/accès aux données, utilise `legacykb_search` puis `legacykb_get_entity`/
-`legacykb_get_relations` pour répondre précisément. Signale ces faits par `(base de connaissances : NOM)`."""
+`legacykb_get_relations` pour répondre précisément. Pour montrer/surligner des éléments dans le
+graphe, utilise `legacykb_highlight` ; pour une question d'impact, `legacykb_impact_paths`.
+Signale ces faits par `(base de connaissances : NOM)`."""
 
 _PROMPT_RAPIDE = """Tu es un assistant documentaire concis.
 Réponds en 2-4 phrases maximum, directement au point, sans introduction ni conclusion.
@@ -220,13 +258,15 @@ class Generator:
 
     def _complete_with_tools(
         self, messages: list[dict[str, Any]], temperature: float, max_tokens: int, max_rounds: int = 3
-    ) -> tuple[str, int, list[dict[str, Any]]]:
+    ) -> tuple[str, int, list[dict[str, Any]], Optional[dict[str, Any]]]:
         """Comme `_complete`, mais autorise le LLM à appeler les tools de la legacy KB
-        (`legacykb_search`/`legacykb_get_entity`/`legacykb_get_relations`) en boucle, jusqu'à
-        `max_rounds` aller-retours. Renvoie en plus `graph_refs`, la liste dédupliquée des
-        entités/domaines consultés."""
+        (`legacykb_search`/`legacykb_get_entity`/`legacykb_get_relations`/
+        `legacykb_highlight`/`legacykb_impact_paths`) en boucle, jusqu'à `max_rounds`
+        aller-retours. Renvoie en plus `graph_refs` (entités/domaines consultés) et
+        `graph_action` (dernier payload de pilotage du canvas, ou None)."""
         total_tokens = 0
         graph_refs: dict[str, dict[str, Any]] = {}
+        graph_action: Optional[dict[str, Any]] = None
 
         for _ in range(max_rounds):
             response = self.client.chat.completions.create(
@@ -242,7 +282,7 @@ class Generator:
             message = response.choices[0].message
 
             if not message.tool_calls:
-                return message.content, total_tokens, list(graph_refs.values())
+                return message.content, total_tokens, list(graph_refs.values()), graph_action
 
             messages.append(message.model_dump(exclude_unset=True))
             for tool_call in message.tool_calls:
@@ -258,6 +298,9 @@ class Generator:
                 })
                 for ref in _extract_graph_refs(tool_call.function.name, result):
                     graph_refs[ref["id"]] = ref
+                action = _extract_graph_action(tool_call.function.name, result)
+                if action is not None:
+                    graph_action = action
 
         # Dernier essai sans tools pour forcer une réponse texte si max_rounds est atteint
         response = self.client.chat.completions.create(
@@ -268,7 +311,7 @@ class Generator:
             seed=42,
         )
         total_tokens += response.usage.total_tokens
-        return response.choices[0].message.content, total_tokens, list(graph_refs.values())
+        return response.choices[0].message.content, total_tokens, list(graph_refs.values()), graph_action
 
     def generate(
         self,
@@ -277,7 +320,7 @@ class Generator:
         conversation_history: list[dict[str, Any]],
         mode: Literal["rapide", "standard", "approfondi"] = "standard",
         injected_notes: Optional[list[str]] = None,
-    ) -> tuple[str, int, list[dict[str, Any]]]:
+    ) -> tuple[str, int, list[dict[str, Any]], Optional[dict[str, Any]]]:
         if mode == "approfondi" and self.classify_query(query) == "extraction":
             return self.generate_deep_extraction(query, chunks, conversation_history, injected_notes)
         return self._generate_single_pass(query, chunks, conversation_history, mode, injected_notes)
@@ -289,7 +332,7 @@ class Generator:
         conversation_history: list[dict[str, Any]],
         mode: Literal["rapide", "standard", "approfondi"],
         injected_notes: Optional[list[str]],
-    ) -> tuple[str, int, list[dict[str, Any]]]:
+    ) -> tuple[str, int, list[dict[str, Any]], Optional[dict[str, Any]]]:
         cfg = _MODE_CONFIG[mode]
         context = self._build_context(chunks, injected_notes)
 
@@ -402,7 +445,7 @@ Question initiale de l'utilisateur : {query}"""
         chunks: list[RetrievedChunk],
         conversation_history: list[dict[str, Any]],
         injected_notes: Optional[list[str]] = None,
-    ) -> tuple[str, int, list[dict[str, Any]]]:
+    ) -> tuple[str, int, list[dict[str, Any]], Optional[dict[str, Any]]]:
         """Pipeline map-reduce pour les requêtes d'extraction/inventaire en mode 'approfondi' :
         extraction par lots de chunks (avec tag de fiabilité) -> fusion -> synthèse finale."""
         total_tokens = 0
@@ -425,4 +468,4 @@ Question initiale de l'utilisateur : {query}"""
 
         answer, tokens = self._synthesize_final(query, merged_items, conversation_history)
         total_tokens += tokens
-        return answer, total_tokens, []
+        return answer, total_tokens, [], None

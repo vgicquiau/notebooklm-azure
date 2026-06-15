@@ -67,6 +67,63 @@ LEGACYKB_TOOL_DEFINITIONS = [
     {
         "type": "function",
         "function": {
+            "name": "legacykb_highlight",
+            "description": (
+                "Met en évidence sur le canvas d'exploration (vue Legacy KB) un ou "
+                "plusieurs éléments déjà identifiés via legacykb_search/get_entity/"
+                "get_relations. À utiliser quand l'utilisateur demande de "
+                "'montrer'/'surligner'/'isoler'/'afficher' des programmes, copybooks, "
+                "jobs ou domaines fonctionnels dans le graphe."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "node_ids": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Identifiants des nœuds à surligner, tels que retournés par legacykb_search/legacykb_get_entity (ex. 'e|Program|RE1570C', 'c|12').",
+                    },
+                    "reason": {
+                        "type": "string",
+                        "description": "Courte explication (affichée à l'utilisateur) de ce que représente ce surlignage.",
+                    },
+                },
+                "required": ["node_ids", "reason"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "legacykb_impact_paths",
+            "description": (
+                "Calcule et affiche sur le canvas (vue Legacy KB) le sous-graphe "
+                "d'impact ('blast radius') d'un élément : tout ce qui en dépend ou "
+                "dont il dépend via les relations structurelles (appels, inclusions, "
+                "accès fichiers/DB2, flux...), jusqu'à une profondeur donnée. À "
+                "utiliser pour les questions de type 'qu'est-ce qui dépend de X', "
+                "'quel est l'impact d'une modification de X', 'que casse-t-on si on "
+                "touche à X'."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "node_id": {
+                        "type": "string",
+                        "description": "Identifiant du nœud de départ, tel que retourné par legacykb_search (ex. 'e|Program|RE1570C').",
+                    },
+                    "max_depth": {
+                        "type": "integer",
+                        "description": "Profondeur maximale de parcours (1 à 3, défaut 2).",
+                    },
+                },
+                "required": ["node_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "legacykb_get_relations",
             "description": (
                 "Liste les relations directes (appels de programmes CALLS, inclusions de "
@@ -112,6 +169,25 @@ def execute_legacykb_tool(name: str, arguments: dict) -> dict:
             node_id = str(arguments.get("node_id", ""))
             limit = int(arguments.get("limit", 40))
             return kb.get_node_neighbors(node_id, limit)
+
+        if name == "legacykb_highlight":
+            raw_ids = arguments.get("node_ids", [])
+            node_ids = []
+            for raw_id in raw_ids if isinstance(raw_ids, list) else []:
+                try:
+                    kb.parse_node_id(str(raw_id))
+                    node_ids.append(str(raw_id))
+                except ValueError:
+                    continue
+            if not node_ids:
+                return {"error": "Aucun identifiant de nœud valide fourni."}
+            return {"node_ids": node_ids, "reason": str(arguments.get("reason", ""))}
+
+        if name == "legacykb_impact_paths":
+            node_id = str(arguments.get("node_id", ""))
+            max_depth = int(arguments.get("max_depth", 2))
+            max_depth = max(1, min(max_depth, 3))
+            return kb.get_impact_paths(node_id, max_depth)
 
         return {"error": f"Tool inconnu : {name!r}"}
     except (kb.LegacyKbNotFound, ValueError) as e:

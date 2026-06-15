@@ -2,7 +2,7 @@ import logging
 
 from fastapi import APIRouter, HTTPException, Request
 
-from api.models.schemas import ChatRequest, ChatResponse, GraphReference, SourceReference
+from api.models.schemas import ChatRequest, ChatResponse, GraphAction, GraphReference, SourceReference
 from api.services import compactor, session_store
 from api.services.retriever import Retriever
 from api.services.generator import Generator
@@ -36,7 +36,7 @@ async def chat(request_data: ChatRequest, request: Request):
         )
 
     try:
-        answer, tokens_used, graph_refs = generator.generate(
+        answer, tokens_used, graph_refs, graph_action = generator.generate(
             query=request_data.message,
             chunks=chunks,
             conversation_history=history,
@@ -75,6 +75,7 @@ async def chat(request_data: ChatRequest, request: Request):
         sources=sources,
         tokens_used=tokens_used,
         graph_references=[GraphReference(**ref) for ref in graph_refs],
+        graph_action=GraphAction(**graph_action) if graph_action else None,
     )
 
 
