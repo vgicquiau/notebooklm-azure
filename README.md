@@ -1,6 +1,6 @@
 # NotebookLM Azure
 
-Agent RAG (Retrieval-Augmented Generation) à interface conversationnelle, inspiré de NotebookLM. Indexez vos documents dans Azure AI Search, posez des questions en langage naturel, obtenez des réponses sourcées avec citations cliquables. Inclut une vue **Graphe ADG-M** pour visualiser et qualifier (7R) l'architecture applicative extraite du corpus.
+Agent RAG (Retrieval-Augmented Generation) à interface conversationnelle, inspiré de NotebookLM. Indexez vos documents dans Azure AI Search, posez des questions en langage naturel, obtenez des réponses sourcées avec citations cliquables. Inclut une vue **Legacy KB** pour explorer le graphe GraphRAG de référence de l'application mainframe CardDemo.
 
 ---
 
@@ -10,9 +10,7 @@ Agent RAG (Retrieval-Augmented Generation) à interface conversationnelle, inspi
 |---|---|
 | [README.md](README.md) (ce fichier) | Quick start, installation, utilisation |
 | [ARCHITECTURE.md](ARCHITECTURE.md) | Dossier d'architecture complet — fonctionnel, technique, sécurité, spécifications par fonctionnalité (F1-F7) |
-| [ADG-M_GRAPH_METHODOLOGIE.md](ADG-M_GRAPH_METHODOLOGIE.md) | Méthodologie du Graphe ADG-M : pipeline d'extraction, typage des nœuds Neo4j, glossaire |
 | [GUIDE-DEPLOIEMENT.md](GUIDE-DEPLOIEMENT.md) | Déploiement pas-à-pas sur Azure (infra Bicep, App Service, Docker) |
-| [azure-functions/README.md](azure-functions/README.md) | Backend du Graphe ADG-M (`fn-adgm-graph`, `fn-adgm-ingest`) — config, schémas DB, déploiement |
 | [docs/specs/](docs/specs/) | Spécifications produit détaillées (SDD) |
 
 ---
@@ -52,8 +50,8 @@ L'interface s'ouvre automatiquement sur `http://127.0.0.1:8000`.
 - **Rail sources** : liste des documents indexés, prévisualisation des chunks, suppression de l'index
 - **Rail notes** : enregistrement des réponses de l'agent, indexation d'une note comme source
 - **Interface redimensionnable** : les deux rails sont redimensionnables par glisser-déposer
-- **Graphe ADG-M** : visualisation interactive de l'architecture applicative extraite du corpus — bi-plan switch (Fonctionnel/Technique), qualification 7R des composants, détection SPOF et clusters Louvain, exports JSON/CSV
-- **Module Exploration** : CRUD ArchiMate 3.x sur le graphe (nœuds, relations, suppression cascade, bulk-tag, orphelins), RBAC par rôle (Viewer/Architect/Admin) et journal d'audit — voir `ARCHITECTURE.md` §F8
+- **Legacy KB** : vue graphe (React Flow/dagre) du dump GraphRAG `neo4j-legacykb` — exploration par domaine fonctionnel, recherche, recentrage et redisposition de la vue sur un nœud — voir `ARCHITECTURE.md` §F7
+- **Tool-calling Legacy KB dans le Chat** : GPT-4o interroge directement `neo4j-legacykb` pour répondre aux questions sur l'application CardDemo (programmes, copybooks, batch jobs, domaines fonctionnels)
 
 ---
 
@@ -64,26 +62,25 @@ L'interface s'ouvre automatiquement sur `http://127.0.0.1:8000`.
 │  Navigateur                                                       │
 │  React (Babel standalone) — servi statiquement par API            │
 │  Vue Chat : SourcesRail │ ChatPanel │ NotesRail                   │
-│  Vue Graphe : GraphPage (Cytoscape.js)                            │
+│  Vue Legacy KB : LegacyKbPage (React Flow + dagre)                │
 └─────────────────────────┬────────────────────────────────────────┘
                           │ HTTP
 ┌─────────────────────────▼────────────────────────────────────────┐
 │  FastAPI (Python 3.11)                                            │
-│  POST /api/chat           GET/DELETE /api/sources                 │
+│  POST /api/chat (+ tools legacykb_*)  GET/DELETE /api/sources      │
 │  POST /api/ingest         GET /api/ingest/{job_id}                │
-│  GET/PATCH/DELETE /api/graph/*  (proxy → fn-adgm-graph)          │
-│  POST /api/extract/graph  GET /api/extract/graph/{job_id}         │
+│  GET /api/legacykb/*  (health, stats, domains, search, neighbors)│
 └──────┬───────────────────────┬──────────────────┬────────────────┘
        │                       │                  │
 ┌──────▼──────┐    ┌──────────▼──────────┐  ┌───▼────────────────────────┐
-│ Azure OpenAI│    │ Azure AI Search      │  │ Azure Function App          │
-│ GPT-4o      │    │ Index vectoriel      │  │ fn-adgm-graph               │
-│ Embeddings  │    │ notebooklm-chunks    │  │  ├─ Neo4j AuraDB             │
-└─────────────┘    └─────────────────────┘  │  │  TechnicalNode · 7R       │
-                            ▲               │  │  SPOF · Louvain clusters   │
-              ┌─────────────┘               │  └─ Azure SQL                 │
-┌─────────────┴───────────────────────────┐ │     NodeAnnotationHistory     │
-│  Azure Document Intelligence             │ └────────────────────────────────┘
+│ Azure OpenAI│    │ Azure AI Search      │  │ Neo4j AuraDB                 │
+│ GPT-4o      │    │ Index vectoriel      │  │ neo4j-legacykb               │
+│ Embeddings  │    │ notebooklm-chunks    │  │  :Entity · :Community         │
+└─────────────┘    └─────────────────────┘  │  (golden source CardDemo,     │
+                            ▲                │   lecture seule)              │
+              ┌─────────────┘                └────────────────────────────────┘
+┌─────────────┴───────────────────────────┐
+│  Azure Document Intelligence             │
 │  OCR et extraction layout PDF            │
 └─────────────────────────────────────────┘
 ```
@@ -141,7 +138,8 @@ Variables requises :
 | `AZURE_SEARCH_ENDPOINT` | Endpoint Azure AI Search |
 | `AZURE_DOCINT_ENDPOINT` | Endpoint Azure Document Intelligence |
 | `API_KEY` | Clé d'authentification (optionnelle en local) |
-| `ADGM_GRAPH_API_URL` | URL de base de `fn-adgm-graph` (défaut : instance de dev partagée `https://modernagent-adgm-dev.azurewebsites.net/api/graph` — voir [azure-functions/README.md](azure-functions/README.md) pour déployer votre propre instance) |
+| `NEO4J_LEGACYKB_URI` | URI Neo4j AuraDB de `neo4j-legacykb` (défaut fourni — golden source CardDemo, lecture seule) |
+| `NEO4J_LEGACYKB_PASSWORD` | Mot de passe Neo4j de `neo4j-legacykb` (pas de défaut, requis pour la vue Legacy KB et le tool-calling) |
 
 ### 5. Authentification Azure
 
@@ -204,13 +202,14 @@ api/
 ├── main.py            # FastAPI app, middlewares sécurité, lifespan
 ├── routers/
 │   ├── chat.py        # Endpoint de conversation
-│   ├── extract.py     # Pipeline Chat→Graphe (extraction GPT-4o → fn-adgm-graph)
-│   ├── graph.py       # Proxy GET/PATCH/DELETE /api/graph/* → fn-adgm-graph
 │   ├── ingest.py      # Ingestion asynchrone avec polling
+│   ├── legacykb.py    # Lecture neo4j-legacykb (golden source CardDemo)
 │   └── sources.py     # CRUD sources dans l'index
 └── services/
-    ├── retriever.py   # Recherche vectorielle
-    └── generator.py   # Génération RAG
+    ├── retriever.py       # Recherche vectorielle
+    ├── generator.py       # Génération RAG (+ tools legacykb)
+    ├── graph_tools.py      # Tools function-calling Chat → legacykb_*
+    └── legacykb_client.py # Client Neo4j pour neo4j-legacykb
 
 ingest/
 ├── chunkers/          # Un chunker par format de fichier
@@ -218,16 +217,14 @@ ingest/
 └── indexer.py         # Upload dans Azure AI Search
 
 frontend/
-├── index.html         # Chargement ordonné des composants
-├── vendor/            # Dépendances JS (React, Babel, Mermaid, Cytoscape…)
-└── src/               # Composants React (JSX transpilé in-browser)
-    ├── GraphPage.jsx  # Vue Graphe ADG-M (Cytoscape.js)
-    └── ...            # Chat : Header, SourcesRail, ChatPanel, NotesRail, App
+├── index.html          # Chargement ordonné des composants
+├── vendor/              # Dépendances JS vendorisées (React, Babel, Mermaid, xyflow, dagre…)
+└── src/                 # Composants React (JSX transpilé in-browser)
+    ├── LegacyKbPage.jsx # Vue Legacy KB (React Flow + dagre)
+    └── ...              # Chat : Header, SourcesRail, ChatPanel, NotesRail, App
 
-azure-functions/        # Backend du Graphe ADG-M (déployé sur Azure Functions)
-├── fn-adgm-graph/      # API Neo4j — nœuds, arcs, clusters, qualification 7R
-├── fn-adgm-ingest/     # Blob trigger — ingestion automatique des rétro-docs
-└── db/                 # Schémas Neo4j (Cypher) et Azure SQL
+azure-functions/        # fn-adgm-graph/fn-adgm-ingest — non consommés par l'app
+                         # depuis le retrait du graphe ADG-M (2026-06-13), conservés au repos
 
 doc-archimind/           # Corpus de référence (architecture mainframe CardDemo)
 docs/
