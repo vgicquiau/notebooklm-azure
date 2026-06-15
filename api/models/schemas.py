@@ -25,9 +25,19 @@ class GraphReference(BaseModel):
     nom: str
 
 
+class GraphAction(BaseModel):
+    type: Literal["highlight", "impact_paths"]
+    node_ids: list[str]
+    nodes: list[dict] = Field(default_factory=list)
+    edges: list[dict] = Field(default_factory=list)
+    reason: str
+    query_info: Optional[dict] = None
+
+
 class ChatResponse(BaseModel):
     answer: str
     session_id: str
     sources: list[SourceReference]
     tokens_used: int
     graph_references: list[GraphReference] = Field(default_factory=list)
+    graph_action: Optional[GraphAction] = None
