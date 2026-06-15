@@ -14,6 +14,8 @@ APIs principales (SDD ADG-M §3) :
 Routes opérationnelles (hors contrat SDD §3) :
 - POST /graph/admin/analyze          — jobs F1.3/F1.5 (criticité, SPOF, clustering Louvain)
 - POST /graph/admin/import-entities  — merge du graphe de connaissance extrait des documents Chat
+- POST /graph/admin/archimate-classify — étiquette des nœuds v2.0 existants avec la taxonomie
+  ArchiMate 3.x (elementType/layer/aspect), produit par le pipeline de classification LLM
 
 Dépendances (requirements.txt) :
   azure-functions
@@ -1237,6 +1239,98 @@ def import_entities(req: func.HttpRequest) -> func.HttpResponse:
 
 
 # ============================================================================
+# POST /graph/admin/archimate-classify — étiquette des nœuds existants (taxonomie
+# GraphRAG v2.0) avec la taxonomie ArchiMate 3.x, pour le module Exploration
+# ============================================================================
+
+def archimate_classify_nodes(req: func.HttpRequest) -> func.HttpResponse:
+    """POST /graph/admin/archimate-classify — applique elementType/layer/aspect (taxonomie
+    ArchiMate 3.x, archimate_taxonomy.py) sur des nœuds existants identifiés par leur `id`
+    (taxonomie GraphRAG v2.0). Approche multi-label additive : le label v2.0 (ex.
+    `:Composant`) est conservé, `:ArchiMateElement` + labels dérivés de
+    `archimate.labels_for(layer, elementType)` sont ajoutés. Rend les 1078 nœuds ADG-M
+    visibles dans le module Exploration (MATCH (n:ArchiMateElement)).
+
+    Payload JSON :
+    {
+      "classifications": [
+        {"id": str, "elementType": str, "layer": str, "aspect": str|null,
+         "description": str|null, "stereotype": str|null, "tags": [str]|null}
+      ]
+    }
+
+    elementType/layer/aspect validés contre archimate_taxonomy (mêmes règles que
+    POST /exploration/nodes — label dynamique sans risque d'injection : valeurs
+    systématiquement vérifiées contre les ensembles fermés LAYERS/ALL_ELEMENT_TYPES avant
+    interpolation). description/stereotype/tags ne sont écrits que si le nœud ne porte pas
+    déjà la propriété (coalesce) — complète sans écraser les données issues de
+    l'extraction v2.0.
+    """
+    try:
+        body = req.get_json()
+    except Exception:
+        return error_response("Corps JSON invalide", 400)
+
+    classifications = body.get("classifications") or []
+    now = datetime.now(timezone.utc).isoformat()
+
+    classified = 0
+    errors: list[dict] = []
+
+    try:
+        driver = get_neo4j_driver()
+        with driver.session() as session:
+            for c in classifications:
+                node_id = c.get("id")
+                layer = c.get("layer")
+                element_type = c.get("elementType")
+                aspect = c.get("aspect")
+
+                if not node_id:
+                    errors.append({"id": node_id, "reason": "id manquant"})
+                    continue
+                if layer not in archimate.LAYERS or not archimate.validate_element_type(layer, element_type):
+                    errors.append({"id": node_id, "reason": "elementType invalide pour ce layer"})
+                    continue
+                if aspect is not None and aspect not in archimate.ASPECTS:
+                    errors.append({"id": node_id, "reason": "aspect invalide"})
+                    continue
+
+                extra_labels = [l for l in archimate.labels_for(layer, element_type) if l != "ArchiMateElement"]
+                label_clause = "".join(f" SET n:`{label}`" for label in extra_labels)
+
+                result = session.run(
+                    f"""
+                    MATCH (n {{id: $id}})
+                    SET n:ArchiMateElement{label_clause}
+                    SET n.elementType = $elementType, n.layer = $layer, n.aspect = $aspect,
+                        n.description = coalesce(n.description, $description),
+                        n.stereotype = coalesce(n.stereotype, $stereotype),
+                        n.tags = coalesce(n.tags, $tags),
+                        n.updatedAt = $now
+                    RETURN n
+                    """,
+                    id=node_id, elementType=element_type, layer=layer, aspect=aspect,
+                    description=c.get("description"), stereotype=c.get("stereotype"),
+                    tags=c.get("tags"), now=now,
+                )
+                if not list(result):
+                    errors.append({"id": node_id, "reason": "nœud introuvable"})
+                    continue
+                classified += 1
+
+    except Exception as exc:
+        logger.error(f"archimate_classify_nodes failed: {exc}")
+        return error_response("Erreur interne lors de la classification ArchiMate.", 500)
+
+    return func.HttpResponse(
+        json.dumps({"status": "ok", "classified": classified, "errors": errors, "timestamp": now}),
+        status_code=200,
+        mimetype="application/json",
+    )
+
+
+# ============================================================================
 # Module Exploration — CRUD ArchiMate (PLAN_EXPLORATION_v1.md)
 #
 # Routes /exploration/* (préfixe /api/graph/exploration/* côté Function, relayé par
@@ -2214,6 +2308,8 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
             return run_analysis(req)
         if parts == ["admin", "import-entities"]:
             return import_entities(req)
+        if parts == ["admin", "archimate-classify"]:
+            return archimate_classify_nodes(req)
 
     if method == "DELETE":
         if parts == ["admin", "functional-entities"]:
