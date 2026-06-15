@@ -316,6 +316,7 @@ const App = () => {
         onClearSession={clearSession}
         view={view}
         onViewChange={setView}
+        apiFetch={_apiFetch}
       />
 
       {view === 'legacykb' ? (
