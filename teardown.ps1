@@ -1,4 +1,4 @@
-#Requires -Version 5.1
+﻿#Requires -Version 5.1
 <#
 .SYNOPSIS
     Supprime toutes les ressources Azure NotebookLM et nettoie l'environnement local.

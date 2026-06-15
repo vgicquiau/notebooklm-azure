@@ -1,4 +1,4 @@
-#Requires -Version 5.1
+﻿#Requires -Version 5.1
 <#
 .SYNOPSIS
     Setup one-shot de NotebookLM Azure — provisionne l'infrastructure et configure l'environnement local.
@@ -19,10 +19,17 @@
 
 .PARAMETER Location
     Région Azure pour le déploiement. Défaut : francecentral.
-    Alternatives si quota insuffisant : swedencentral, westeurope.
+    Le déploiement gpt-4o utilise le SKU GlobalStandard (quota global partagé), ce qui évite
+    le problème de quota OpenAI.Standard.gpt-4o épuisé sur francecentral.
+    Alternatives si quota insuffisant malgré tout : swedencentral, westeurope.
 
 .PARAMETER ProjectName
     Préfixe des ressources Azure (3-8 caractères, minuscules). Défaut : nlmazure.
+
+.PARAMETER ResourceGroup
+    Nom du Resource Group cible. Défaut : rg-<ProjectName>-prod.
+    S'il existe déjà, il est réutilisé tel quel (utile si votre compte n'a que des droits
+    Contributor sur un Resource Group existant, sans droit de création au niveau subscription).
 
 .PARAMETER SkipSSL
     Désactive la vérification SSL pour az CLI et pip.
@@ -43,11 +50,16 @@
 .EXAMPLE
     # Région alternative + nom projet personnalisé
     .\deploy.ps1 -Location swedencentral -ProjectName monprojet
+
+.EXAMPLE
+    # Réutilise un Resource Group existant (droits Contributor déjà accordés dessus)
+    .\deploy.ps1 -ResourceGroup rg-sp4-d-vgi-azu-notebook-txt
 #>
 param(
     [string]$Subscription  = "",
     [string]$Location      = "francecentral",
     [string]$ProjectName   = "nlmazure",
+    [string]$ResourceGroup = "",
     [switch]$SkipSSL,
     [switch]$Force
 )
@@ -90,18 +102,11 @@ Write-Banner
 Write-Phase 0 6 "Vérification des prérequis"
 
 $prereqs = @(
-    @{ Name = "Azure CLI (az)"; Test = { az --version 2>&1 | Out-Null }; Url = "https://aka.ms/installazurecliwindows" },
-    @{ Name = "Python 3.11+";   Test = { python --version 2>&1 | Out-Null }; Url = "https://python.org/downloads" }
+    @{ Name = "Azure CLI (az)"; Cmd = "az";     Url = "https://aka.ms/installazurecliwindows" },
+    @{ Name = "Python 3.11+";   Cmd = "python"; Url = "https://python.org/downloads" }
 )
 
-# Vérification parallèle via jobs
-$checkJobs = foreach ($p in $prereqs) {
-    $t = $p.Test
-    Start-Job -ScriptBlock { try { & $using:t; $true } catch { $false } }
-}
-
-$checkResults = $checkJobs | Wait-Job | Receive-Job
-$checkJobs | Remove-Job -Force
+$checkResults = foreach ($p in $prereqs) { [bool](Get-Command $p.Cmd -ErrorAction SilentlyContinue) }
 
 $missing = @()
 for ($i = 0; $i -lt $prereqs.Count; $i++) {
@@ -129,8 +134,8 @@ if ($SkipSSL) {
 # Installation extensions en parallèle
 Write-Info "Installation containerapp + Bicep (parallel)…"
 $extJobs = @(
-    Start-Job -ScriptBlock { az extension add --name containerapp --upgrade --only-show-errors 2>&1 },
-    Start-Job -ScriptBlock { az bicep install 2>&1 }
+    (Start-Job -ScriptBlock { az extension add --name containerapp --upgrade --only-show-errors 2>&1 }),
+    (Start-Job -ScriptBlock { az bicep install 2>&1 })
 )
 $extJobs | Wait-Job | Out-Null
 $extJobs | Remove-Job -Force
@@ -175,17 +180,23 @@ Write-OK "Subscription : $($account.name) ($($account.id))"
 
 $deployerOid    = az ad signed-in-user show --query id -o tsv 2>&1
 $subscriptionId = $account.id
-$rg             = "rg-$ProjectName-prod"
+$rg             = if ($ResourceGroup) { $ResourceGroup } else { "rg-$ProjectName-prod" }
 $deployName     = "deploy-$(Get-Date -Format 'yyyyMMddHHmm')"
 
 # ── Phase 3 : Resource Group + Bicep ─────────────────────────────────────────
 Write-Phase 3 6 "Infrastructure Azure"
 
-# Création RG (idempotent)
-az group create --name $rg --location $Location `
-    --tags project=$ProjectName managed-by=bicep `
-    --output none --only-show-errors 2>&1 | Out-Null
-Write-OK "Resource Group : $rg ($Location)"
+# Création RG si nécessaire (idempotent — réutilise le RG s'il existe déjà,
+# utile quand le compte n'a pas le droit de créer un RG au niveau subscription)
+$rgExists = (az group exists --name $rg) -eq 'true'
+if ($rgExists) {
+    Write-OK "Resource Group existant réutilisé : $rg ($Location)"
+} else {
+    az group create --name $rg --location $Location `
+        --tags project=$ProjectName managed-by=bicep `
+        --output none --only-show-errors 2>&1 | Out-Null
+    Write-OK "Resource Group créé : $rg ($Location)"
+}
 
 Write-Info "Déploiement Bicep en cours — environ 12 minutes…"
 Write-Info "(OpenAI et Document Intelligence sont les plus lents à provisionner)"
