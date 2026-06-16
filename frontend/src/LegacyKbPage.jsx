@@ -201,14 +201,21 @@ const ZoneNode = ({ data }) => {
           <Handle type="source" position={position} id={`${id}-source`} style={handleStyle} />
         </React.Fragment>
       ))}
-      <div style={{
-        position: 'absolute', top: -11, left: 14,
-        display: 'flex', alignItems: 'center',
-        fontFamily: T.font, fontSize: 11, fontWeight: 700, color: T.white,
-        background: `linear-gradient(135deg, ${_hexToShade(color, 0.5)}, ${color})`,
-        padding: '2px 9px', borderRadius: 999, whiteSpace: 'nowrap',
-        pointerEvents: 'none',
-      }}>
+      <div
+        onClick={e => { e.stopPropagation(); data.onSelect?.(); }}
+        style={{
+          position: 'absolute', top: -11, left: 14,
+          display: 'flex', alignItems: 'center', gap: 5,
+          fontFamily: T.font, fontSize: 11, fontWeight: 700, color: T.white,
+          background: `linear-gradient(135deg, ${_hexToShade(color, 0.5)}, ${color})`,
+          padding: '2px 9px', borderRadius: 999, whiteSpace: 'nowrap',
+          cursor: 'pointer', userSelect: 'none',
+        }}
+        title="Cliquer pour voir le détail de la communauté"
+      >
+        {data.rawId && (
+          <span style={{ opacity: 0.8, fontSize: 10 }}>{data.rawId}</span>
+        )}
         {data.nom}
       </div>
     </div>
@@ -876,6 +883,7 @@ const _layout = (bundle, centerId, positions, visibleKinds, highlightedIds) => {
         data: {
           nom: cluster.nom,
           level: cluster.level,
+          rawId: zoneId.slice('zone:c|'.length),
           width: (maxX - minX) + ZONE_PADDING_X * 2,
           height: (maxY - minY) + ZONE_PADDING_TOP + ZONE_PADDING_BOTTOM,
         },
@@ -1423,7 +1431,13 @@ const LegacyKbPage = ({ apiFetch }) => {
   React.useEffect(() => {
     const { nodes, edges, clusters } = _layout(bundle, centerId, positionsRef.current, visibleKinds, highlightedIds);
     clustersRef.current = clusters;
-    setFlowNodes(nodes);
+    // Inject onSelect into zone nodes — allows clicking the zone label to open the detail panel.
+    // Done here (not inside _layout) so _layout stays pure and doesn't capture setState.
+    const nodesWithCb = nodes.map(n =>
+      n.type !== 'zoneNode' ? n
+        : { ...n, data: { ...n.data, onSelect: () => setSelectedId(n.id.slice('zone:'.length)) } }
+    );
+    setFlowNodes(nodesWithCb);
     setFlowEdges(edges);
     setLayoutVersion(v => v + 1);
   }, [bundle, centerId, visibleKinds, highlightedIds]);
