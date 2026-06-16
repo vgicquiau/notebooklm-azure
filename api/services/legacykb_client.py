@@ -37,9 +37,14 @@ class LegacyKbNotFound(Exception):
 def _get_driver():
     global _driver
     if _driver is None:
+        # bolt+ssc:// = Bolt avec TLS obligatoire + certificat auto-signé accepté (SEC-002).
+        # Le driver Neo4j Python valide le certificat contre les CA système avec bolt+s://,
+        # ce qui fait échouer les certs auto-signés. bolt+ssc:// force le chiffrement tout
+        # en tolérant les certs non signés par une CA publique (interne ACI uniquement).
+        # En local sans TLS, définir NEO4J_LEGACYKB_URI=bolt://localhost:7687 dans .env.
         uri = os.environ.get(
             "NEO4J_LEGACYKB_URI",
-            "bolt://neo4j-legacykb-vgi.francecentral.azurecontainer.io:7687",
+            "bolt+ssc://neo4j-legacykb-vgi.francecentral.azurecontainer.io:7687",
         )
         password = os.environ.get("NEO4J_LEGACYKB_PASSWORD")
         if not password:
@@ -162,6 +167,7 @@ def search(q: str, limit: int = 25, entity_types: list[str] | None = None, searc
             """
             MATCH (c:Community)
             WHERE toLower(c.title) CONTAINS toLower($q)
+              OR toLower(c.id) CONTAINS toLower($q)
               OR ($desc AND toLower(coalesce(c.functional_summary, '')) CONTAINS toLower($q))
               OR ($desc AND toLower(coalesce(c.technical_summary, '')) CONTAINS toLower($q))
             RETURN c.id AS id, c.level AS level, c.title AS title
