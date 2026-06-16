@@ -204,6 +204,123 @@ def list_domains() -> dict:
     }
 
 
+def get_hierarchy() -> dict:
+    """Hiérarchie complète L2→L1 avec nombre d'entités par sous-domaine L1."""
+    tree_rows = _run(
+        """
+        MATCH (c2:Community {level: 2})
+        OPTIONAL MATCH (c1:Community)-[:SUBCOMMUNITY_OF]->(c2)
+        WITH c2, collect(c1) AS c1s
+        RETURN c2.id AS id, c2.title AS title,
+               [c1 IN c1s WHERE c1 IS NOT NULL | {id: c1.id, title: c1.title}] AS subs
+        ORDER BY c2.title
+        """
+    )
+    count_rows = _run(
+        """
+        MATCH (c1:Community {level: 1})
+        OPTIONAL MATCH (e:Entity)-[:IN_COMMUNITY]->(c1)
+        RETURN c1.id AS c_id, count(e) AS n
+        """
+    )
+    entity_counts = {r["c_id"]: r["n"] for r in count_rows}
+
+    items = []
+    for r in tree_rows:
+        subs = sorted(
+            [
+                {
+                    "id": community_id(s["id"]),
+                    "kind": "community",
+                    "level": 1,
+                    "nom": s["title"],
+                    "entity_count": entity_counts.get(s["id"], 0),
+                }
+                for s in (r["subs"] or [])
+            ],
+            key=lambda x: x["nom"],
+        )
+        items.append({
+            "id": community_id(r["id"]),
+            "kind": "community",
+            "level": 2,
+            "nom": r["title"],
+            "subdomains": subs,
+        })
+    return {"items": items}
+
+
+def get_community_subgraph(node_id: str, limit: int = 80) -> dict:
+    """Entités membres d'une communauté + relations intra-communauté (pour charger dans le canvas).
+
+    Fonctionne pour L1 (IN_COMMUNITY direct) et L2 (agrège les entités de tous les L1
+    rattachés via SUBCOMMUNITY_OF).
+    """
+    kind, *rest = parse_node_id(node_id)
+    if kind != "c":
+        raise ValueError("Seules les communautés supportent cette opération.")
+    community_id_ = rest[0]
+
+    c_rows = _run("MATCH (c:Community {id: $id}) RETURN c", id=community_id_)
+    if not c_rows:
+        raise LegacyKbNotFound(f"Communauté {community_id_!r} introuvable.")
+    center_summary = _node_summary(c_rows[0]["c"])
+
+    entity_rows = _run(
+        """
+        MATCH (e:Entity)-[:IN_COMMUNITY]->(c1:Community)
+        WHERE c1.id = $id
+           OR EXISTS { MATCH (c1)-[:SUBCOMMUNITY_OF]->(:Community {id: $id}) }
+        RETURN e
+        LIMIT $limit
+        """,
+        id=community_id_,
+        limit=limit,
+    )
+
+    nodes: dict = {}
+    for r in entity_rows:
+        s = _node_summary(r["e"])
+        if s["id"]:
+            nodes[s["id"]] = s
+
+    edges: list = []
+    if nodes:
+        names = list({s["nom"] for s in nodes.values()})
+        edge_rows = _run(
+            """
+            MATCH (e1:Entity)-[r]->(e2:Entity)
+            WHERE e1.name IN $names AND e2.name IN $names
+              AND type(r) IN ['CALLS', 'INCLUDES', 'READS', 'INSERTS', 'UPDATES',
+                              'DELETES', 'CREATES', 'REFERENCES', 'EXECUTES',
+                              'INTERACTS_WITH', 'SENDS', 'RECEIVES', 'TRIGGERS', 'DEPENDS_ON']
+            RETURN e1.type AS t1, e1.name AS n1, type(r) AS relType, e2.type AS t2, e2.name AS n2
+            LIMIT $limit
+            """,
+            names=names,
+            limit=limit * 3,
+        )
+        seen_edges: set = set()
+        for r in edge_rows:
+            from_id = entity_id(r["t1"], r["n1"])
+            to_id = entity_id(r["t2"], r["n2"])
+            key = f"{from_id}|{to_id}|{r['relType']}"
+            if from_id in nodes and to_id in nodes and key not in seen_edges:
+                seen_edges.add(key)
+                edges.append({"from": from_id, "to": to_id, "type": r["relType"]})
+
+    entity_pairs = [(s["type"], s["nom"]) for s in nodes.values()]
+    communities = _entity_communities(entity_pairs)
+    for s in nodes.values():
+        s["community"] = communities.get((s["type"], s["nom"]))
+
+    return {
+        "center": center_summary,
+        "neighbors": list(nodes.values()),
+        "edges": edges,
+    }
+
+
 def _entity_communities(entities: list[tuple[str, str]]) -> dict[tuple[str, str], dict]:
     """Communauté de rattachement directe (IN_COMMUNITY) pour un lot d'entités.
 

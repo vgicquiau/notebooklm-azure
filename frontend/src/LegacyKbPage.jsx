@@ -7,6 +7,7 @@
 // window.ReactFlow) + dagre (window.dagre) pour le layout.
 
 const API_BASE = window.location.origin + '/api';
+const _uid = () => Math.random().toString(36).slice(2, 10);
 
 const {
   ReactFlow: ReactFlowCanvas,
@@ -59,6 +60,18 @@ const RELATION_LABELS = {
   REFERENCES: 'Référence', EXECUTES: 'Exécute', INTERACTS_WITH: 'Interagit avec',
   SENDS: 'Envoie', RECEIVES: 'Reçoit', TRIGGERS: 'Déclenche', DEPENDS_ON: 'Dépend de',
   IN_COMMUNITY: 'Domaine', SUBCOMMUNITY_OF: 'Sous-domaine de',
+};
+
+// Sémantique couleur par type de relation (flux bleu, lecture vert, écriture orange,
+// structure violet, événement rouge, message sarcelle)
+const RELATION_COLORS = {
+  CALLS: '#1565c0', EXECUTES: '#1976d2',
+  READS: '#2e7d32', REFERENCES: '#388e3c', DEPENDS_ON: '#43a047',
+  INSERTS: '#e65100', UPDATES: '#ef6c00', DELETES: '#bf360c', CREATES: '#f57c00',
+  INCLUDES: '#7b1fa2',
+  TRIGGERS: '#c62828',
+  SENDS: '#00695c', RECEIVES: '#00796b',
+  INTERACTS_WITH: '#546e7a',
 };
 
 // Mots-clés techniques mainframe détectés dans `technical_description` (tags)
@@ -137,7 +150,9 @@ const LegacyNode = ({ data }) => {
       border: data.isCenter ? `2px solid ${T.azure}` : 'none',
       background: T.white,
       fontFamily: T.font, color: T.ink,
-      boxShadow: '0 2px 6px rgba(28,27,24,0.12)',
+      boxShadow: data.highlighted
+        ? '0 2px 6px rgba(28,27,24,0.12), 0 0 0 3px rgba(251,140,0,0.45)'
+        : '0 2px 6px rgba(28,27,24,0.12)',
     }}>
       {HANDLE_SIDES.map(({ id, position }) => (
         <React.Fragment key={id}>
@@ -876,7 +891,7 @@ const _layout = (bundle, centerId, positions, visibleKinds, highlightedIds) => {
       id: n.id,
       type: 'legacyNode',
       position: topLeft.get(n.id),
-      data: { ...n, isCenter: n.id === centerId },
+      data: { ...n, isCenter: n.id === centerId, highlighted: highlightedIds?.has(n.id) ?? false },
     }));
 
   const nodes = [...zoneNodes, ...entityNodes];
@@ -887,16 +902,18 @@ const _layout = (bundle, centerId, positions, visibleKinds, highlightedIds) => {
   const edges = [];
   edgeGroups.forEach((byTarget, from) => {
     byTarget.forEach((types, to) => {
-      const labels = [...types].map(t => RELATION_LABELS[t] ?? t);
+      const typeArr = [...types];
+      const labels = typeArr.map(t => RELATION_LABELS[t] ?? t);
       const label = labels.length <= 2 ? labels.join(' / ') : `${labels[0]} +${labels.length - 1}`;
+      const edgeColor = RELATION_COLORS[typeArr[0]] ?? T.sub;
       edges.push({
         id: `${from}->${to}`,
         source: from,
         target: to,
         label,
         type: 'smoothstep',
-        markerEnd: { type: MarkerType.ArrowClosed, color: T.sub },
-        style: { stroke: T.sub },
+        markerEnd: { type: MarkerType.ArrowClosed, color: edgeColor },
+        style: { stroke: edgeColor, strokeOpacity: 0.75 },
         labelStyle: { fontSize: 10, fill: T.muted },
         labelBgStyle: { fill: T.white, fillOpacity: 0.9 },
       });
@@ -949,6 +966,183 @@ const LegacyKbCanvas = ({ nodes, edges, fitKey, onNodesChange, onNodeClick, onNo
   );
 };
 
+// ── Mini-chat flottant — pilote le canvas via `graph_action` (highlight/impact_paths) ──
+// Session dédiée (sessionStorage), indépendante du chat principal. Affiche un bouton
+// "Détails" (requête Cypher + params) pour les réponses `impact_paths`.
+const LegacyKbChat = ({ apiFetch, onGraphAction }) => {
+  const [open, setOpen] = React.useState(false);
+  const [messages, setMessages] = React.useState([]); // { role, content, queryInfo? }
+  const [input, setInput] = React.useState('');
+  const [loading, setLoading] = React.useState(false);
+  const [openDetails, setOpenDetails] = React.useState(new Set());
+
+  const sessionIdRef = React.useRef(null);
+  if (!sessionIdRef.current) {
+    let sid = sessionStorage.getItem('nlaz-legacykb-session');
+    if (!sid) { sid = _uid(); sessionStorage.setItem('nlaz-legacykb-session', sid); }
+    sessionIdRef.current = sid;
+  }
+
+  const listRef = React.useRef(null);
+  React.useEffect(() => {
+    listRef.current?.scrollTo({ top: listRef.current.scrollHeight });
+  }, [messages, loading]);
+
+  const send = React.useCallback(async () => {
+    const text = input.trim();
+    if (!text || loading) return;
+    setInput('');
+    setMessages(prev => [...prev, { role: 'user', content: text }]);
+    setLoading(true);
+    try {
+      const res = await apiFetch(`${API_BASE}/chat`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ message: text, session_id: sessionIdRef.current, mode: 'standard' }),
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+      if (data.session_id && data.session_id !== sessionIdRef.current) {
+        sessionIdRef.current = data.session_id;
+        sessionStorage.setItem('nlaz-legacykb-session', data.session_id);
+      }
+      setMessages(prev => [...prev, {
+        role: 'assistant',
+        content: data.answer,
+        queryInfo: data.graph_action?.query_info ?? null,
+      }]);
+      if (data.graph_action) onGraphAction(data.graph_action);
+    } catch (err) {
+      setMessages(prev => [...prev, { role: 'assistant', content: `Erreur : ${err.message}` }]);
+    } finally {
+      setLoading(false);
+    }
+  }, [input, loading, apiFetch, onGraphAction]);
+
+  const toggleDetails = (i) => {
+    setOpenDetails(prev => {
+      const next = new Set(prev);
+      if (next.has(i)) next.delete(i); else next.add(i);
+      return next;
+    });
+  };
+
+  if (!open) {
+    return (
+      <button
+        onClick={() => setOpen(true)}
+        title="Assistant Legacy KB"
+        style={{
+          position: 'absolute', right: 20, bottom: 20, zIndex: 30,
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+          width: 46, height: 46, borderRadius: '50%',
+          border: 'none', background: T.azure, color: T.white,
+          boxShadow: '0 4px 14px rgba(28,27,24,.22)', cursor: 'pointer',
+        }}
+      >
+        <Ic.Chat s={20} />
+      </button>
+    );
+  }
+
+  return (
+    <div style={{
+      position: 'absolute', right: 20, bottom: 20, zIndex: 30,
+      display: 'flex', flexDirection: 'column',
+      width: 340, height: 440, maxHeight: 'calc(100% - 40px)',
+      background: T.white, border: `1px solid ${T.border}`, borderRadius: T.radiusMd,
+      boxShadow: '0 4px 18px rgba(28,27,24,.18)', fontFamily: T.font, overflow: 'hidden',
+    }}>
+      <div style={{
+        display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+        padding: '10px 14px', borderBottom: `1px solid ${T.border}`, flexShrink: 0,
+      }}>
+        <span style={{ fontSize: 13, fontWeight: 700, color: T.ink }}>Assistant Legacy KB</span>
+        <button
+          onClick={() => setOpen(false)}
+          style={{ display: 'flex', border: 'none', background: 'transparent', color: T.muted, cursor: 'pointer', padding: 4, borderRadius: T.radiusSm }}
+          title="Fermer"
+        >
+          <Ic.Close s={14} />
+        </button>
+      </div>
+
+      <div ref={listRef} style={{ flex: 1, overflowY: 'auto', padding: '10px 14px', display: 'flex', flexDirection: 'column', gap: 10 }}>
+        {messages.length === 0 && (
+          <div style={{ fontSize: 12, color: T.muted, lineHeight: 1.6 }}>
+            Posez une question sur le graphe (ex. « montre-moi RE1570C et ses dépendances »,
+            « qu'est-ce qui dépend de tel programme »…) — la réponse peut piloter le canvas
+            (surlignage, analyse d'impact).
+          </div>
+        )}
+        {messages.map((m, i) => (
+          <div key={i} style={{ display: 'flex', flexDirection: 'column', alignItems: m.role === 'user' ? 'flex-end' : 'flex-start' }}>
+            <div style={{
+              maxWidth: '90%', padding: '7px 11px', borderRadius: T.radiusMd, fontSize: 12.5, lineHeight: 1.55,
+              background: m.role === 'user' ? T.azureSoft : T.panel,
+              color: T.ink,
+            }}>
+              {m.role === 'assistant'
+                ? <MarkdownContent text={m.content} />
+                : m.content}
+            </div>
+            {m.queryInfo && (
+              <div style={{ marginTop: 4 }}>
+                <button
+                  onClick={() => toggleDetails(i)}
+                  style={{ border: 'none', background: 'transparent', color: T.azure, fontFamily: T.font, fontSize: 11, fontWeight: 600, cursor: 'pointer', padding: 0 }}
+                >
+                  {openDetails.has(i) ? 'Masquer les détails' : 'Détails'}
+                </button>
+                {openDetails.has(i) && (
+                  <div style={{
+                    marginTop: 4, padding: 8, borderRadius: T.radiusSm,
+                    background: T.panel2, border: `1px solid ${T.border}`,
+                    fontFamily: T.mono, fontSize: 10.5, color: T.sub,
+                    whiteSpace: 'pre-wrap', wordBreak: 'break-word', maxWidth: 280,
+                  }}>
+                    {m.queryInfo.cypher}
+                    {'\n\n'}
+                    {JSON.stringify(m.queryInfo.params, null, 2)}
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        ))}
+        {loading && <div style={{ fontSize: 12, color: T.muted }}>Réflexion…</div>}
+      </div>
+
+      <div style={{ display: 'flex', gap: 6, padding: 10, borderTop: `1px solid ${T.border}`, flexShrink: 0 }}>
+        <input
+          value={input}
+          onChange={e => setInput(e.target.value)}
+          onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); } }}
+          placeholder="Votre question…"
+          style={{
+            flex: 1, border: `1px solid ${T.border}`, borderRadius: T.radiusPill,
+            padding: '7px 12px', fontFamily: T.font, fontSize: 12.5, color: T.ink, outline: 'none',
+          }}
+        />
+        <button
+          onClick={send}
+          disabled={loading || !input.trim()}
+          style={{
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+            width: 34, height: 34, borderRadius: '50%', flexShrink: 0,
+            border: 'none', background: T.azure, color: T.white,
+            cursor: (loading || !input.trim()) ? 'default' : 'pointer',
+            opacity: (loading || !input.trim()) ? 0.6 : 1,
+          }}
+          title="Envoyer"
+        >
+          <Ic.Up s={16} />
+        </button>
+      </div>
+    </div>
+  );
+};
+
 // ── Page principale ─────────────────────────────────────────────────────────
 const LegacyKbPage = ({ apiFetch }) => {
   const apiFetchRef  = React.useRef(apiFetch);
@@ -962,7 +1156,8 @@ const LegacyKbPage = ({ apiFetch }) => {
   const [selectedTypes, setSelectedTypes] = React.useState(new Set());
   const [searchDescriptions, setSearchDescriptions] = React.useState(false);
 
-  const [domains,      setDomains]      = React.useState([]);
+  const [hierarchy,         setHierarchy]         = React.useState([]);
+  const [expandedDomainIds, setExpandedDomainIds] = React.useState(new Set());
   const [showingDomains, setShowingDomains] = React.useState(false);
   const [domainsError, setDomainsError] = React.useState(null);
 
@@ -972,6 +1167,9 @@ const LegacyKbPage = ({ apiFetch }) => {
   const [bundle,       setBundle]       = React.useState(null); // { nodeMap: Map, edgeList: [] }
   const [centerId,     setCenterId]     = React.useState(null);
   const [selectedId,   setSelectedId]   = React.useState(null);
+
+  // ── Surlignage piloté par le mini-chat (legacykb_highlight/impact_paths) ──
+  const [highlightedIds, setHighlightedIds] = React.useState(new Set());
 
   // ── Menu "Affichage" — types/niveaux de nœuds visibles dans le graphe ─────
   const [visibleKinds, setVisibleKinds] = React.useState(() => new Set(VISIBILITY_OPTIONS.map(o => o.key)));
@@ -1033,18 +1231,18 @@ const LegacyKbPage = ({ apiFetch }) => {
   const loadDomains = React.useCallback(async () => {
     if (showingDomains) { setShowingDomains(false); return; }
     setDomainsError(null);
-    if (domains.length > 0) { setShowingDomains(true); setSearchResults([]); return; }
+    if (hierarchy.length > 0) { setShowingDomains(true); setSearchResults([]); return; }
     try {
-      const res = await apiFetch(`${API_BASE}/legacykb/domains`);
+      const res = await apiFetch(`${API_BASE}/legacykb/hierarchy`);
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = await res.json();
-      setDomains(data.items ?? []);
+      setHierarchy(data.items ?? []);
       setShowingDomains(true);
       setSearchResults([]);
     } catch (err) {
       setDomainsError(err.message);
     }
-  }, [apiFetch, domains, showingDomains]);
+  }, [apiFetch, hierarchy, showingDomains]);
 
   // ── Charge le voisinage d'un nœud et fusionne dans le bundle ──────────────
   const exploreNode = React.useCallback(async (nodeId) => {
@@ -1071,6 +1269,32 @@ const LegacyKbPage = ({ apiFetch }) => {
       setCenterId(data.center.id);
       setSelectedId(data.center.id);
     } catch (_) { /* exploration silencieuse si l'API est injoignable */ }
+  }, []);
+
+  // ── Charge toutes les entités d'une communauté dans le canvas ────────────
+  const loadCommunitySubgraph = React.useCallback(async (nodeId) => {
+    try {
+      const res = await apiFetchRef.current(
+        `${API_BASE}/legacykb/nodes/${encodeURIComponent(nodeId)}/subgraph`
+      );
+      if (!res.ok) return;
+      const data = await res.json();
+
+      setBundle(prev => {
+        const nodeMap = prev ? new Map(prev.nodeMap) : new Map();
+        const edgeList = prev ? [...prev.edgeList] : [];
+        const seenKeys = new Set(edgeList.map(e => `${e.from}|${e.to}|${e.type}`));
+        nodeMap.set(data.center.id, data.center);
+        data.neighbors.forEach(n => nodeMap.set(n.id, n));
+        data.edges.forEach(e => {
+          const k = `${e.from}|${e.to}|${e.type}`;
+          if (!seenKeys.has(k)) { seenKeys.add(k); edgeList.push(e); }
+        });
+        return { nodeMap, edgeList };
+      });
+      setCenterId(data.center.id);
+      setSelectedId(data.center.id);
+    } catch (_) {}
   }, []);
 
   // ── Sélection d'un résultat de recherche → démarre/étend l'exploration ────
@@ -1105,12 +1329,46 @@ const LegacyKbPage = ({ apiFetch }) => {
     setSelectedId(nodeId);
   }, []);
 
+  // ── Applique sur le canvas un `graph_action` renvoyé par le mini-chat ─────
+  // "highlight" : étend l'exploration sur les nœuds désignés (réutilise
+  // exploreNode/recenterOnNode/relayoutOnNode). "impact_paths" : le backend
+  // fournit déjà le sous-graphe complet (nodes/edges) — appliqué directement,
+  // sans requête supplémentaire. Dans les deux cas, met en évidence les nœuds
+  // concernés via `highlightedIds`.
+  const handleGraphAction = React.useCallback(async (action) => {
+    if (!action) return;
+    setHighlightedIds(new Set(action.node_ids));
+
+    if (action.type === 'impact_paths') {
+      if (!action.nodes || action.nodes.length === 0) return;
+      const nodeMap = new Map();
+      action.nodes.forEach(n => nodeMap.set(n.id, n));
+      positionsRef.current.clear();
+      setBundle({ nodeMap, edgeList: action.edges ?? [] });
+      const center = action.nodes[0];
+      setCenterId(center.id);
+      setSelectedId(center.id);
+      return;
+    }
+
+    const ids = action.node_ids;
+    if (!ids || ids.length === 0) return;
+    if (!bundle || bundle.nodeMap.size === 0) {
+      await recenterOnNode(ids[0]);
+      for (const id of ids.slice(1)) await exploreNode(id);
+    } else {
+      for (const id of ids) await exploreNode(id);
+      relayoutOnNode(ids[0]);
+    }
+  }, [bundle, exploreNode, recenterOnNode, relayoutOnNode]);
+
   // ── Réinitialise la vue ────────────────────────────────────────────────
   const clearGraph = React.useCallback(() => {
     setBundle(null);
     setCenterId(null);
     setSelectedId(null);
     setContextMenu(null);
+    setHighlightedIds(new Set());
     positionsRef.current.clear();
     setFlowNodes([]);
     setFlowEdges([]);
@@ -1163,12 +1421,12 @@ const LegacyKbPage = ({ apiFetch }) => {
   const [layoutVersion, setLayoutVersion] = React.useState(0);
 
   React.useEffect(() => {
-    const { nodes, edges, clusters } = _layout(bundle, centerId, positionsRef.current, visibleKinds);
+    const { nodes, edges, clusters } = _layout(bundle, centerId, positionsRef.current, visibleKinds, highlightedIds);
     clustersRef.current = clusters;
     setFlowNodes(nodes);
     setFlowEdges(edges);
     setLayoutVersion(v => v + 1);
-  }, [bundle, centerId, visibleKinds]);
+  }, [bundle, centerId, visibleKinds, highlightedIds]);
 
   // Déplacer une zone translate tous ses membres de la même quantité —
   // permet de réorganiser le schéma sans perdre le regroupement visuel.
@@ -1310,6 +1568,20 @@ const LegacyKbPage = ({ apiFetch }) => {
             </>
           )}
 
+          {highlightedIds.size > 0 && (
+            <button
+              onClick={() => setHighlightedIds(new Set())}
+              style={{
+                height: 32, padding: '0 14px', borderRadius: T.radiusPill,
+                border: `1px solid ${T.border}`, background: T.white, color: T.sub,
+                fontFamily: T.font, fontSize: 12.5, fontWeight: 500, cursor: 'pointer',
+                whiteSpace: 'nowrap',
+              }}
+            >
+              Effacer le surlignage
+            </button>
+          )}
+
           <div style={{ position: 'relative' }}>
             <button
               onClick={() => setShowDisplayMenu(v => !v)}
@@ -1424,42 +1696,137 @@ const LegacyKbPage = ({ apiFetch }) => {
       {/* Corps : résultats de recherche / canvas / panneau de détail */}
       <div style={{ flex: 1, display: 'flex', overflow: 'hidden', minHeight: 0 }}>
         {/* Résultats de recherche / liste de domaines */}
-        {(showingDomains ? domains.length > 0 : searchResults.length > 0) && (
+        {(showingDomains ? hierarchy.length > 0 : searchResults.length > 0) && (
           <div style={{
             width: 280, flexShrink: 0, borderRight: `1px solid ${T.border}`,
             background: T.railBg, overflowY: 'auto', fontFamily: T.font,
           }}>
-            {(showingDomains ? domains : searchResults).map(item => (
-              <button
-                key={item.id}
-                onClick={() => handleResultClick(item)}
-                style={{
-                  display: 'flex', flexDirection: 'column', gap: 2,
-                  width: '100%', textAlign: 'left', padding: '10px 14px',
-                  border: 'none', borderBottom: `1px solid ${T.border}`,
-                  background: selectedId === item.id ? T.azureSoft : 'transparent',
-                  cursor: 'pointer',
-                }}
-                onMouseEnter={e => { if (selectedId !== item.id) e.currentTarget.style.background = T.panel; }}
-                onMouseLeave={e => { if (selectedId !== item.id) e.currentTarget.style.background = 'transparent'; }}
-              >
-                <span style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12.5, fontWeight: 600, color: T.ink }}>
-                  <span style={{
-                    width: 9, height: 9, borderRadius: item.kind === 'community' ? 2 : '50%', flexShrink: 0,
-                    background: item.kind === 'entity' ? (ENTITY_COLORS[item.type] ?? '#9e9e9e') : (COMMUNITY_COLORS[item.level] ?? '#bdbdbd'),
-                  }} />
-                  <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{item.nom}</span>
-                </span>
-                <span style={{ fontSize: 11, color: T.muted }}>
-                  {item.kind === 'entity'
-                    ? (ENTITY_TYPE_LABELS[item.type] ?? item.type)
-                    : (COMMUNITY_LEVEL_LABELS[item.level] ?? `Communauté niveau ${item.level}`)}
-                  {item.kind === 'community' && item.subdomains != null
-                    ? ` · ${item.subdomains} sous-domaine${item.subdomains === 1 ? '' : 's'}`
-                    : ''}
-                </span>
-              </button>
-            ))}
+            {showingDomains ? (
+              /* ── Hiérarchie L2 → L1 en accordéon ─────────────────────────── */
+              hierarchy.map(domain => (
+                <div key={domain.id}>
+                  <div style={{
+                    display: 'flex', alignItems: 'center', gap: 4,
+                    padding: '8px 10px 8px 12px',
+                    borderBottom: `1px solid ${T.border}`,
+                    background: selectedId === domain.id ? T.azureSoft : 'transparent',
+                  }}>
+                    <button
+                      onClick={() => setExpandedDomainIds(prev => {
+                        const next = new Set(prev);
+                        if (next.has(domain.id)) next.delete(domain.id); else next.add(domain.id);
+                        return next;
+                      })}
+                      style={{
+                        display: 'flex', alignItems: 'center', gap: 6,
+                        flex: 1, minWidth: 0, textAlign: 'left',
+                        background: 'none', border: 'none', cursor: 'pointer', padding: 0,
+                      }}
+                    >
+                      <span style={{ fontSize: 11, color: T.muted, width: 10, flexShrink: 0, userSelect: 'none' }}>
+                        {expandedDomainIds.has(domain.id) ? '▾' : '▸'}
+                      </span>
+                      <span style={{ width: 9, height: 9, borderRadius: 2, background: COMMUNITY_COLORS[2] ?? '#bdbdbd', flexShrink: 0 }} />
+                      <span style={{ fontSize: 12.5, fontWeight: 600, color: T.ink, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1 }}>
+                        {domain.nom}
+                      </span>
+                      <span style={{ fontSize: 10.5, color: T.muted, flexShrink: 0, marginLeft: 4 }}>
+                        {domain.subdomains.length}
+                      </span>
+                    </button>
+                    <button
+                      onClick={() => loadCommunitySubgraph(domain.id)}
+                      title="Charger ce domaine dans le canvas"
+                      style={{
+                        flexShrink: 0, height: 22, padding: '0 8px',
+                        borderRadius: T.radiusPill,
+                        border: `1px solid ${T.azureBorder}`,
+                        background: T.azureSoft, color: T.azureInk,
+                        fontSize: 11, fontWeight: 600, cursor: 'pointer', whiteSpace: 'nowrap',
+                      }}
+                    >
+                      Charger
+                    </button>
+                  </div>
+                  {expandedDomainIds.has(domain.id) && domain.subdomains.map(sub => (
+                    <div
+                      key={sub.id}
+                      style={{
+                        display: 'flex', alignItems: 'center', gap: 4,
+                        padding: '6px 10px 6px 30px',
+                        borderBottom: `1px solid ${T.border}`,
+                        background: selectedId === sub.id ? T.azureSoft : 'transparent',
+                      }}
+                      onMouseEnter={e => { if (selectedId !== sub.id) e.currentTarget.style.background = T.panel; }}
+                      onMouseLeave={e => { if (selectedId !== sub.id) e.currentTarget.style.background = 'transparent'; }}
+                    >
+                      <button
+                        onClick={() => handleResultClick(sub)}
+                        style={{
+                          display: 'flex', alignItems: 'center', gap: 6,
+                          flex: 1, minWidth: 0, textAlign: 'left',
+                          background: 'none', border: 'none', cursor: 'pointer', padding: 0,
+                        }}
+                      >
+                        <span style={{ width: 7, height: 7, borderRadius: 1, background: COMMUNITY_COLORS[1] ?? '#bdbdbd', flexShrink: 0 }} />
+                        <span style={{ fontSize: 12, color: T.ink, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1 }}>
+                          {sub.nom}
+                        </span>
+                        <span style={{ fontSize: 10.5, color: T.muted, flexShrink: 0, marginLeft: 4 }}>
+                          {sub.entity_count}
+                        </span>
+                      </button>
+                      <button
+                        onClick={() => loadCommunitySubgraph(sub.id)}
+                        title="Charger ce sous-domaine dans le canvas"
+                        style={{
+                          flexShrink: 0, height: 20, padding: '0 7px',
+                          borderRadius: T.radiusPill,
+                          border: `1px solid ${T.border}`,
+                          background: T.white, color: T.sub,
+                          fontSize: 10.5, fontWeight: 500, cursor: 'pointer', whiteSpace: 'nowrap',
+                        }}
+                      >
+                        Charger
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              ))
+            ) : (
+              /* ── Résultats de recherche ────────────────────────────────────── */
+              searchResults.map(item => (
+                <button
+                  key={item.id}
+                  onClick={() => handleResultClick(item)}
+                  style={{
+                    display: 'flex', flexDirection: 'column', gap: 2,
+                    width: '100%', textAlign: 'left', padding: '10px 14px',
+                    border: 'none', borderBottom: `1px solid ${T.border}`,
+                    background: selectedId === item.id ? T.azureSoft : 'transparent',
+                    cursor: 'pointer',
+                  }}
+                  onMouseEnter={e => { if (selectedId !== item.id) e.currentTarget.style.background = T.panel; }}
+                  onMouseLeave={e => { if (selectedId !== item.id) e.currentTarget.style.background = 'transparent'; }}
+                >
+                  <span style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12.5, fontWeight: 600, color: T.ink }}>
+                    <span style={{
+                      width: 9, height: 9, borderRadius: item.kind === 'community' ? 2 : '50%', flexShrink: 0,
+                      background: item.kind === 'entity' ? (ENTITY_COLORS[item.type] ?? '#9e9e9e') : (COMMUNITY_COLORS[item.level] ?? '#bdbdbd'),
+                    }} />
+                    <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{item.nom}</span>
+                  </span>
+                  <span style={{ fontSize: 11, color: T.muted }}>
+                    {item.kind === 'entity'
+                      ? (ENTITY_TYPE_LABELS[item.type] ?? item.type)
+                      : (COMMUNITY_LEVEL_LABELS[item.level] ?? `Communauté niveau ${item.level}`)}
+                    {item.kind === 'community' && item.subdomains != null
+                      ? ` · ${item.subdomains} sous-domaine${item.subdomains === 1 ? '' : 's'}`
+                      : ''}
+                  </span>
+                </button>
+              ))
+            )}
           </div>
         )}
 
@@ -1514,6 +1881,8 @@ const LegacyKbPage = ({ apiFetch }) => {
               onClose={() => setContextMenu(null)}
             />
           )}
+
+          <LegacyKbChat apiFetch={apiFetch} onGraphAction={handleGraphAction} />
         </div>
 
         {selectedId && (
