@@ -1,6 +1,6 @@
 # NotebookLM Azure
 
-Agent RAG (Retrieval-Augmented Generation) à interface conversationnelle, inspiré de NotebookLM. Indexez vos documents dans Azure AI Search, posez des questions en langage naturel, obtenez des réponses sourcées avec citations cliquables. Inclut une vue **Legacy KB** pour explorer le graphe GraphRAG de référence de l'application mainframe CardDemo.
+Agent RAG (Retrieval-Augmented Generation) à interface conversationnelle, inspiré de NotebookLM. Indexez vos documents dans Azure AI Search, posez des questions en langage naturel, obtenez des réponses sourcées avec citations cliquables. Inclut une vue **Legacy KB** pour explorer le graphe GraphRAG de l'application mainframe CardDemo.
 
 ---
 
@@ -9,8 +9,8 @@ Agent RAG (Retrieval-Augmented Generation) à interface conversationnelle, inspi
 | Document | Contenu |
 |---|---|
 | [README.md](README.md) (ce fichier) | Quick start, installation, utilisation |
-| [ARCHITECTURE.md](ARCHITECTURE.md) | Dossier d'architecture complet — fonctionnel, technique, sécurité, spécifications par fonctionnalité (F1-F7) |
-| [GUIDE-DEPLOIEMENT.md](GUIDE-DEPLOIEMENT.md) | Déploiement pas-à-pas sur Azure (infra Bicep, App Service, Docker) |
+| [ARCHITECTURE.md](ARCHITECTURE.md) | Dossier d'architecture complet — fonctionnel, technique, sécurité, spécifications F1-F7 |
+| [GUIDE-DEPLOIEMENT.md](GUIDE-DEPLOIEMENT.md) | Déploiement Azure via `deploy.ps1` — paramètres, phases, post-déploiement, teardown |
 | [docs/specs/](docs/specs/) | Spécifications produit détaillées (SDD) |
 
 ---
@@ -25,13 +25,13 @@ cd notebooklm-azure
 
 az login
 
-# Setup complet (~15 min — provisionne Azure + configure l'environnement local)
+# Déploiement complet (~15 min : provisionne Azure + build Docker + configure l'environnement local)
 .\deploy.ps1
 
 # Sur poste avec proxy d'entreprise (Zscaler, Forcepoint…)
 .\deploy.ps1 -SkipSSL
 
-# Lancer l'interface
+# Lancer l'interface en développement local
 .\start-dev.ps1
 ```
 
@@ -44,13 +44,13 @@ L'interface s'ouvre automatiquement sur `http://127.0.0.1:8000`.
 ## Fonctionnalités
 
 - **Ingestion multi-format** : PDF (OCR Azure Document Intelligence), Word, PowerPoint, Excel, Markdown, texte brut, code source
-- **Recherche vectorielle** : embeddings `text-embedding-3-large` dans Azure AI Search
+- **Recherche vectorielle** : embeddings `text-embedding-3-large` dans Azure AI Search (recherche hybride BM25 + sémantique avec Reciprocal Rank Fusion)
 - **Réponses sourcées** : citations `[1]` cliquables ouvrant le passage exact du document
 - **3 modes de recherche** : Rapide (5 chunks), Standard (10), Approfondi (20)
 - **Rail sources** : liste des documents indexés, prévisualisation des chunks, suppression de l'index
 - **Rail notes** : enregistrement des réponses de l'agent, indexation d'une note comme source
 - **Interface redimensionnable** : les deux rails sont redimensionnables par glisser-déposer
-- **Legacy KB** : vue graphe (React Flow/dagre) du dump GraphRAG `neo4j-legacykb` — exploration par domaine fonctionnel, recherche, recentrage et redisposition de la vue sur un nœud — voir `ARCHITECTURE.md` §F7
+- **Legacy KB** : vue graphe (React Flow/dagre) du dump GraphRAG `neo4j-legacykb` — exploration par domaine fonctionnel, recherche, recentrage et redisposition sur un nœud
 - **Tool-calling Legacy KB dans le Chat** : GPT-4o interroge directement `neo4j-legacykb` pour répondre aux questions sur l'application CardDemo (programmes, copybooks, batch jobs, domaines fonctionnels)
 
 ---
@@ -60,96 +60,50 @@ L'interface s'ouvre automatiquement sur `http://127.0.0.1:8000`.
 ```
 ┌──────────────────────────────────────────────────────────────────┐
 │  Navigateur                                                       │
-│  React (Babel standalone) — servi statiquement par API            │
+│  React 18 (Babel standalone) — servi statiquement par l'API      │
 │  Vue Chat : SourcesRail │ ChatPanel │ NotesRail                   │
 │  Vue Legacy KB : LegacyKbPage (React Flow + dagre)                │
 └─────────────────────────┬────────────────────────────────────────┘
-                          │ HTTP
+                          │ HTTP  (API Key : X-API-Key header)
 ┌─────────────────────────▼────────────────────────────────────────┐
-│  FastAPI (Python 3.11)                                            │
-│  POST /api/chat (+ tools legacykb_*)  GET/DELETE /api/sources      │
+│  FastAPI (Python 3.11) — Azure App Service for Containers         │
+│  POST /api/chat (+ tools legacykb_*)  GET/DELETE /api/sources     │
 │  POST /api/ingest         GET /api/ingest/{job_id}                │
-│  GET /api/legacykb/*  (health, stats, domains, search, neighbors)│
-└──────┬───────────────────────┬──────────────────┬────────────────┘
-       │                       │                  │
-┌──────▼──────┐    ┌──────────▼──────────┐  ┌───▼────────────────────────┐
-│ Azure OpenAI│    │ Azure AI Search      │  │ Neo4j AuraDB                 │
-│ GPT-4o      │    │ Index vectoriel      │  │ neo4j-legacykb               │
-│ Embeddings  │    │ notebooklm-chunks    │  │  :Entity · :Community         │
-└─────────────┘    └─────────────────────┘  │  (golden source CardDemo,     │
-                            ▲                │   lecture seule)              │
-              ┌─────────────┘                └────────────────────────────────┘
-┌─────────────┴───────────────────────────┐
-│  Azure Document Intelligence             │
-│  OCR et extraction layout PDF            │
-└─────────────────────────────────────────┘
+│  GET /api/legacykb/*  (health, stats, domains, search, neighbors) │
+└──────┬─────────────────────┬──────────────────┬──────────────────┘
+       │                     │                  │
+┌──────▼──────┐  ┌──────────▼──────────┐  ┌────▼──────────────────┐
+│ Azure OpenAI│  │ Azure AI Search      │  │ neo4j-legacykb         │
+│ GPT-4o      │  │ Index vectoriel      │  │ Azure Container Inst.  │
+│ Embeddings  │  │ notebooklm-chunks    │  │ Golden source CardDemo  │
+└─────────────┘  └──────────┬──────────┘  └───────────────────────┘
+                             │
+               ┌─────────────┘
+┌──────────────▼──────────────────┐   ┌───────────────────────────┐
+│ Azure Document Intelligence      │   │ Azure Key Vault            │
+│ OCR et extraction layout PDF     │   │ Secrets API + endpoints    │
+└──────────────────────────────────┘   └───────────────────────────┘
 ```
+
+**Authentification** : Managed Identity en production (zéro clé dans le code). `DefaultAzureCredential` / `az login` en local.
 
 ---
 
 ## Prérequis
 
-- Python 3.11+
-- Azure CLI (`az login` pour l'authentification locale)
-- Ressources Azure provisionnées :
-  - Azure OpenAI (déploiements `gpt-4o` + `text-embedding-3-large`)
-  - Azure AI Search
-  - Azure Document Intelligence
+- [Azure CLI](https://aka.ms/installazurecliwindows) 2.60+
+- [Python 3.11+](https://python.org/downloads)
+- Une subscription Azure avec droits de créer des ressources
+
+> Docker **n'est pas requis** en local — `deploy.ps1` utilise `az acr build` pour construire l'image directement dans Azure Container Registry.
 
 ---
 
-## Installation
+## Développement local
 
-### 1. Cloner le repo
+### Après un premier déploiement (`deploy.ps1`)
 
-```bash
-git clone https://github.com/vgicquiau/notebooklm-azure.git
-cd notebooklm-azure
-```
-
-### 2. Créer et activer le virtualenv
-
-```powershell
-python -m venv api/.venv
-api\.venv\Scripts\activate
-```
-
-### 3. Installer les dépendances
-
-```powershell
-pip install -r api/requirements.txt
-pip install -r ingest/requirements.txt
-```
-
-### 4. Configurer les variables d'environnement
-
-```powershell
-cp .env.example .env
-# Éditer .env avec vos endpoints Azure
-```
-
-Variables requises :
-
-| Variable | Description |
-|----------|-------------|
-| `AZURE_OPENAI_ENDPOINT` | Endpoint Azure OpenAI |
-| `AZURE_OPENAI_GPT4O_DEPLOYMENT` | Nom du déploiement GPT-4o |
-| `AZURE_OPENAI_EMBEDDING_DEPLOYMENT` | Nom du déploiement d'embeddings |
-| `AZURE_SEARCH_ENDPOINT` | Endpoint Azure AI Search |
-| `AZURE_DOCINT_ENDPOINT` | Endpoint Azure Document Intelligence |
-| `API_KEY` | Clé d'authentification (optionnelle en local) |
-| `NEO4J_LEGACYKB_URI` | URI Neo4j AuraDB de `neo4j-legacykb` (défaut fourni — golden source CardDemo, lecture seule) |
-| `NEO4J_LEGACYKB_PASSWORD` | Mot de passe Neo4j de `neo4j-legacykb` (pas de défaut, requis pour la vue Legacy KB et le tool-calling) |
-
-### 5. Authentification Azure
-
-```bash
-az login
-```
-
----
-
-## Lancement
+`deploy.ps1` crée automatiquement le fichier `.env` et le virtualenv. Pour démarrer :
 
 ```powershell
 .\start-dev.ps1
@@ -157,7 +111,46 @@ az login
 
 Ou via VS Code : **Ctrl+Shift+B** (tâche `Start NotebookLM Dev`).
 
-L'interface s'ouvre automatiquement sur `http://127.0.0.1:8000`.
+### Installation manuelle (sans passer par deploy.ps1)
+
+```powershell
+# 1. Cloner
+git clone https://github.com/vgicquiau/notebooklm-azure.git
+cd notebooklm-azure
+
+# 2. Créer le virtualenv et installer les dépendances
+python -m venv api/.venv
+api\.venv\Scripts\pip install -r api/requirements.txt -r ingest/requirements.txt
+
+# 3. Configurer les variables d'environnement
+Copy-Item .env.example .env
+# Éditer .env avec vos endpoints Azure
+
+# 4. S'authentifier sur Azure
+az login
+
+# 5. Lancer le serveur
+.\start-dev.ps1
+```
+
+### Variables d'environnement
+
+Le fichier `.env` (généré par `deploy.ps1` ou copié depuis `.env.example`) doit contenir :
+
+| Variable | Description | Obligatoire |
+|----------|-------------|-------------|
+| `AZURE_OPENAI_ENDPOINT` | Endpoint Azure OpenAI | Oui |
+| `AZURE_OPENAI_GPT4O_DEPLOYMENT` | Nom du déploiement GPT-4o | Oui |
+| `AZURE_OPENAI_EMBEDDING_DEPLOYMENT` | Nom du déploiement d'embeddings | Oui |
+| `AZURE_SEARCH_ENDPOINT` | Endpoint Azure AI Search | Oui |
+| `AZURE_DOCINT_ENDPOINT` | Endpoint Azure Document Intelligence | Oui |
+| `AZURE_STORAGE_ACCOUNT_NAME` | Nom du compte de stockage | Oui |
+| `API_KEY` | Clé d'authentification pour les endpoints `/api/*` | Recommandé en prod |
+| `NEO4J_LEGACYKB_URI` | URI `bolt://` ou `bolt+s://` du conteneur neo4j-legacykb | Pour la vue Legacy KB |
+| `NEO4J_LEGACYKB_PASSWORD` | Mot de passe neo4j | Pour la vue Legacy KB |
+| `CORS_ALLOWED_ORIGINS` | Origines CORS autorisées (virgule-séparées) | Si frontend sur domaine différent |
+
+En production, tous les secrets (`API_KEY`, endpoints, mot de passe neo4j) sont lus depuis **Azure Key Vault** via Managed Identity — le `.env` de prod ne contient pas de secrets.
 
 ---
 
@@ -165,9 +158,16 @@ L'interface s'ouvre automatiquement sur `http://127.0.0.1:8000`.
 
 ### Indexer des documents
 
-1. Cliquer sur **Ajouter un document** dans le rail gauche
+**Mode UI (recommandé) :**
+1. Cliquer sur **Ajouter un document** dans la barre supérieure
 2. Sélectionner un fichier (PDF, DOCX, PPTX, XLSX, Markdown, TXT, code source…)
-3. L'ingestion se déroule en arrière-plan — la progression s'affiche dans le rail
+3. L'ingestion se déroule en arrière-plan — un toast de progression s'affiche
+
+**Mode CLI (lot de documents) :**
+```powershell
+# Depuis la racine du projet, venv activé
+python -m ingest.ingest --docs-dir documents/
+```
 
 Formats supportés :
 
@@ -191,60 +191,68 @@ Tapez votre question dans la zone de saisie. Les citations `[1]`, `[2]`… dans 
 
 ### Notes
 
-Les réponses de l'agent peuvent être sauvegardées comme notes (bouton **Enregistrer** sous chaque réponse). Une note peut ensuite être indexée comme source via l'icône dans le rail droit.
+Les réponses de l'agent peuvent être sauvegardées comme notes (bouton **Enregistrer** sous chaque réponse). Une note peut ensuite être indexée comme source via le rail droit, ou injectée dans le contexte de la prochaine question.
+
+### Vue Legacy KB
+
+Accessible via le menu en haut de page. Explore le graphe neo4j-legacykb (dump GraphRAG de l'application mainframe CardDemo) :
+- Recherche de nœuds par nom ou domaine fonctionnel
+- Visualisation des relations (React Flow + dagre)
+- Recentrage et redisposition sur un nœud sélectionné
+- Tool-calling depuis le chat : GPT-4o peut requêter le graphe directement
 
 ---
 
 ## Structure des sources
 
 ```
-api/
-├── main.py            # FastAPI app, middlewares sécurité, lifespan
-├── routers/
-│   ├── chat.py        # Endpoint de conversation
-│   ├── ingest.py      # Ingestion asynchrone avec polling
-│   ├── legacykb.py    # Lecture neo4j-legacykb (golden source CardDemo)
-│   └── sources.py     # CRUD sources dans l'index
-└── services/
-    ├── retriever.py       # Recherche vectorielle
-    ├── generator.py       # Génération RAG (+ tools legacykb)
-    ├── graph_tools.py      # Tools function-calling Chat → legacykb_*
-    └── legacykb_client.py # Client Neo4j pour neo4j-legacykb
-
-ingest/
-├── chunkers/          # Un chunker par format de fichier
-├── embedder.py        # Génération d'embeddings par batch
-└── indexer.py         # Upload dans Azure AI Search
-
-frontend/
-├── index.html          # Chargement ordonné des composants
-├── vendor/              # Dépendances JS vendorisées (React, Babel, Mermaid, xyflow, dagre…)
-└── src/                 # Composants React (JSX transpilé in-browser)
-    ├── LegacyKbPage.jsx # Vue Legacy KB (React Flow + dagre)
-    └── ...              # Chat : Header, SourcesRail, ChatPanel, NotesRail, App
-
-azure-functions/        # fn-adgm-graph/fn-adgm-ingest — non consommés par l'app
-                         # depuis le retrait du graphe ADG-M (2026-06-13), conservés au repos
-
-doc-archimind/           # Corpus de référence (architecture mainframe CardDemo)
-docs/
-├── specs/               # Spécifications produit (SDD_*, plans, audits)
-└── archive/sprint0/     # Scripts du bootstrap initial (superseded)
+notebooklm-azure/
+├── api/
+│   ├── main.py                 # FastAPI app, middlewares, lifespan (Key Vault → env)
+│   ├── routers/
+│   │   ├── chat.py             # POST /api/chat (+ tool-calling legacy KB)
+│   │   ├── ingest.py           # POST /api/ingest, GET /api/ingest/{job_id}
+│   │   ├── legacykb.py         # GET /api/legacykb/* (golden source CardDemo)
+│   │   └── sources.py          # GET/DELETE /api/sources
+│   └── services/
+│       ├── retriever.py        # Recherche vectorielle Azure AI Search
+│       ├── generator.py        # Génération RAG (GPT-4o + tools)
+│       ├── graph_tools.py      # Tools function-calling → legacykb_*
+│       └── legacykb_client.py  # Client Neo4j
+├── ingest/
+│   ├── chunkers/               # Un chunker par format (PDF, DOCX, PPTX, XLSX, MD, TXT)
+│   ├── embedder.py             # Génération d'embeddings par batch
+│   └── indexer.py              # Upload dans Azure AI Search
+├── frontend/
+│   ├── index.html              # Chargement ordonné des composants
+│   ├── vendor/                 # Dépendances JS vendorisées (React, Babel, xyflow, dagre…)
+│   └── src/                    # Composants React (JSX transpilé in-browser)
+├── infra/
+│   ├── main.bicep              # Orchestration, rôles IAM, secrets Key Vault
+│   ├── main.parameters.json    # Paramètres de déploiement (non commité)
+│   └── modules/                # containerapp, openai, search, keyvault, neo4j-legacykb…
+├── deploy.ps1                  # Déploiement complet en 8 phases
+├── teardown.ps1                # Suppression de toutes les ressources Azure
+├── start-dev.ps1               # Lancement du serveur de développement local
+├── azure-functions/            # fn-adgm-graph / fn-adgm-ingest — conservés au repos
+│                               # (retrait du graphe ADG-M le 2026-06-13)
+├── doc-archimind/              # Corpus de référence CardDemo (architecture mainframe)
+└── docs/
+    ├── specs/                  # Spécifications produit (SDD_*, plans, audits)
+    └── archive/sprint0/        # Scripts du bootstrap initial (superseded)
 ```
 
 ---
 
 ## Mise à jour
 
-Pour récupérer les dernières évolutions du projet :
-
 ```powershell
 git pull --rebase
-# Redémarrer le serveur si des fichiers Python ont changé
+# Redémarrer si des fichiers Python ont changé
 .\start-dev.ps1
 ```
 
-Si les dépendances Python ont changé (nouveau `requirements.txt`) :
+Si les dépendances Python ont changé :
 
 ```powershell
 api\.venv\Scripts\pip install -r api\requirements.txt -r ingest\requirements.txt
@@ -265,6 +273,17 @@ gh pr create
 
 ---
 
-## Déploiement
+## Déploiement et teardown
 
-Le dossier `infra/` contient les templates Bicep pour déployer l'ensemble sur Azure Container Apps avec Managed Identity. Voir [GUIDE-DEPLOIEMENT.md](GUIDE-DEPLOIEMENT.md).
+Voir **[GUIDE-DEPLOIEMENT.md](GUIDE-DEPLOIEMENT.md)** pour le détail complet.
+
+```powershell
+# Déployer (crée ou met à jour toutes les ressources Azure)
+.\deploy.ps1 -SkipSSL          # avec proxy d'entreprise
+.\deploy.ps1 -ImageOnly        # rebuild l'image Docker uniquement
+.\deploy.ps1 -Neo4jUri "bolt+s://mon-neo4j:7687"  # neo4j externe existant
+
+# Supprimer toutes les ressources Azure
+.\teardown.ps1
+.\teardown.ps1 -ResourceGroup rg-mon-rg-custom   # nom de RG personnalisé
+```
