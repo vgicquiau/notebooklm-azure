@@ -3,7 +3,7 @@
 > **Projet** : Agent documentaire RAG sur Azure  
 > **Auteur** : Vincent Gicquiau — Lead Solution Architect  
 > **Date** : Juin 2026  
-> **Version** : 1.0
+> **Version** : 1.1
 
 ---
 
@@ -423,17 +423,20 @@ App
 
 ## 7. Sécurité et identité
 
-### Principe : zéro clé d'API dans le code
+### Principe : zéro secret dans le code ou les images Docker
 
-**Aucune clé secrète n'est stockée dans le code ou les variables d'environnement de production.** L'authentification repose intégralement sur Azure Managed Identity et Azure Key Vault.
+**Aucune clé secrète n'est stockée dans le code, les images Docker, ni les variables d'environnement de production.** Deux couches de sécurité coexistent :
+
+1. **Authentification inter-services Azure** : Managed Identity — zéro clé d'API Azure dans le code
+2. **Authentification client → API** : clé partagée `API_KEY` stockée dans Key Vault, chargée au démarrage
 
 ### Architecture d'identité
 
 ```mermaid
 flowchart TD
     subgraph identites["Identités"]
-        MI[User-Assigned Managed Identity\nid-api-nlmazure-prod\nPrincipalId: 10a7d393...]
-        DEV[Identité développeur\nEntra ID\nv.gicquiau@groupeonepoint.com]
+        MI[User-Assigned Managed Identity\nid-api-<suffix>\nApp Service → Azure services]
+        DEV[Identité développeur\nEntra ID / az login]
     end
 
     subgraph roles_mi["Rôles de la Managed Identity"]
@@ -470,9 +473,36 @@ En local, le SDK Azure utilise `DefaultAzureCredential` qui essaie les providers
 3. `AzureCliCredential` ✅ — token `az login` — **utilisé en local**
 4. En production (App Service) : `ManagedIdentityCredential` ✅ via `AZURE_CLIENT_ID`
 
+### Chargement des secrets depuis Key Vault (lifespan)
+
+Au démarrage de l'API (lifespan FastAPI), `_load_secrets_from_keyvault()` charge les secrets Key Vault dans les variables d'environnement du processus :
+
+| Secret Key Vault | Variable d'environnement |
+|------------------|--------------------------|
+| `openai-endpoint` | `AZURE_OPENAI_ENDPOINT` |
+| `search-endpoint` | `AZURE_SEARCH_ENDPOINT` |
+| `docint-endpoint` | `AZURE_DOCINT_ENDPOINT` |
+| `storage-account-name` | `AZURE_STORAGE_ACCOUNT_NAME` |
+| `neo4j-legacykb-password` | `NEO4J_LEGACYKB_PASSWORD` |
+| `api-key` | `API_KEY` |
+
+Ce chargement ne se déclenche que si `AZURE_KEYVAULT_URI` est défini (injecté par Bicep dans les `appSettings` de l'App Service). En local, les variables sont lues directement depuis `.env`.
+
+### Authentification client → API (`APIKeyMiddleware`)
+
+Tous les endpoints `/api/*` sont protégés par une clé partagée. Le middleware lit `API_KEY` **lazily** à chaque requête (pas à l'initialisation), ce qui garantit que la valeur chargée depuis Key Vault au startup est bien utilisée.
+
+- Header accepté : `X-API-Key: <key>` ou `Authorization: Bearer <key>`
+- Si `API_KEY` est vide : accès libre (mode développement local non configuré)
+- Routes exclues : `/health`, `/api/config` (probe et config publique du frontend)
+
 ### Contrôle d'accès Azure OpenAI
 
-`disableLocalAuth: true` est configuré sur le compte Azure OpenAI — les clés d'API sont désactivées au niveau du service. Seule l'authentification Entra ID (tokens Bearer) est acceptée.
+`disableLocalAuth: true` est configuré sur le compte Azure OpenAI — les clés d'API Azure sont désactivées au niveau du service. Seule l'authentification Entra ID (tokens Bearer) est acceptée.
+
+### Isolation des secrets dans l'image Docker
+
+Le fichier `.dockerignore` exclut `**/.env` du contexte de build. L'image ne contient donc aucun secret. En production, les variables d'environnement proviennent exclusivement de l'`appSettings` de l'App Service (injecté par Bicep) et de Key Vault (chargé au startup).
 
 ---
 
@@ -480,20 +510,23 @@ En local, le SDK Azure utilise `DefaultAzureCredential` qui essaie les providers
 
 ### Ressources déployées
 
-Toutes les ressources appartiennent au resource group `rg-sp4-d-vgi-azu-vgi-sandbox-txt`, région `France Central`, convention de nommage `{type}-{projet}-{env}`.
+Convention de nommage : `{type}-{projectName}-{env}`. Région par défaut : `swedencentral`.
 
-| Ressource | Nom | SKU/Tier | Rôle |
+| Ressource | Nom (exemple `nlmavgi-prod`) | SKU/Tier | Rôle |
 |---|---|---|---|
-| Azure OpenAI | `oai-nlmazure-prod` | S0 | Embeddings (text-embedding-3-large) + Chat (gpt-4o) |
-| Azure AI Search | `srch-nlmazure-prod` | Standard S1 | Index vectoriel + BM25 + Semantic Ranker |
-| Azure Document Intelligence | `docint-nlmazure-prod` | S0 | Extraction et analyse structurelle des PDF |
-| Azure Key Vault | `kv-nlmazure-prod` | Standard | Stockage des endpoints et secrets |
-| Azure Container Registry | `nlmazureprod` | Basic | Stockage des images Docker de l'API |
-| App Service Plan | `asp-nlmazure-prod` | B2 Linux | Hébergement du plan App Service |
-| App Service | `app-api-nlmazure-prod` | (B2) | API FastAPI + frontend servi en conteneur Docker |
-| Blob Storage | `stnlmazureprod` | Standard LRS | Stockage des documents sources |
-| Application Insights | `appi-nlmazure-prod` | — | Monitoring, traces, logs de l'application |
-| Managed Identity | `id-api-nlmazure-prod` | User-Assigned | Identité de l'App Service pour tous les appels Azure |
+| Azure OpenAI | `oai-nlmavgi-prod` | S0 | Embeddings (text-embedding-3-large) + Chat (gpt-4o) |
+| Azure AI Search | `srch-nlmavgi-prod` | Standard S1 | Index vectoriel + BM25 + Semantic Ranker |
+| Azure Document Intelligence | `di-nlmavgi-prod` | S0 | Extraction et analyse structurelle des PDF |
+| Azure Key Vault | `kv-nlmavgi-prod` | Standard | Secrets (endpoints, api-key, neo4j-password) |
+| Azure Container Registry | `acrnlmavgiprod` | Basic | Images Docker de l'API |
+| App Service Plan | `asp-nlmavgi-prod` | B2 Linux | Plan hébergement App Service |
+| App Service | `app-api-nlmavgi-prod` | (B2) | API FastAPI + frontend servi en conteneur Docker |
+| Blob Storage | `stnlmavgiprod` | Standard LRS | Documents sources |
+| Application Insights | `appi-nlmavgi-prod` | — | Monitoring, traces, logs |
+| Managed Identity | `id-api-nlmavgi-prod` | User-Assigned | Identité de l'App Service pour les appels Azure |
+| ACI neo4j-legacykb | `neo4j-legacykb-nlmavgi` | (ACI) | Base graphe GraphRAG CardDemo (golden source) |
+
+> L'ACI neo4j-legacykb est déployé conditionnellement (`deployLegacyKb=true`). Si une instance externe est fournie via `-Neo4jUri`, l'ACI n'est pas créé.
 
 ### Déploiements Azure OpenAI
 
@@ -506,24 +539,49 @@ Toutes les ressources appartiennent au resource group `rg-sp4-d-vgi-azu-vgi-sand
 
 ```
 infra/
-├── main.bicep                  — orchestration, role assignments, secrets KV
+├── main.bicep                  — orchestration, params, rôles IAM, secrets KV
+├── main.parameters.json        — valeurs par défaut (non commité en prod)
 └── modules/
-    ├── containerapp.bicep      — App Service + Managed Identity + ACR Pull
-    ├── openai.bicep            — Azure OpenAI + 2 déploiements
+    ├── containerapp.bicep      — App Service + UAMI + appSettings (KV URI, neo4j URI…)
+    ├── openai.bicep            — Azure OpenAI + déploiements GPT-4o + Embeddings
     ├── search.bicep            — Azure AI Search S1 + semantic search
-    ├── keyvault.bicep          — Key Vault + accès déployeur
+    ├── keyvault.bicep          — Key Vault RBAC + accès déployeur
+    ├── neo4j-legacykb.bicep    — ACI neo4j (déploiement conditionnel)
     ├── docint.bicep            — Document Intelligence
     ├── storage.bicep           — Blob Storage
     ├── registry.bicep          — Container Registry
-    └── monitoring.bicep        — Application Insights
+    └── monitoring.bicep        — Application Insights + Log Analytics
 ```
 
-**Commande de déploiement :**
+**Paramètres Bicep principaux :**
+
+| Paramètre | Défaut | Description |
+|-----------|--------|-------------|
+| `projectName` | `nlmazure` | Préfixe de nommage (3-8 chars lowercase) |
+| `environment` | `prod` | Suffixe d'environnement |
+| `location` | région du RG | Région Azure |
+| `deployerObjectId` | *(requis)* | Object ID AAD du déployeur — droits Key Vault |
+| `apiImageTag` | placeholder | Image Docker de l'App Service |
+| `deployLegacyKb` | `true` | Crée l'ACI neo4j-legacykb |
+| `neo4jLegacyKbPassword` | `''` | Mot de passe neo4j (→ KV secret) |
+| `neo4jLegacyKbUri` | `''` | URI bolt:// externe si `deployLegacyKb=false` |
+| `apiKey` | `''` | Clé API (→ KV secret `api-key`) |
+
+**Déploiement via `deploy.ps1` (recommandé) :**
 ```powershell
-az deployment group create \
-  --resource-group rg-sp4-d-vgi-azu-vgi-sandbox-txt \
-  --template-file infra/main.bicep \
-  --parameters projectName=nlmazure environment=prod deployerObjectId=$env:DEPLOYER_OID
+.\deploy.ps1 -SkipSSL
+```
+
+**Déploiement manuel (avancé) :**
+```powershell
+$deployerObjectId = az ad signed-in-user show --query id -o tsv
+az deployment group create `
+  --resource-group rg-nlmazure-prod `
+  --template-file infra/main.bicep `
+  --parameters infra/main.parameters.json `
+              deployerObjectId=$deployerObjectId `
+              neo4jLegacyKbPassword="monMotDePasse" `
+              apiKey="maClefApi"
 ```
 
 ---
