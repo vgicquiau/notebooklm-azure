@@ -36,6 +36,16 @@ LEGACYKB_TOOL_DEFINITIONS = [
                         "type": "integer",
                         "description": "Nombre maximum de résultats (défaut 10).",
                     },
+                    "search_descriptions": {
+                        "type": "boolean",
+                        "description": (
+                            "Si true, étend la recherche aux descriptions fonctionnelles et "
+                            "techniques des programmes/copybooks/jobs et aux résumés des domaines "
+                            "fonctionnels. À activer pour les requêtes conceptuelles ("
+                            "'programmes liés à X', 'domaine traitant de Y', 'composants "
+                            "accédant à telle table') plutôt que pour une recherche par nom précis."
+                        ),
+                    },
                 },
                 "required": ["query"],
             },
@@ -159,7 +169,8 @@ def execute_legacykb_tool(name: str, arguments: dict) -> dict:
         if name == "legacykb_search":
             query = str(arguments.get("query", ""))
             limit = int(arguments.get("limit", 10))
-            return kb.search(query, limit)
+            search_descriptions = bool(arguments.get("search_descriptions", False))
+            return kb.search(query, limit, search_descriptions=search_descriptions)
 
         if name == "legacykb_get_entity":
             node_id = str(arguments.get("node_id", ""))

@@ -39,6 +39,9 @@ Write-Host "OK   $($seen.Count) certificat(s) Zscaler ajoute(s) au bundle CA cus
 $env:REQUESTS_CA_BUNDLE = $customBundle
 
 # ── 2-4. Creation du partage + upload + verification ───────────────────────
+# SEC-011 : utilise --auth-mode login (identité Azure CLI / Managed Identity)
+# au lieu de --account-key pour ne jamais exposer de clé de compte en clair.
+# Prérequis : rôle "Storage File Data SMB Share Contributor" sur le compte.
 $rg      = "rg-sp4-d-vgi-azu-notebook-txt"
 $storage = "stneo4jimportvgi"
 $dump    = Join-Path $ProjectRoot "docs\extract\repartition_cleaned_export.graphml"
@@ -48,19 +51,13 @@ if (-not (Test-Path $dump)) {
     exit 1
 }
 
-$key = az storage account keys list --account-name $storage -g $rg --query "[0].value" -o tsv
-if (-not $key) {
-    Write-Error "Impossible de recuperer la cle du compte de stockage $storage"
-    exit 1
-}
-
-az storage share create --name neo4j-import --account-name $storage --account-key $key --output none
+az storage share create --name neo4j-import --account-name $storage --auth-mode login --output none
 Write-Host "OK   Partage 'neo4j-import' cree (ou deja existant)" -ForegroundColor Green
 
-az storage file upload --share-name neo4j-import --account-name $storage --account-key $key `
+az storage file upload --share-name neo4j-import --account-name $storage --auth-mode login `
     --source $dump --path repartition_cleaned_export.graphml --output none
 Write-Host "OK   Dump uploade : repartition_cleaned_export.graphml" -ForegroundColor Green
 
 Write-Host ""
 Write-Host "Contenu du partage neo4j-import :" -ForegroundColor White
-az storage file list --share-name neo4j-import --account-name $storage --account-key $key -o table
+az storage file list --share-name neo4j-import --account-name $storage --auth-mode login -o table

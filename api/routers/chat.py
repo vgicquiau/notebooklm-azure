@@ -1,6 +1,8 @@
 import logging
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
+
+from api.services.rate_limiter import check_rate_limit
 
 from api.models.schemas import ChatRequest, ChatResponse, GraphAction, GraphReference, SourceReference
 from api.services import compactor, session_store
@@ -11,7 +13,7 @@ router = APIRouter()
 logger = logging.getLogger(__name__)
 
 
-@router.post("/chat", response_model=ChatResponse)
+@router.post("/chat", response_model=ChatResponse, dependencies=[Depends(check_rate_limit)])
 async def chat(request_data: ChatRequest, request: Request):
     retriever: Retriever = request.app.state.retriever
     generator: Generator = request.app.state.generator
@@ -47,13 +49,15 @@ async def chat(request_data: ChatRequest, request: Request):
         logger.exception("Erreur lors de la génération : %s", e)
         raise HTTPException(status_code=503, detail="Service de génération temporairement indisponible.")
 
+    # content tronqué à 2000 chars (SEC-009) : évite l'exfiltration du corpus
+    # complet par accumulation de réponses — suffisant pour l'affichage des citations.
     sources = [
         SourceReference(
             file=c.source_file,
             page=c.page_number,
             section=c.section,
             score=round(c.score, 4),
-            content=c.content,
+            content=c.content[:2000],
         )
         for c in chunks
     ]

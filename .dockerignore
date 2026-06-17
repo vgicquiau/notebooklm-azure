@@ -1,0 +1,27 @@
+# Secrets locaux — ne jamais packager dans l'image
+**/.env
+**/.env.local
+**/.env.*.local
+
+# Environnements virtuels Python
+**/.venv
+**/venv
+**/__pycache__
+**/*.pyc
+
+# Tests et caches
+**/.pytest_cache
+**/.mypy_cache
+**/.ruff_cache
+
+# Répertoires de développement
+documents/
+infra/
+docs/
+azure-functions/
+doc-archimind/
+*.ps1
+
+# Git
+.git
+.gitignore

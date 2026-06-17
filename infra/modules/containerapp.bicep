@@ -3,6 +3,8 @@ param location string
 param tags object
 param apiImageTag string
 param appInsightsConnectionString string
+param keyVaultUri string = ''
+param neo4jLegacyKbUri string = ''
 
 resource apiIdentity 'Microsoft.ManagedIdentity/userAssignedIdentities@2023-01-31' = {
   name: 'id-api-${suffix}'
@@ -53,20 +55,34 @@ resource api 'Microsoft.Web/sites@2023-12-01' = {
       acrUseManagedIdentityCreds: true
       acrUserManagedIdentityID: apiIdentity.properties.clientId
       alwaysOn: true
-      appSettings: [
-        {
-          name: 'AZURE_CLIENT_ID'
-          value: apiIdentity.properties.clientId
-        }
-        {
-          name: 'APPLICATIONINSIGHTS_CONNECTION_STRING'
-          value: appInsightsConnectionString
-        }
-        {
-          name: 'WEBSITES_PORT'
-          value: '8000'
-        }
-      ]
+      appSettings: concat(
+        [
+          {
+            name: 'AZURE_CLIENT_ID'
+            value: apiIdentity.properties.clientId
+          }
+          {
+            name: 'APPLICATIONINSIGHTS_CONNECTION_STRING'
+            value: appInsightsConnectionString
+          }
+          {
+            name: 'WEBSITES_PORT'
+            value: '8000'
+          }
+        ],
+        empty(keyVaultUri) ? [] : [
+          {
+            name: 'AZURE_KEYVAULT_URI'
+            value: keyVaultUri
+          }
+        ],
+        empty(neo4jLegacyKbUri) ? [] : [
+          {
+            name: 'NEO4J_LEGACYKB_URI'
+            value: neo4jLegacyKbUri
+          }
+        ]
+      )
     }
   }
   dependsOn: [roleAcrPull]

@@ -7,8 +7,9 @@ const API_BASE = window.location.origin + '/api';
 // top_k par mode (économie de tokens sur Rapide, exhaustivité sur Approfondi)
 const MODE_TOP_K = { rapide: 5, standard: 10, approfondi: 20 };
 
-// Clé API chargée depuis /api/config au démarrage — incluse dans tous les appels /api/*
-let _apiKey = '';
+// Clé API injectée par le serveur dans <meta name="nlaz-api-key"> (SEC-001).
+// Lue de façon synchrone au chargement du module — aucun fetch préliminaire nécessaire.
+let _apiKey = document.querySelector('meta[name="nlaz-api-key"]')?.content ?? '';
 const _apiFetch = (url, options = {}) => {
   const headers = { ...(options.headers || {}) };
   if (_apiKey) headers['X-API-Key'] = _apiKey;
@@ -91,19 +92,14 @@ const App = () => {
     finally { setLoadingSources(false); }
   }, []);
 
-  // Charge la clé API, puis les sources et l'historique de chat au démarrage
+  // Charge les sources et l'historique de chat au démarrage.
+  // La clé API est déjà disponible synchronement depuis le <meta> injecté (SEC-001).
   React.useEffect(() => {
-    fetch(`${API_BASE}/config`)
-      .then(r => r.json())
-      .then(cfg => { if (cfg.apiKey) _apiKey = cfg.apiKey; })
-      .catch(() => {})
-      .then(() => {
-        fetchSources();
-        return _apiFetch(`${API_BASE}/chat/history/${sessionId}`)
-          .then(r => r.ok ? r.json() : null)
-          .then(data => { if (data?.messages?.length) setMessages(data.messages); })
-          .catch(() => { /* le cache local reste affiché en cas d'échec */ });
-      });
+    fetchSources();
+    _apiFetch(`${API_BASE}/chat/history/${sessionId}`)
+      .then(r => r.ok ? r.json() : null)
+      .then(data => { if (data?.messages?.length) setMessages(data.messages); })
+      .catch(() => { /* le cache local reste affiché en cas d'échec */ });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [fetchSources]);
 
