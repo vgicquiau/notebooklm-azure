@@ -76,8 +76,10 @@
        sans largeur définie sur ce conteneur, le SVG se résout à 0x0 (taille de
        remplacement circulaire). On lui donne une taille définie (90vw/86vh) et
        on force le SVG à la remplir (!important pour passer devant le style
-       inline), le viewBox préserve le ratio. */
-    .nlaz-mermaid-zoom { padding: 24px; box-sizing: border-box; width: 90vw; height: 86vh; }
+       inline), le viewBox préserve le ratio.
+       background: white — indispensable : le thème Mermaid "neutral" génère des
+       shapes en #f5f5f5 qui seraient invisibles sur l'overlay beige de la modale. */
+    .nlaz-mermaid-zoom { padding: 24px; box-sizing: border-box; width: 90vw; height: 86vh; background: white; border-radius: 14px; box-shadow: 0 8px 40px rgba(0,0,0,0.14); }
     .nlaz-mermaid-zoom svg { width: 100% !important; height: 100% !important; max-width: none !important; max-height: none !important; }
 
     /* ── Bouton copie code Mermaid (visible au survol du diagramme) ── */

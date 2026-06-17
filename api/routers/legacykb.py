@@ -11,7 +11,7 @@ Logique Neo4j dans `api/services/legacykb_client.py` (réutilisée aussi par les
 function-calling du Chat, cf. `api/services/graph_tools.py`).
 """
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Query
 
 from api.services import legacykb_client as kb
 
@@ -55,7 +55,7 @@ def get_hierarchy():
 
 
 @router.get("/search")
-def search(q: str, limit: int = 25, types: str | None = None, descriptions: bool = False):
+def search(q: str, limit: int = Query(default=25, ge=1, le=100), types: str | None = None, descriptions: bool = False):
     """Recherche sur le nom des :Entity et le titre des :Community.
 
     `types` : liste de types d':Entity séparés par des virgules (ex. "Program,BatchJob")
@@ -70,7 +70,7 @@ def search(q: str, limit: int = 25, types: str | None = None, descriptions: bool
 
 
 @router.get("/nodes/{node_id:path}/subgraph")
-def get_community_subgraph(node_id: str, limit: int = 80):
+def get_community_subgraph(node_id: str, limit: int = Query(default=80, ge=1, le=200)):
     """Entités membres d'une communauté + relations intra-communauté (pour charger dans le canvas)."""
     try:
         return kb.get_community_subgraph(node_id, limit)
@@ -83,7 +83,7 @@ def get_community_subgraph(node_id: str, limit: int = 80):
 
 
 @router.get("/nodes/{node_id:path}/neighbors")
-def get_node_neighbors(node_id: str, limit: int = 60):
+def get_node_neighbors(node_id: str, limit: int = Query(default=60, ge=1, le=200)):
     """Voisinage direct (toutes relations) d'un nœud — pour exploration au clic dans le graphe."""
     try:
         return kb.get_node_neighbors(node_id, limit)
@@ -96,7 +96,7 @@ def get_node_neighbors(node_id: str, limit: int = 60):
 
 
 @router.get("/nodes/{node_id:path}/impact")
-def get_impact_paths(node_id: str, max_depth: int = 2, limit: int = 60):
+def get_impact_paths(node_id: str, max_depth: int = Query(default=2, ge=1, le=3), limit: int = Query(default=60, ge=1, le=200)):
     """Sous-graphe atteint depuis ce nœud via les relations structurelles ("blast radius")."""
     try:
         return kb.get_impact_paths(node_id, max_depth, limit)

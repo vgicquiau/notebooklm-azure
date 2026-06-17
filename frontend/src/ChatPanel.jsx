@@ -63,15 +63,18 @@ const MermaidZoomModal = ({ svg, onClose }) => {
 
   const toolBtn = {
     display: 'grid', placeItems: 'center', minWidth: 38, height: 38, padding: '0 12px',
-    borderRadius: 9, border: '1px solid rgba(255,255,255,0.22)', background: 'rgba(255,255,255,0.08)',
-    color: '#fff', fontFamily: T.font, fontSize: 13, fontWeight: 600, cursor: 'pointer',
+    borderRadius: 9, border: '1px solid rgba(0,0,0,0.13)', background: 'rgba(255,255,255,0.72)',
+    color: T.ink, fontFamily: T.font, fontSize: 13, fontWeight: 600, cursor: 'pointer',
+    boxShadow: '0 1px 3px rgba(0,0,0,0.08)',
   };
 
   return ReactDOM.createPortal(
     <div
       style={{
         position: 'fixed', inset: 0, zIndex: 600,
-        background: 'rgba(28,27,24,0.78)',
+        background: 'rgba(246,246,243,0.88)',
+        backdropFilter: 'blur(18px)',
+        WebkitBackdropFilter: 'blur(18px)',
         display: 'flex', flexDirection: 'column',
         animation: 'nlCiteModalIn .18s ease',
       }}
@@ -144,18 +147,31 @@ const MarkdownContent = ({ text, hasCitations, onCitationClick, highlightText })
     const blocks = container.querySelectorAll('pre > code.language-mermaid');
     blocks.forEach((codeEl, i) => {
       const pre = codeEl.parentElement;
+      // Garde synchrone : si un render async est déjà en vol pour ce bloc
+      // (re-render React pendant que mermaid.render() est pending), on ne
+      // relance pas — évite la race condition double-render / erreur Mermaid.
+      if (pre.dataset.mermaidPending) return;
+      pre.dataset.mermaidPending = '1';
       const source = codeEl.textContent;
       const id = `nlaz-mermaid-${Date.now()}-${i}`;
       mermaid.render(id, source)
         .then(({ svg }) => {
+          // Seconde ligne de défense après securityLevel:'strict' de Mermaid —
+          // purifie le SVG avant injection dans le DOM (défense en profondeur XSS).
+          const cleanSvg = DOMPurify.sanitize(svg, {
+            USE_PROFILES: { svg: true, svgFilters: true },
+            ADD_TAGS: ['foreignObject', 'style'],
+            ADD_ATTR: ['requiredExtensions', 'xmlns', 'viewBox', 'dominant-baseline',
+                       'text-anchor', 'dy', 'class', 'style'],
+          });
           const wrapper = document.createElement('div');
           wrapper.className = 'nlaz-mermaid';
-          wrapper.innerHTML = svg;
+          wrapper.innerHTML = cleanSvg;
           wrapper.title = 'Cliquer pour agrandir';
           // Les ids internes (clipPath, marqueurs, styles scopés #id) sont préfixés
           // par `id` — on les renomme pour la copie affichée dans la modale afin
           // d'éviter toute collision avec ce diagramme déjà présent dans la page.
-          const zoomSvg = svg.split(id).join(`${id}-zoom`);
+          const zoomSvg = cleanSvg.split(id).join(`${id}-zoom`);
           wrapper.addEventListener('click', () => setZoomedSvgRef.current(zoomSvg));
 
           const copyBtn = document.createElement('button');
@@ -179,10 +195,11 @@ const MarkdownContent = ({ text, hasCitations, onCitationClick, highlightText })
           pre.replaceWith(wrapper);
         })
         .catch(() => {
+          pre.dataset.mermaidPending = '';
           pre.classList.add('nlaz-mermaid-error');
         });
     });
-  });
+  }, [text, highlightText]);
 
   if (!text) return null;
 

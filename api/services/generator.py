@@ -72,17 +72,22 @@ programmes, copybooks, batch jobs, fichiers/tables, et domaines fonctionnels, av
 descriptions et leurs relations (appels entre programmes, inclusions de copybooks, accès aux
 fichiers en lecture/écriture, appartenance à un domaine fonctionnel, exécution par un job).
 
-Utilise les outils `legacykb_search`, `legacykb_get_entity` et `legacykb_get_relations` quand
-l'utilisateur mentionne un nom (même partiel) de programme/copybook/job/fichier, ou pose une
-question sur des dépendances, chaînes d'appel, accès aux données ou domaines fonctionnels du
-système CardDemo. Commence par `legacykb_search` pour retrouver l'identifiant, puis
-`legacykb_get_entity`/`legacykb_get_relations` pour le détail.
+Utilise `legacykb_search` dans deux situations :
+1. **Recherche par nom** (nom ou fragment de programme/copybook/job/fichier/domaine connu) :
+   `search_descriptions=false` (défaut). Commence par ça, puis `legacykb_get_entity`/
+   `legacykb_get_relations` pour le détail.
+2. **Recherche conceptuelle** (thème fonctionnel, type de traitement, table ou concept métier :
+   "commande", "facturation", "réassort", "TGAHA01"…) : `search_descriptions=true` pour
+   chercher dans les descriptions fonctionnelles/techniques et résumés de domaines.
+   Appelle `legacykb_search` une ou deux fois avec des variantes du terme si la première
+   requête est trop pauvre ou trop large.
 
-Si l'utilisateur est sur la vue Legacy KB et demande de **montrer/surligner/isoler** des
-éléments dans le graphe, utilise `legacykb_highlight` après les avoir identifiés. Pour une
-question d'**impact** ("qu'est-ce qui dépend de X", "que casse-t-on si on modifie X"), utilise
-`legacykb_impact_paths`. Ces deux outils pilotent directement le canvas — pas besoin de lister
-leur résultat en détail dans ta réponse texte, une courte phrase de confirmation suffit.
+Quand l'utilisateur demande de **montrer/surligner/isoler/afficher** des éléments dans le
+graphe (y compris "montre moi les programmes en lien avec X"), utilise `legacykb_highlight`
+sur tous les identifiants pertinents trouvés — même si le résultat comporte plusieurs dizaines
+de nœuds. Pour une question d'**impact** ("qu'est-ce qui dépend de X", "que casse-t-on si on
+modifie X", "blast radius"), utilise `legacykb_impact_paths`. Ces deux outils pilotent
+directement le canvas — une courte phrase de confirmation en réponse texte suffit.
 
 Quand un fait provient de cette base de connaissances, signale-le par `(base de connaissances : NOM)`
 — ne le numérote pas comme une source documentaire `[n]`."""
@@ -91,11 +96,11 @@ _LEGACYKB_TOOLS_BLOCK_RAPIDE = """
 
 ## Base de connaissances legacy (outils)
 
-Si la question porte sur un programme/copybook/job/fichier nommé du système CardDemo, ou sur ses
-dépendances/appels/accès aux données, utilise `legacykb_search` puis `legacykb_get_entity`/
-`legacykb_get_relations` pour répondre précisément. Pour montrer/surligner des éléments dans le
-graphe, utilise `legacykb_highlight` ; pour une question d'impact, `legacykb_impact_paths`.
-Signale ces faits par `(base de connaissances : NOM)`."""
+Pour toute question sur un élément nommé ou un concept/thème du système CardDemo, utilise
+`legacykb_search` (avec `search_descriptions=true` pour les recherches conceptuelles :
+"commande", "réassort", "TGAHA01"…). Pour montrer/surligner des éléments dans le graphe,
+utilise `legacykb_highlight` sur tous les identifiants trouvés. Pour une question d'impact,
+`legacykb_impact_paths`. Signale ces faits par `(base de connaissances : NOM)`."""
 
 _PROMPT_RAPIDE = """Tu es un assistant documentaire concis.
 Réponds en 2-4 phrases maximum, directement au point, sans introduction ni conclusion.
