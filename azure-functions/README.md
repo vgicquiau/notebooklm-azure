@@ -13,12 +13,21 @@ Voir [`../ADG-M_GRAPH_METHODOLOGIE.md`](../ADG-M_GRAPH_METHODOLOGIE.md) pour la 
 
 ## Prérequis
 
-- [Azure Functions Core Tools v4](https://learn.microsoft.com/azure/azure-functions/functions-run-local) (`func --version`)
-- Python 3.11
-- Une instance **Neo4j** (AuraDB ou self-hosted) accessible en Bolt
-- Une base **Azure SQL** (historique des qualifications 7R)
-- Un **Storage Account** Azure (déclencheur Blob de `fn-adgm-ingest`)
-- (optionnel, pour `fn-adgm-ingest`) un déploiement **Azure OpenAI GPT-4o**
+> Ces functions sont actuellement **au repos** (non consommées par l'application depuis le
+> retrait du graphe ADG-M, 2026-06-13) — n'installer ce qui suit que si tu repars travailler
+> spécifiquement sur ce backend.
+
+| Outil / accès | Vérifier | Installer (Windows) |
+|---|---|---|
+| **Python 3.11** | `py -3.11 --version` | `winget install --id Python.Python.3.11` — installer en plus d'une éventuelle autre version déjà présente (le launcher `py` permet de choisir) |
+| **Azure Functions Core Tools v4** | `func --version` | `winget install Microsoft.Azure.FunctionsCoreTools` ou [doc officielle](https://learn.microsoft.com/azure/azure-functions/functions-run-local) |
+| **Azure CLI** (déploiement / config appsettings) | `az --version` | `winget install --id Microsoft.AzureCLI` |
+| **cypher-shell** (init schéma Neo4j) | `cypher-shell --version` | Fourni avec Neo4j Desktop, ou [téléchargement standalone](https://neo4j.com/download-center/#shell) |
+| **sqlcmd** (init schéma Azure SQL) | `sqlcmd -?` | `winget install Microsoft.SqlServer.Cmd` ou [ODBC Driver 18 for SQL Server](https://learn.microsoft.com/sql/connect/odbc/download-odbc-driver-for-sql-server) |
+| Une instance **Neo4j** (AuraDB ou self-hosted) accessible en Bolt | — | Créer une instance AuraDB (gratuite) ou utiliser une instance existante |
+| Une base **Azure SQL** (historique des qualifications 7R) | — | Provisionner via le Portail Azure ou `az sql db create` |
+| Un **Storage Account** Azure (déclencheur Blob de `fn-adgm-ingest`) | — | Provisionner via le Portail Azure ou `az storage account create` |
+| (optionnel, pour `fn-adgm-ingest`) un déploiement **Azure OpenAI GPT-4o** | — | Provisionner une ressource Azure OpenAI avec un déploiement `gpt-4o` |
 
 ---
 
