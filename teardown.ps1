@@ -1,10 +1,13 @@
-#Requires -Version 5.1
+﻿#Requires -Version 5.1
 <#
 .SYNOPSIS
     Supprime toutes les ressources Azure NotebookLM et nettoie l'environnement local.
 
 .PARAMETER ProjectName
     Préfixe du projet utilisé lors du deploy.ps1 (défaut : nlmazure).
+
+.PARAMETER ResourceGroup
+    Nom exact du Resource Group à supprimer. Si omis, calculé comme "rg-<ProjectName>-prod".
 
 .PARAMETER Force
     Supprime sans demander confirmation.
@@ -14,13 +17,17 @@
 
 .EXAMPLE
     .\teardown.ps1 -ProjectName monprojet -Force
+
+.EXAMPLE
+    .\teardown.ps1 -ResourceGroup rg-sp4-d-vgi-azu-notebook-txt -Force
 #>
 param(
     [string]$ProjectName = "nlmazure",
+    [string]$ResourceGroup = "",
     [switch]$Force
 )
 
-$rg = "rg-$ProjectName-prod"
+$rg = if ($ResourceGroup) { $ResourceGroup } else { "rg-$ProjectName-prod" }
 
 Write-Host ""
 Write-Host "  NotebookLM Azure — Suppression" -ForegroundColor Red

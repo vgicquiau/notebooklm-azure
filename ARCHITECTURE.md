@@ -1,9 +1,9 @@
-# Dossier d'Architecture — NotebookLM Azure
+﻿# Dossier d'Architecture — NotebookLM Azure
 
 > **Projet** : Agent documentaire RAG sur Azure  
 > **Auteur** : Vincent Gicquiau — Lead Solution Architect  
 > **Date** : Juin 2026  
-> **Version** : 1.0
+> **Version** : 1.2
 
 ---
 
@@ -26,8 +26,7 @@
     - [F4 — Injection de notes dans le contexte](#f4--injection-de-notes-dans-le-contexte)
     - [F5 — Viewer de citation](#f5--viewer-de-citation)
     - [F6 — Upload de document](#f6--upload-de-document)
-    - [F7 — Graphe ADG-M](#f7--graphe-adg-m)
-    - [F8 — Module Exploration](#f8--module-exploration)
+    - [F7 — Legacy KB](#f7--legacy-kb)
 
 ---
 
@@ -137,8 +136,12 @@ flowchart LR
     end
 
     subgraph frontend["🌐 Frontend (servi par App Service)"]
-        UI[index.html · React 18 · Babel\nmarked.js · mermaid.js]
-        SRC[src/tokens.jsx · Header.jsx\nNotesRail.jsx · ChatPanel.jsx · App.jsx]
+        UI[index.html · React 18 · Babel\nmarked.js · mermaid.js · xyflow · dagre]
+        SRC[src/tokens.jsx · Header.jsx · SourcesRail.jsx\nNotesRail.jsx · ChatPanel.jsx · LegacyKbPage.jsx · App.jsx]
+    end
+
+    subgraph legacy["🗄️ neo4j-legacykb (golden source, lecture seule)"]
+        NEO[(Neo4j AuraDB\n:Entity · :Community\nGraphRAG CardDemo)]
     end
 
     I --> DI
@@ -150,6 +153,7 @@ flowchart LR
     APP --> SRCH
     APP --> KV
     APP --> APPI
+    APP -->|driver neo4j| NEO
     MI -.->|authentifie| APP
     MI -.->|authentifie| OAI
     MI -.->|authentifie| SRCH
@@ -164,6 +168,8 @@ flowchart LR
 | **Transpilation JSX** | Babel Standalone (CDN) | — |
 | **Rendu Markdown** | marked.js | 9.x |
 | **Rendu diagrammes** | mermaid.js | 11.x |
+| **Rendu graphe Legacy KB** | React Flow (`@xyflow/react`) + dagre | vendorisés en UMD |
+| **Sanitisation HTML** | DOMPurify | — |
 | **Police + design tokens** | Hanken Grotesk + objet `T` centralisé | — |
 | **Persistence client** | localStorage (notes + session_id) | — |
 | **Upload fichier** | FormData + polling SSE simplifié | — |
@@ -177,6 +183,9 @@ flowchart LR
 | **Recherche** | Azure AI Search (SDK Python) | — |
 | **Extraction PDF** | Azure Document Intelligence prebuilt-layout | — |
 | **Tokenisation** | tiktoken cl100k_base | — |
+| **Base de connaissances Legacy KB** | Neo4j AuraDB (`neo4j-legacykb`, driver Python `neo4j`) | golden source, lecture seule |
+| **Persistance des sessions** | SQLite (`api/data/chat_history.db`) | historique conversationnel durable |
+| **Rate limiting** | Fenêtre glissante 60 s, 20 req/IP en mémoire | `api/services/rate_limiter.py` |
 | **Infrastructure** | Bicep (IaC) | — |
 | **Conteneur** | Docker / App Service for Containers | — |
 | **Monitoring** | Application Insights | — |
@@ -281,10 +290,16 @@ sequenceDiagram
 | Méthode | Route | Description | Corps / Paramètres |
 |---|---|---|---|
 | `POST` | `/api/chat` | Requête RAG — génère une réponse sourcée | `{message, mode, top_k, session_id?, injected_notes[]}` |
-| `DELETE` | `/api/chat/{session_id}` | Purge l'historique d'une session | — |
-| `POST` | `/api/ingest` | Upload + lancement de l'ingestion (202) | `multipart/form-data` — champ `file` (PDF/DOCX/MD, max 50 Mo) |
+| `GET` | `/api/chat/history/{session_id}` | Ré-hydrate l'historique complet d'une session (frontend reload) | — → `{messages[], summary}` |
+| `POST` | `/api/chat/clear` | Purge l'historique d'une session | `{session_id}` |
+| `POST` | `/api/ingest` | Upload + lancement de l'ingestion (202) | `multipart/form-data` — champ `file` (PDF/DOCX/PPTX/XLSX/MD/TXT/code, max 50 Mo) |
 | `GET` | `/api/ingest/{job_id}` | Polling du statut d'un job d'ingestion | — → `{job_id, status, filename, message, chunks}` |
+| `GET` | `/api/legacykb/*` | Lecture du graphe `neo4j-legacykb` (santé, stats, domaines, recherche, voisinage) — voir F7 | — |
 | `GET` | `/health` | Health check | — → `{status: "ok"}` |
+
+### Tool-calling Legacy KB
+
+En complément de la recherche RAG dans Azure AI Search, GPT-4o dispose de trois tools function-calling (`LEGACYKB_TOOL_DEFINITIONS`, `api/services/graph_tools.py`) donnant un accès en lecture au graphe `neo4j-legacykb` : `legacykb_search`, `legacykb_get_entity`, `legacykb_get_relations`. Le modèle les invoque lui-même (`tool_choice="auto"`) lorsque la question porte sur un programme, copybook, batch job ou domaine fonctionnel CardDemo. Chaque appel de tool est tracé et renvoyé au frontend dans `ChatResponse.graph_references` pour traçabilité.
 
 ### Recherche hybride dans Azure AI Search
 
@@ -318,11 +333,18 @@ Les trois modes ajustent simultanément le comportement du LLM et la quantité d
 
 ### Mémoire conversationnelle
 
-Chaque session est identifiée par un `session_id` UUID généré côté serveur. L'historique est conservé en mémoire (dict Python) jusqu'à 40 messages (20 tours).
+Chaque session est identifiée par un `session_id` UUID généré côté serveur. L'historique est **persisté dans SQLite** (`api/data/chat_history.db`) et survit aux redémarrages de l'application. Les sessions inactives depuis plus de 24 h sont automatiquement purgées (`SESSION_TTL_SECONDS = 86 400`).
 
-À chaque requête, les **8 derniers messages** (4 tours) sont injectés dans le contexte envoyé au LLM — fenêtre glissante pour limiter la consommation de tokens tout en maintenant la cohérence conversationnelle.
+À chaque requête, tous les messages **non compactés** de la session sont envoyés au LLM. Un mécanisme de **compaction glissante** (`api/services/compactor.py`) évite la croissance illimitée du contexte :
 
-**Limite** : les sessions sont perdues au redémarrage de l'application (mémoire volatile). Pour une persistance durable, il faudrait stocker les sessions dans Azure Cosmos DB ou Redis Cache.
+- Déclenchement : dès que la session dépasse **12 tours non compactés** (24 messages)
+- Compaction : les **4 tours les plus anciens** (8 messages) sont résumés par le LLM (mode peu coûteux) et fusionnés dans `sessions.summary_text`
+- Les messages compactés restent en base (affichage UI / export) mais ne sont plus envoyés au LLM
+- Échec silencieux : la compaction est best-effort et ne bloque jamais une requête de chat
+
+L'historique complet d'une session peut être ré-hydraté par le frontend après un reload de page via `GET /api/chat/history/{session_id}`.
+
+**Rate limiting** : l'endpoint `/api/chat` est limité à **20 requêtes par IP sur 60 secondes** (fenêtre glissante en mémoire, `api/services/rate_limiter.py`). Dépassement → HTTP 429.
 
 ---
 
@@ -334,19 +356,24 @@ L'UI est une **Single Page Application React 18** servie statiquement par le mê
 
 ```
 frontend/
-├── index.html          — point d'entrée : CDN React/ReactDOM/Babel/marked/mermaid,
-│                          CSS global (design tokens, .nlaz-md, .nlaz-cite, mermaid)
+├── index.html          — point d'entrée : dépendances vendorisées (React/ReactDOM/Babel/
+│                          marked/mermaid/DOMPurify/xyflow/dagre), CSS global (design
+│                          tokens, .nlaz-md, .nlaz-cite, mermaid)
+├── vendor/             — dépendances JS vendorisées localement (SEC-008, pas de CDN)
 └── src/
-    ├── tokens.jsx      — design tokens (objet T), 16 icônes SVG (Ic.*),
-    │                      Logo, composant MarkdownContent
-    ├── Header.jsx      — bandeau supérieur : upload fichier, nouvelle conversation,
-    │                      nouvelle note
+    ├── tokens.jsx      — design tokens (objet T), icônes SVG (Ic.*), Logo,
+    │                      composant MarkdownContent
+    ├── Header.jsx      — bandeau supérieur : nouvelle conversation, bascule de vue
+    │                      (Chat / Legacy KB)
+    ├── SourcesRail.jsx — rail gauche : sources indexées, upload, suivi d'ingestion
     ├── NotesRail.jsx   — rail droit : NoteCard (hover → supprimer/épingler),
     │                      NoteModal (portal plein écran), bouton "Nouvelle note"
     ├── ChatPanel.jsx   — panneau chat : messages, saisie, ModeSelector,
     │                      CitationModal (portal), bandeau notes injectées
-    └── App.jsx         — état global, logique sendMessage/notes/ingestion,
-                           IngestToast (portal)
+    ├── LegacyKbPage.jsx — vue Legacy KB : graphe React Flow/dagre du dump
+    │                      GraphRAG `neo4j-legacykb` (golden source, lecture seule)
+    └── App.jsx         — état global, vue active (chat|legacykb), logique
+                           sendMessage/notes/ingestion, IngestToast (portal)
 ```
 
 > **Pattern cross-scripts** : chaque fichier `.jsx` exporte ses symboles vers `window` via `Object.assign(window, {...})`. Les scripts chargés ensuite y accèdent comme globals. Ce pattern contourne la limitation de Babel Standalone qui transpile chaque `<script>` dans un scope isolé.
@@ -357,17 +384,27 @@ frontend/
 App
 ├── IngestToast (portal → document.body)
 ├── Header
-│   └── <input type="file"> caché
-├── ChatPanel
-│   ├── AssistantMessage
-│   │   ├── CitationModal (portal → document.body, conditionnel)
-│   │   ├── MarkdownContent  ← event delegation sur .nlaz-cite
-│   │   └── SourceCard (cliquable → CitationModal)
-│   ├── ModeSelector
-│   └── barre notes injectées (pinnedNotes)
-└── NotesRail
-    ├── NoteCard (hover state au niveau carte)
-    └── NoteModal (portal → document.body, conditionnel)
+│   └── bascule de vue (Chat / Legacy KB)
+├── (vue "chat")
+│   ├── SourcesRail
+│   │   └── <input type="file"> caché — upload + suivi d'ingestion
+│   ├── ChatPanel
+│   │   ├── AssistantMessage
+│   │   │   ├── CitationModal (portal → document.body, conditionnel)
+│   │   │   ├── MarkdownContent  ← event delegation sur .nlaz-cite,
+│   │   │   │     surlignage du passage cité (highlightText)
+│   │   │   └── SourceCard (regroupée par source, badges [N] multiples)
+│   │   ├── ModeSelector
+│   │   └── barre notes injectées (pinnedNotes)
+│   └── NotesRail
+│       ├── NoteCard (hover state au niveau carte)
+│       └── NoteModal (portal → document.body, conditionnel)
+└── (vue "legacykb")
+    └── LegacyKbPage
+        ├── LegacyKbCanvas (React Flow — nœuds :Entity/:Community, zones par communauté)
+        ├── NodeContextMenu (recentrer la vue, recentrer la disposition, retirer)
+        ├── NodeDetailPanel (résumé, relations, tags techniques)
+        └── DomainBreadcrumb (navigation par domaine fonctionnel)
 ```
 
 ### Fonctionnalités
@@ -378,8 +415,10 @@ App
 | Diagrammes Mermaid | `useEffect` post-render — détecte `code.language-mermaid`, appelle `mermaid.render()` |
 | 3 modes d'analyse | `ModeSelector` — ajuste `top_k` (5/10/20) et `max_tokens` (600/2000/4000) |
 | Indicateur du mode utilisé | Tag coloré sur chaque message utilisateur |
-| Citations filtrées | Seules les sources dont le numéro `[N]` apparaît dans le texte sont affichées |
-| Viewer de citation | Clic sur badge `[N]` (event delegation) ou fiche source → `CitationModal` avec texte complet du chunk |
+| Citations filtrées et regroupées | Seules les sources dont le numéro `[N]` apparaît dans le texte sont affichées ; une même source citée sous plusieurs `[N]` n'apparaît qu'une fois, avec un badge par numéro |
+| Badges de citation inline | Les références `[N]` du texte sont converties en vignettes `.nlaz-cite` cliquables après le rendu Markdown |
+| Viewer de citation | Clic sur un badge `[N]` ou une fiche source → `CitationModal` avec texte complet du chunk, passage cité surligné et centré |
+| Legacy KB | Vue graphe (React Flow/dagre) du dump GraphRAG `neo4j-legacykb` — exploration par domaine, recherche, recentrage/redisposition de la vue (voir F7) |
 | Copie Markdown brut | Bouton "Copier" — clipboard API |
 | Rail de notes | Enregistrement d'une réponse + création manuelle ; survol → bouton supprimer |
 | Modale de note | Clic sur une note → overlay Notion-style (portal) avec texte complet |
@@ -388,23 +427,26 @@ App
 | Upload de document | Bouton "Ajouter un document" → `FormData POST /api/ingest` → polling `GET /api/ingest/{job_id}` |
 | Toast d'ingestion | Progression temps réel (pending → running → done/error) avec auto-dismiss succès 6s |
 | Persistance locale | Notes et `session_id` conservés dans `localStorage` (survie au reload) |
-| Nouvelle conversation | Purge l'historique serveur (`DELETE /api/chat/{session_id}`) + reset état local |
+| Nouvelle conversation | Purge l'historique serveur (`POST /api/chat/clear`) + reset état local |
 
 ---
 
 ## 7. Sécurité et identité
 
-### Principe : zéro clé d'API dans le code
+### Principe : zéro secret dans le code ou les images Docker
 
-**Aucune clé secrète n'est stockée dans le code ou les variables d'environnement de production.** L'authentification repose intégralement sur Azure Managed Identity et Azure Key Vault.
+**Aucune clé secrète n'est stockée dans le code, les images Docker, ni les variables d'environnement de production.** Deux couches de sécurité coexistent :
+
+1. **Authentification inter-services Azure** : Managed Identity — zéro clé d'API Azure dans le code
+2. **Authentification client → API** : clé partagée `API_KEY` stockée dans Key Vault, chargée au démarrage
 
 ### Architecture d'identité
 
 ```mermaid
 flowchart TD
     subgraph identites["Identités"]
-        MI[User-Assigned Managed Identity\nid-api-nlmazure-prod\nPrincipalId: 10a7d393...]
-        DEV[Identité développeur\nEntra ID\nv.gicquiau@groupeonepoint.com]
+        MI[User-Assigned Managed Identity\nid-api-<suffix>\nApp Service → Azure services]
+        DEV[Identité développeur\nEntra ID / az login]
     end
 
     subgraph roles_mi["Rôles de la Managed Identity"]
@@ -441,9 +483,51 @@ En local, le SDK Azure utilise `DefaultAzureCredential` qui essaie les providers
 3. `AzureCliCredential` ✅ — token `az login` — **utilisé en local**
 4. En production (App Service) : `ManagedIdentityCredential` ✅ via `AZURE_CLIENT_ID`
 
+### Chargement des secrets depuis Key Vault (lifespan)
+
+Au démarrage de l'API (lifespan FastAPI), `_load_secrets_from_keyvault()` charge les secrets Key Vault dans les variables d'environnement du processus :
+
+| Secret Key Vault | Variable d'environnement |
+|------------------|--------------------------|
+| `openai-endpoint` | `AZURE_OPENAI_ENDPOINT` |
+| `search-endpoint` | `AZURE_SEARCH_ENDPOINT` |
+| `docint-endpoint` | `AZURE_DOCINT_ENDPOINT` |
+| `storage-account-name` | `AZURE_STORAGE_ACCOUNT_NAME` |
+| `neo4j-legacykb-password` | `NEO4J_LEGACYKB_PASSWORD` |
+| `api-key` | `API_KEY` |
+
+Ce chargement ne se déclenche que si `AZURE_KEYVAULT_URI` est défini (injecté par Bicep dans les `appSettings` de l'App Service). En local, les variables sont lues directement depuis `.env`.
+
+### Authentification client → API (`APIKeyMiddleware`)
+
+Tous les endpoints `/api/*` sont protégés par une clé partagée. Le middleware lit `API_KEY` **lazily** à chaque requête (pas à l'initialisation), ce qui garantit que la valeur chargée depuis Key Vault au startup est bien utilisée.
+
+- Header accepté : `X-API-Key: <key>` ou `Authorization: Bearer <key>`
+- Si `API_KEY` est vide : accès libre (mode développement local non configuré)
+- Routes exclues : `/health` (probe de liveness)
+
+**Livraison de l'API Key au frontend** : la clé est injectée dynamiquement à la volée dans `index.html` sous forme d'une balise `<meta name="nlaz-api-key" content="…">` (endpoint `GET /`). Elle n'est donc pas accessible à un `curl` anonyme sans avoir d'abord chargé la page.
+
+### Headers de sécurité HTTP (`SecurityHeadersMiddleware`)
+
+Ajouté sur toutes les réponses de l'API :
+
+| Header | Valeur | Objectif |
+|--------|--------|----------|
+| `X-Content-Type-Options` | `nosniff` | Prévenir le MIME-sniffing |
+| `X-Frame-Options` | `DENY` | Bloquer le clickjacking |
+| `Referrer-Policy` | `strict-origin-when-cross-origin` | Limiter les fuites d'URL |
+| `Permissions-Policy` | `geolocation=(), microphone=(), camera=()` | Désactiver les APIs navigateur non utilisées |
+| `Content-Security-Policy` | `default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval'…` | Bloquer les injections XSS ; `unsafe-eval`/`unsafe-inline` requis par Babel Standalone |
+| `Strict-Transport-Security` | `max-age=31536000; includeSubDomains` | Forcer HTTPS (ignoré silencieusement sur HTTP local) |
+
 ### Contrôle d'accès Azure OpenAI
 
-`disableLocalAuth: true` est configuré sur le compte Azure OpenAI — les clés d'API sont désactivées au niveau du service. Seule l'authentification Entra ID (tokens Bearer) est acceptée.
+`disableLocalAuth: true` est configuré sur le compte Azure OpenAI — les clés d'API Azure sont désactivées au niveau du service. Seule l'authentification Entra ID (tokens Bearer) est acceptée.
+
+### Isolation des secrets dans l'image Docker
+
+Le fichier `.dockerignore` exclut `**/.env` du contexte de build. L'image ne contient donc aucun secret. En production, les variables d'environnement proviennent exclusivement de l'`appSettings` de l'App Service (injecté par Bicep) et de Key Vault (chargé au startup).
 
 ---
 
@@ -451,20 +535,23 @@ En local, le SDK Azure utilise `DefaultAzureCredential` qui essaie les providers
 
 ### Ressources déployées
 
-Toutes les ressources appartiennent au resource group `rg-sp4-d-vgi-azu-vgi-sandbox-txt`, région `France Central`, convention de nommage `{type}-{projet}-{env}`.
+Convention de nommage : `{type}-{projectName}-{env}`. Région par défaut : `swedencentral`.
 
-| Ressource | Nom | SKU/Tier | Rôle |
+| Ressource | Nom (exemple `nlmavgi-prod`) | SKU/Tier | Rôle |
 |---|---|---|---|
-| Azure OpenAI | `oai-nlmazure-prod` | S0 | Embeddings (text-embedding-3-large) + Chat (gpt-4o) |
-| Azure AI Search | `srch-nlmazure-prod` | Standard S1 | Index vectoriel + BM25 + Semantic Ranker |
-| Azure Document Intelligence | `docint-nlmazure-prod` | S0 | Extraction et analyse structurelle des PDF |
-| Azure Key Vault | `kv-nlmazure-prod` | Standard | Stockage des endpoints et secrets |
-| Azure Container Registry | `nlmazureprod` | Basic | Stockage des images Docker de l'API |
-| App Service Plan | `asp-nlmazure-prod` | B2 Linux | Hébergement du plan App Service |
-| App Service | `app-api-nlmazure-prod` | (B2) | API FastAPI + frontend servi en conteneur Docker |
-| Blob Storage | `stnlmazureprod` | Standard LRS | Stockage des documents sources |
-| Application Insights | `appi-nlmazure-prod` | — | Monitoring, traces, logs de l'application |
-| Managed Identity | `id-api-nlmazure-prod` | User-Assigned | Identité de l'App Service pour tous les appels Azure |
+| Azure OpenAI | `oai-nlmavgi-prod` | S0 | Embeddings (text-embedding-3-large) + Chat (gpt-4o) |
+| Azure AI Search | `srch-nlmavgi-prod` | Standard S1 | Index vectoriel + BM25 + Semantic Ranker |
+| Azure Document Intelligence | `di-nlmavgi-prod` | S0 | Extraction et analyse structurelle des PDF |
+| Azure Key Vault | `kv-nlmavgi-prod` | Standard | Secrets (endpoints, api-key, neo4j-password) |
+| Azure Container Registry | `acrnlmavgiprod` | Basic | Images Docker de l'API |
+| App Service Plan | `asp-nlmavgi-prod` | B2 Linux | Plan hébergement App Service |
+| App Service | `app-api-nlmavgi-prod` | (B2) | API FastAPI + frontend servi en conteneur Docker |
+| Blob Storage | `stnlmavgiprod` | Standard LRS | Documents sources |
+| Application Insights | `appi-nlmavgi-prod` | — | Monitoring, traces, logs |
+| Managed Identity | `id-api-nlmavgi-prod` | User-Assigned | Identité de l'App Service pour les appels Azure |
+| ACI neo4j-legacykb | `neo4j-legacykb-nlmavgi` | (ACI) | Base graphe GraphRAG CardDemo (golden source) |
+
+> L'ACI neo4j-legacykb est déployé conditionnellement (`deployLegacyKb=true`). Si une instance externe est fournie via `-Neo4jUri`, l'ACI n'est pas créé.
 
 ### Déploiements Azure OpenAI
 
@@ -477,24 +564,49 @@ Toutes les ressources appartiennent au resource group `rg-sp4-d-vgi-azu-vgi-sand
 
 ```
 infra/
-├── main.bicep                  — orchestration, role assignments, secrets KV
+├── main.bicep                  — orchestration, params, rôles IAM, secrets KV
+├── main.parameters.json        — valeurs par défaut (non commité en prod)
 └── modules/
-    ├── containerapp.bicep      — App Service + Managed Identity + ACR Pull
-    ├── openai.bicep            — Azure OpenAI + 2 déploiements
+    ├── containerapp.bicep      — App Service + UAMI + appSettings (KV URI, neo4j URI…)
+    ├── openai.bicep            — Azure OpenAI + déploiements GPT-4o + Embeddings
     ├── search.bicep            — Azure AI Search S1 + semantic search
-    ├── keyvault.bicep          — Key Vault + accès déployeur
+    ├── keyvault.bicep          — Key Vault RBAC + accès déployeur
+    ├── neo4j-legacykb.bicep    — ACI neo4j (déploiement conditionnel)
     ├── docint.bicep            — Document Intelligence
     ├── storage.bicep           — Blob Storage
     ├── registry.bicep          — Container Registry
-    └── monitoring.bicep        — Application Insights
+    └── monitoring.bicep        — Application Insights + Log Analytics
 ```
 
-**Commande de déploiement :**
+**Paramètres Bicep principaux :**
+
+| Paramètre | Défaut | Description |
+|-----------|--------|-------------|
+| `projectName` | `nlmazure` | Préfixe de nommage (3-8 chars lowercase) |
+| `environment` | `prod` | Suffixe d'environnement |
+| `location` | région du RG | Région Azure |
+| `deployerObjectId` | *(requis)* | Object ID AAD du déployeur — droits Key Vault |
+| `apiImageTag` | placeholder | Image Docker de l'App Service |
+| `deployLegacyKb` | `true` | Crée l'ACI neo4j-legacykb |
+| `neo4jLegacyKbPassword` | `''` | Mot de passe neo4j (→ KV secret) |
+| `neo4jLegacyKbUri` | `''` | URI bolt:// externe si `deployLegacyKb=false` |
+| `apiKey` | `''` | Clé API (→ KV secret `api-key`) |
+
+**Déploiement via `deploy.ps1` (recommandé) :**
 ```powershell
-az deployment group create \
-  --resource-group rg-sp4-d-vgi-azu-vgi-sandbox-txt \
-  --template-file infra/main.bicep \
-  --parameters projectName=nlmazure environment=prod deployerObjectId=$env:DEPLOYER_OID
+.\deploy.ps1 -SkipSSL
+```
+
+**Déploiement manuel (avancé) :**
+```powershell
+$deployerObjectId = az ad signed-in-user show --query id -o tsv
+az deployment group create `
+  --resource-group rg-nlmazure-prod `
+  --template-file infra/main.bicep `
+  --parameters infra/main.parameters.json `
+              deployerObjectId=$deployerObjectId `
+              neo4jLegacyKbPassword="monMotDePasse" `
+              apiKey="maClefApi"
 ```
 
 ---
@@ -541,27 +653,25 @@ Les 3 modes permettent d'optimiser le ratio qualité/coût :
 | Limite | Statut | Explication |
 |---|---|---|
 | **Contexte partiel** | Structurel | Le LLM ne voit que 5 à 20 extraits par requête. Pour les questions transversales ("tous les flux"), certains éléments peuvent être manqués si les chunks correspondants ne sont pas dans le top-K récupéré. |
-| **Sessions volatiles** | Structurel | Les historiques de conversation sont perdus au redémarrage de l'App Service (stockage in-memory). |
+| **Sessions volatiles** | Résolu ✅ | L'historique est persisté en SQLite (`api/data/chat_history.db`). Les sessions survivent aux redémarrages ; elles expirent après 24 h d'inactivité. |
 | **Ingestion manuelle** | Partiellement résolu ✅ | L'upload via l'interface UI permet d'ajouter des documents à la volée. L'ingestion automatique sur nouveau blob (Azure Function) n'est pas encore en place. |
 | **Pas de streaming** | Structurel | La réponse est affichée en une seule fois après génération complète (pas de streaming token-by-token). |
-| **Formats non supportés** | Structurel | Seuls PDF, DOCX et Markdown sont supportés. Les fichiers Excel, PowerPoint ou images scannées ne sont pas ingérés. |
+| **Formats non supportés** | Partiellement résolu ✅ | PDF, DOCX, PPTX, XLSX, Markdown, TXT et code source sont supportés via l'upload UI. Le script CLI `ingest.py` supporte actuellement uniquement PDF, DOCX et Markdown. Les images scannées (sans couche texte) ne sont pas ingérées. |
 | **Viewer document original** | Connu | Le viewer de citation affiche le texte extrait du chunk (déjà dans l'index). Le fichier original (PDF visuel, mise en page) n'est pas accessible car supprimé après ingestion. |
 
 ### Axes d'amélioration prioritaires
 
 1. **Streaming de la réponse** — Server-Sent Events (SSE) côté API + rendu progressif côté frontend → meilleure expérience pour les réponses longues en mode Approfondi
 
-2. **Persistance des sessions** — Stocker les historiques dans Azure Cosmos DB ou Azure Cache for Redis → survie aux redémarrages
+2. **Extension CLI ingest** — Ajouter le support PPTX, XLSX et TXT/code au script `ingest.py` (les chunkers existent déjà, seule la liste `SUPPORTED_EXTENSIONS` doit être étendue)
 
 3. **Ingestion automatisée** — Azure Function déclenchée sur nouveau blob dans le Storage Account → ingestion en continu sans intervention manuelle (complémentaire à l'upload UI existant)
 
 4. **Viewer PDF natif** — Conserver le fichier original après ingestion (Azure Blob Storage), exposer un endpoint `GET /api/document/{hash}`, intégrer PDF.js → affichage du document à la page citée
 
-5. **Support Excel/PowerPoint** — Document Intelligence supporte `.xlsx` et `.pptx` via le modèle `prebuilt-layout`
+5. **Feedback utilisateur** — Boutons 👍/👎 sur les réponses, stockés dans Cosmos DB → données pour évaluer et améliorer la qualité du RAG
 
-6. **Feedback utilisateur** — Boutons 👍/👎 sur les réponses, stockés dans Cosmos DB → données pour évaluer et améliorer la qualité du RAG
-
-7. **Évaluation RAG** — Mettre en place des métriques (faithfulness, context precision) via Azure AI Evaluation ou Ragas pour mesurer objectivement la qualité des réponses
+6. **Évaluation RAG** — Mettre en place des métriques (faithfulness, context precision) via Azure AI Evaluation ou Ragas pour mesurer objectivement la qualité des réponses
 
 ---
 
@@ -602,8 +712,8 @@ Permet à tout membre de l'équipe d'interroger en langage naturel l'ensemble du
 |---|---|
 | Questions en langage naturel (français) | Réponses depuis la mémoire générale du LLM |
 | Réponses Markdown structurées avec citations `[N]` | Streaming token-by-token |
-| Historique conversationnel (4 tours glissants) | Persistance des sessions entre redémarrages |
-| 3 modes d'analyse (voir F2) | Modes personnalisés par utilisateur |
+| Historique conversationnel persistant (SQLite) avec compaction | Modes personnalisés par utilisateur |
+| 3 modes d'analyse (voir F2) | — |
 
 **Parcours Utilisateur**
 
@@ -616,7 +726,7 @@ And seules les sources effectivement citées apparaissent dans "Références"
 
 Given l'utilisateur a reçu une réponse
 When il pose une question de suivi implicite ("Et pour le module B ?")
-Then la requête inclut les 8 derniers messages d'historique
+Then la requête inclut l'historique non compacté de la session (SQLite)
 And la réponse tient compte du contexte conversationnel
 
 Given aucun chunk pertinent n'est trouvé
@@ -625,11 +735,12 @@ Then l'API retourne "Aucun document pertinent trouvé pour cette question."
 ```
 
 **Règles de Gestion**
-- Message : 1 à 4 000 caractères (validation Pydantic)
+- Message : 1 à 32 000 caractères (validation Pydantic)
 - `top_k` : 5 / 10 / 20 selon le mode
 - `max_tokens` : 600 / 2 000 / 4 000 selon le mode
-- Historique envoyé au LLM : 8 derniers messages (fenêtre glissante)
-- Session expirée au redémarrage de l'API (stockage in-memory)
+- Historique envoyé au LLM : tous les messages non compactés (compaction automatique au-delà de 12 tours)
+- Sessions persistées en SQLite ; expiration après 24 h d'inactivité
+- Rate limit : 20 requêtes par IP sur 60 secondes (HTTP 429 en cas de dépassement)
 
 **Cas Limites et Gestion des Erreurs**
 
@@ -638,6 +749,7 @@ Then l'API retourne "Aucun document pertinent trouvé pour cette question."
 | Azure OpenAI indisponible (503) | Message d'erreur dans le chat |
 | Azure AI Search indisponible | HTTP 503 → message d'erreur dans le chat |
 | Quota TPM dépassé (429) | Retry backoff exponentiel — tenacity, 3 essais |
+| Rate limit dépassé (20 req/60s) | HTTP 429 → message d'erreur côté front |
 | Message vide soumis | Bouton désactivé côté front + validation Pydantic (`min_length=1`) |
 | Réponse tronquée par `max_tokens` | Comportement GPT-4o attendu en mode Rapide |
 
@@ -645,7 +757,7 @@ Then l'API retourne "Aucun document pertinent trouvé pour cette question."
 
 #### III. Architecture Technique
 
-**Composants impactés** : `ChatPanel.jsx` · `App.jsx` · `api/routers/chat.py` · `api/services/retriever.py` · `api/services/generator.py`
+**Composants impactés** : `ChatPanel.jsx` · `App.jsx` · `api/routers/chat.py` · `api/services/retriever.py` · `api/services/generator.py` · `api/services/session_store.py` · `api/services/compactor.py` · `api/services/rate_limiter.py`
 
 **Contrat d'Interface**
 
@@ -653,7 +765,9 @@ Then l'API retourne "Aucun document pertinent trouvé pour cette question."
 POST /api/chat
 Body: { message, session_id?, top_k, mode, injected_notes[] }
 Response 200: { answer, session_id, sources[]{file,page,section,score,content}, tokens_used }
-DELETE /api/chat/{session_id}   → purge historique
+
+GET  /api/chat/history/{session_id}   → ré-hydratation frontend : { messages[], summary }
+POST /api/chat/clear                  → purge historique : Body { session_id }
 ```
 
 **Diagramme d'états — message**
@@ -1021,13 +1135,24 @@ Les agents RAG sont sujets à la sur-interprétation ou à l'hallucination. La p
 | Ouvrir depuis badge `[N]` dans le texte | Naviguer entre chunks adjacents |
 | Ouvrir depuis la fiche source "Références" | Surligner le passage dans un viewer PDF |
 | Modale avec fichier, page, section, contenu | Télécharger le document source |
+| Regroupement des fiches par source (badges multiples) | Tri/filtrage des références |
+| Surlignage et centrage du passage cité dans la modale | Surlignage multi-occurrences |
 
 **Parcours Utilisateur**
 
 ```gherkin
+Given une réponse contient des références textuelles [N]
+When le Markdown est rendu
+Then chaque [N] devient une vignette .nlaz-cite cliquable
+
 Given une réponse contient des badges [N] cliquables
 When l'utilisateur clique sur [3]
 Then une modale s'ouvre : nom fichier, numéro page, titre section, texte du chunk en Markdown
+And le passage correspondant à la section citée est surligné et centré dans la modale
+
+Given une même source est citée sous plusieurs numéros (ex. [3] et [7])
+When la liste "Références" est affichée
+Then la source n'apparaît qu'une fois, avec un badge par numéro [3] et [7]
 
 Given les fiches "Références" sont affichées
 When l'utilisateur clique sur une fiche source
@@ -1042,6 +1167,8 @@ Then la modale se ferme
 - Seules les sources dont le numéro `[N]` apparaît dans le texte sont cliquables
 - Correspondance badge ↔ source par `id` (1-indexed, ordre des `sources[]` de l'API)
 - Contenu affiché = champ `content` du chunk tel qu'indexé (texte brut, pas le PDF)
+- Regroupement des fiches "Références" par `source|page` — une fiche peut porter plusieurs badges `[N]`
+- Surlignage : recherche de `citation.snippet` (section) dans le texte du chunk via `TreeWalker` + `Range.surroundContents`, première occurrence uniquement
 
 **Cas Limites**
 
@@ -1054,11 +1181,15 @@ Then la modale se ferme
 
 #### III. Architecture Technique
 
-**Composants impactés** : `tokens.jsx` (`MarkdownContent` + event delegation) · `ChatPanel.jsx` (`CitationModal`, `SourceCard`, `AssistantMessage`) · `index.html` (`.nlaz-cite` CSS) · `api/models/schemas.py` · `api/routers/chat.py`
+**Composants impactés** : `ChatPanel.jsx` (`MarkdownContent`, `_highlightAndScroll`, `CitationModal`, `SourceCard`, `AssistantMessage`) · `index.html` (`.nlaz-cite`, `mark.nlaz-highlight` CSS) · `api/models/schemas.py` · `api/routers/chat.py`
 
-**Mécanisme d'event delegation**
+**Conversion des références `[N]` en vignettes**
 
-Le HTML des badges `[N]` est généré par `marked.parse()` injecté via `dangerouslySetInnerHTML` — pas de `onClick` React direct possible. Solution : `onClick` sur le container `<div>`, détection via `e.target.closest('.nlaz-cite')`.
+Avant le rendu Markdown, `MarkdownContent` remplace chaque référence textuelle `\[(\d+)\]` par `<sup class="nlaz-cite" data-cite="N">N</sup>`. Le résultat passe par `marked.parse()` puis `DOMPurify.sanitize()` (qui autorise `sup`/`class`/`data-*`), avant `dangerouslySetInnerHTML`. Un `useEffect` attache ensuite un `onclick` à chaque `.nlaz-cite` du DOM rendu (`onCitationClick(Number(data-cite))`).
+
+**Surlignage du passage cité**
+
+À l'ouverture de `CitationModal`, `MarkdownContent` reçoit `highlightText={citation.snippet}`. `_highlightAndScroll` parcourt le texte rendu (`TreeWalker`), entoure la première occurrence d'un `<mark class="nlaz-highlight">` et appelle `scrollIntoView({ block: 'center' })`.
 
 **Diagramme de séquence — ouverture du viewer**
 
@@ -1091,7 +1222,7 @@ stateDiagram-v2
     Open --> Open : scroll dans le corps
 ```
 
-**Sécurité** : Contenu des chunks affiché via `dangerouslySetInnerHTML` après `marked.parse()`. Pour un corpus externe ou public, envisager DOMPurify.
+**Sécurité** : Contenu des chunks affiché via `dangerouslySetInnerHTML` après `marked.parse()` + `DOMPurify.sanitize()` (SEC-002).
 
 ---
 
@@ -1280,234 +1411,127 @@ sequenceDiagram
 
 ---
 
-### F7 — Graphe ADG-M
+### F7 — Legacy KB
 
 #### I. Vue d'ensemble
 
-La fonctionnalité **Graphe ADG-M** (Architecture de la Décomposition Grand-Mainframe) ajoute une deuxième vue à l'interface, accessible depuis le toggle "Graphe ADG-M" dans le header. Elle visualise l'architecture applicative du corpus documentaire sous forme de graphe interactif, propose un workflow de qualification 7R (stratégie de modernisation), et détecte automatiquement les clusters de composants via l'algorithme de Louvain.
+La **Legacy KB** ajoute une deuxième vue à l'interface (`LegacyKbPage.jsx`, bascule depuis le `Header`). Elle donne un accès en lecture, sous forme de graphe interactif, à l'intégralité du dump GraphRAG `repartition_cleaned_export.graphml` importé dans une instance Neo4j AuraDB séparée (`neo4j-legacykb`) : 5 812 nœuds `:Entity`/`:Community` et 19 368 relations décrivant l'application mainframe **CardDemo** (programmes COBOL, copybooks, batch jobs, fichiers, domaines fonctionnels).
 
-Cette fonctionnalité s'appuie sur un backend séparé — la Function App Azure `fn-adgm-graph` (Neo4j + Azure SQL) — qui est appelée en server-to-server via un proxy FastAPI pour contourner la CSP du frontend.
+Cette base est la **golden source** de référence pour le legacy CardDemo. Elle est consultée de deux façons :
+- **Exploration visuelle** — l'onglet "Legacy KB" (`LegacyKbPage.jsx`), graphe React Flow/dagre
+- **Tool-calling depuis le Chat** — GPT-4o interroge directement `neo4j-legacykb` via les tools `legacykb_*` (cf. section 5, "Tool-calling Legacy KB") pour répondre aux questions sur CardDemo
+
+L'instance ADG-M (Function App `fn-adgm-graph`, Cytoscape) qui exploitait auparavant une partie de ce dump a été retirée le 2026-06-13 ; `azure-functions/` est conservé "au repos" mais n'est plus consommé par l'application (voir `CLAUDE.md`).
 
 #### II. Architecture de la fonctionnalité
 
 ```mermaid
 flowchart TB
     subgraph browser["🌐 Navigateur"]
-        GP[GraphPage.jsx\nCytoscape.js canvas]
+        LKB[LegacyKbPage.jsx\nReact Flow + dagre canvas]
+        CHAT[ChatPanel.jsx]
     end
 
     subgraph api["⚙️ FastAPI notebooklm-azure"]
-        PROXY[graph.py\nProxy GET/PATCH/DELETE\n/api/graph/*]
-        EXTRACT[extract.py\nPipeline Chat→Graphe\n/api/extract/graph]
+        ROUTER[legacykb.py\nGET /api/legacykb/*]
+        GEN[generator.py\ntools legacykb_*]
+        CLIENT[legacykb_client.py\ndriver neo4j]
     end
 
-    subgraph azure_fn["☁️ Azure Function App\nmodernagent-adgm-dev"]
-        FN[fn-adgm-graph\nfunction_app.py]
+    subgraph store["🗄️ neo4j-legacykb (AuraDB, golden source, lecture seule)"]
+        NEO[(:Entity · :Community\nCALLS · INCLUDES · IN_COMMUNITY\nREADS/INSERTS/UPDATES/DELETES · EXECUTES)]
     end
 
-    subgraph stores["🗄️ Données"]
-        NEO[Neo4j AuraDB\nTechnicalNode · FunctionalDomain\nMacroFunction · Program · DataEntity\nDEPENDS_ON · IMPLEMENTS · READS/WRITES]
-        SQL[Azure SQL\ndbo.NodeAnnotationHistory]
-        SRCH[Azure AI Search\nnotebooklm-chunks]
-        OAI[Azure OpenAI\nGPT-4o extraction]
-    end
-
-    GP -->|HTTP /api/graph/*| PROXY
-    PROXY -->|server-to-server| FN
-    GP -->|POST /api/extract/graph| EXTRACT
-    EXTRACT --> SRCH
-    EXTRACT --> OAI
-    EXTRACT -->|import-entities| FN
-    FN --> NEO
-    FN --> SQL
+    LKB -->|GET /api/legacykb/*| ROUTER
+    CHAT -->|POST /api/chat| GEN
+    ROUTER --> CLIENT
+    GEN -->|tool-calling auto| CLIENT
+    CLIENT -->|driver neo4j| NEO
 ```
 
 #### III. Composants et responsabilités
 
-**`frontend/src/GraphPage.jsx`**
+**`frontend/src/LegacyKbPage.jsx`**
 
-Composant React (Babel standalone, vendorisé Cytoscape.js) gérant la vue complète :
-- Canvas Cytoscape — rendu nœuds/arcs avec stylesheets `STATUS_COLORS`/`R7_COLORS`
-- Bi-plan switch (Fonctionnel / Technique / Overlay) — `GET /api/graph/nodes` filtré par `plane`
-- Detail panel — `GET /api/graph/nodes/{id}` + `GET /api/graph/nodes/{id}/impact`
-- Formulaire annotation 7R — `PATCH /api/graph/nodes/{id}/qualification`
-- Cluster highlight — `GET /api/graph/clusters`
-- Exports JSON (clusters) et CSV (nœuds non qualifiés)
+Composant React (Babel standalone, React Flow + dagre vendorisés en UMD) gérant la vue complète :
+- `LegacyKbCanvas` — canvas React Flow (`Background`, `Controls`, `MiniMap`), nœuds custom `LegacyNode` (entités : pastille ronde colorée par `type` ; communautés : pastille carrée) et `ZoneNode` (regroupement visuel par communauté)
+- `_layout` — calcul d'un layout `dagre` (gauche → droite) sur le "bundle" courant (nœuds + arêtes chargés), avec simplification du schéma et résolution des chevauchements
+- Recherche (`legacykb_search`), navigation par domaine fonctionnel (`DomainBreadcrumb`, communautés niveau 2)
+- Exploration progressive : double-clic sur un nœud → charge son voisinage (`/legacykb/nodes/{id}/neighbors`) et le fusionne dans le bundle
+- `NodeDetailPanel` — résumé exécutif dépliable (`ExpandableText`), compteurs de relations par type (`RelationBars`), tags techniques détectés (`TechTagList`)
+- `NodeContextMenu` (clic droit sur un nœud) : recentrer la vue sur ce nœud (réinitialise le bundle), **recentrer la disposition sur ce nœud** (redispose la hiérarchie `dagre` sans réinitialiser le bundle), retirer le nœud de la vue
+- Menu "Affichage" (icône roue crantée) — filtre les types d'entités et niveaux de communautés visibles dans le graphe (`VISIBILITY_OPTIONS`)
 
-**`api/routers/graph.py`**
+**`api/routers/legacykb.py`**
 
-Proxy async `httpx.AsyncClient` → `fn-adgm-graph`. Relaie uniquement les verbes de la surface utilisateur :
-- `GET /api/graph/{path}` — consultation (health, nodes, arcs, clusters, impact)
-- `PATCH /api/graph/{path}` — qualification 7R
-- `DELETE /api/graph/{path}` — reset et nettoyage couche fonctionnelle
-
-Ne relaie **pas** `POST /admin/analyze` ni `POST /admin/import-entities` (administration back-office appelée directement depuis `extract.py`).
-
-**`api/routers/extract.py`**
-
-Pipeline asynchrone Chat→Graphe (pattern `BackgroundTask` + polling, identique à `ingest.py`) :
-
-```
-POST /api/extract/graph → 202 { job_id }
-GET  /api/extract/graph/{job_id} → { status, docs_total, docs_processed, entities_imported }
-```
-
-Étapes internes :
-1. `DELETE fn-adgm-graph/admin/functional-entities` — vide la couche fonctionnelle (préserve `:TechnicalNode`)
-2. Lecture complète de l'index Azure AI Search (`search_text="*"`, top=5000)
-3. Pour chaque document : GPT-4o (prompt structuré → JSON `{system, functional_domains, macro_functions, programs, data_entities, crud_relationships}`)
-4. `POST fn-adgm-graph/admin/import-entities` avec le JSON extrait
-
-**`fn-adgm-graph/function_app.py`**
-
-Azure Function Python HTTP trigger gérant toutes les routes ADG-M. Dispatcher manuel sur `(method, parts)`. Backends :
-- Neo4j AuraDB via `neo4j` driver (GDS pour SPOF/Louvain)
-- Azure SQL via `pyodbc` (historique annotations)
-
-Principaux endpoints :
+Router de lecture exposant `neo4j-legacykb` au frontend :
 
 | Méthode | Route | Description |
 |---|---|---|
-| GET | `/graph/health` | `{status, neo4j, sql, version}` |
-| GET | `/graph/nodes` | Liste nœuds avec filtres plan/7R/SPOF |
-| GET | `/graph/nodes/{id}` | Détail nœud + métriques |
-| GET | `/graph/nodes/{id}/impact` | Nœuds en aval dans `DEPENDS_ON` |
-| GET | `/graph/arcs` | Toutes les relations |
-| GET | `/graph/clusters` | Clusters Louvain agrégés (409 si non calculés) |
-| PATCH | `/graph/nodes/{id}/qualification` | Mise à jour `candidate7R` + historique SQL |
-| POST | `/graph/admin/analyze` | Calcul SPOF (betweenness) + Louvain |
-| POST | `/graph/admin/import-entities` | Import entités extraites par GPT-4o |
-| DELETE | `/graph/admin/functional-entities` | Supprime `:FunctionalDomain/:MacroFunction/:Program/:DataEntity` |
-| DELETE | `/graph/admin/reset` | `MATCH (n) DETACH DELETE n` — reset complet |
+| GET | `/api/legacykb/health` | Joignabilité de l'instance Neo4j |
+| GET | `/api/legacykb/stats` | Comptage des nœuds par type `:Entity` et niveau `:Community` |
+| GET | `/api/legacykb/domains` | Domaines fonctionnels (`:Community` niveau 2) |
+| GET | `/api/legacykb/search?q=&limit=&types=&descriptions=` | Recherche sur le nom des `:Entity` / titre des `:Community` |
+| GET | `/api/legacykb/nodes/{node_id}` | Détail complet d'un nœud (`:Entity` ou `:Community`) |
+| GET | `/api/legacykb/nodes/{node_id}/neighbors?limit=` | Voisinage direct (toutes relations) — exploration au clic |
 
-#### IV. Modèle de données Neo4j
+**`api/services/legacykb_client.py`**
+
+Driver Neo4j Python partagé par le router et par les tools function-calling. Identifiants de nœuds construits côté client (`:Entity` n'a pas de propriété `id` native) :
+- Entité : `e|{type}|{name}` (ex. `e|Program|RE1570C`)
+- Communauté : `c|{id}` (ex. `c|12`)
+
+Lève `LegacyKbError` (instance injoignable, 502) ou `LegacyKbNotFound` (404).
+
+**`api/services/graph_tools.py`**
+
+Tools function-calling pour GPT-4o (`LEGACYKB_TOOL_DEFINITIONS`, exécutés par `execute_legacykb_tool`) — voir section 5.
+
+#### IV. Modèle de données Neo4j (`neo4j-legacykb`)
 
 ```
-(:TechnicalNode {
-    nodeId, name, technology, description,
-    candidate7R,          -- UNQUALIFIED|RETAIN|RETIRE|REHOST|REPLATFORM|REPURCHASE|REFACTOR|REARCHITECT
-    isSPOF,               -- bool (betweenness > seuil)
-    isGhost,              -- bool (aucune relation entrante)
-    communityId,          -- int (Louvain, null avant POST /admin/analyze)
-    betweenness,          -- float
-    inDegree, outDegree
+(:Entity {
+    type,           -- Program | BatchJob | Copybook | GenericFile | ...
+    name,
+    file_location,
+    description_functional,
+    description_technical
 })
 
-(:FunctionalDomain { id, code, name, description })
-(:MacroFunction    { id, code, name, mode, description })
-(:Program          { name, technology, mode, description })
-(:DataEntity       { name, type, description })
+(:Community {
+    id, level,      -- level 1 = sous-domaine, level 2 = domaine fonctionnel
+    title,
+    summary_functional,
+    summary_technical
+})
 
-(:TechnicalNode)  -[:DEPENDS_ON]->  (:TechnicalNode)
-(:MacroFunction)  -[:BELONGS_TO]->  (:FunctionalDomain)
-(:Program)        -[:IMPLEMENTS]->  (:MacroFunction)
-(:Program)        -[:READS|WRITES|UPDATES|DELETES]-> (:DataEntity)
-(:TechnicalNode)  -[:IMPLEMENTS]->  (:Program)
+(:Entity)     -[:IN_COMMUNITY]->     (:Community)
+(:Community)  -[:SUBCOMMUNITY_OF]->  (:Community)
+(:Entity)     -[:CALLS]->            (:Entity)        -- appel de programme
+(:Entity)     -[:INCLUDES]->         (:Entity)        -- inclusion de copybook
+(:Entity)     -[:READS|INSERTS|UPDATES|DELETES|CREATES]-> (:Entity)  -- accès fichier
+(:Entity)     -[:EXECUTES]->         (:Entity)        -- exécution par un batch job
 ```
 
-Historique des qualifications dans Azure SQL (`dbo.NodeAnnotationHistory`) :
+#### V. Recentrage et redisposition de la vue
 
-```sql
-nodeId VARCHAR(255), previous7R VARCHAR(50), new7R VARCHAR(50),
-justification NVARCHAR(1000), source VARCHAR(50), author VARCHAR(255),
-createdAt DATETIME2 DEFAULT GETUTCDATE()
-```
+| Action | Déclencheur | Effet |
+|---|---|---|
+| **Recentrer la vue** | `NodeContextMenu` → "Réinitialiser la vue et la recentrer sur ce nœud" (`recenterOnNode`) | Vide le bundle, recharge le voisinage du nœud sélectionné, relance le layout `dagre` depuis ce centre |
+| **Recentrer la disposition** | `NodeContextMenu` → "Recentrer la disposition sur ce nœud" (`relayoutOnNode`) | Conserve le bundle (nœuds déjà chargés/explorés), recalcule uniquement le layout `dagre` en hiérarchie BFS depuis ce nœud — ne perd pas l'exploration en cours |
 
-#### V. Mécanique Reset vs Mise à jour
+Les deux actions mettent à jour `centerId`/`selectedId` ; `_layout` reconstruit l'arbre couvrant (BFS) depuis `centerId` pour ordonner les rangs `dagre`.
 
-| Action | Bouton UI | Endpoint | Effet Neo4j |
-|---|---|---|---|
-| **Reset complet** | "Reset graphe" (orange→rouge, 2 clics) | `DELETE /admin/reset` | `MATCH (n) DETACH DELETE n` — tout effacé |
-| **Mise à jour** | "Mettre à jour" (bleu clair→foncé) | `DELETE /admin/functional-entities` puis pipeline extract | Couche fonctionnelle reconstruite ; annotations 7R des `TechnicalNode` préservées |
+#### VI. Vendoring React Flow / dagre
 
-La mise à jour est **idempotente** : MERGE sur les nœuds techniques permet de relancer sans doublon, et les annotations 7R existantes sont conservées même si de nouveaux documents structurants viennent compléter les liens fonctionnels.
-
-#### VI. Vendoring Cytoscape.js
-
-`cytoscape.min.js` est copié dans `frontend/vendor/` et chargé par `<script>` dans `index.html` (après React/Babel, avant `GraphPage.jsx`). Il expose `window.cytoscape`. Même pattern que `mermaid.min.js` et `marked.min.js` — pas de npm, pas de build step.
+`@xyflow/react` (build UMD, expose `window.ReactFlow`) et `@dagrejs/dagre` (`dagre.min.js`, expose `window.dagre`) sont copiés dans `frontend/vendor/`, avec un shim `jsx-runtime-shim.js` fournissant `window.jsxRuntime` requis par le wrapper UMD de `@xyflow/react`. Même pattern sans-build que `mermaid.min.js`/`marked.min.js` — détails et procédure de montée de version dans `CLAUDE.md`.
 
 #### VII. Troubleshooting
 
 | Symptôme | Cause | Action |
 |---|---|---|
-| `DELETE /api/graph/admin/reset` → 404 | `"delete"` absent du tableau `methods` dans `function.json` | Vérifier `function.json` — Azure rejette avant d'atteindre Python |
-| `GET /api/graph/clusters` → 409 | `communityId` absent des nœuds (Louvain non lancé) | Lancer `POST /api/graph/admin/analyze` |
-| ExtractButton bloqué sur "running" | GPT-4o ou `import-entities` en erreur silencieuse | Vérifier les logs uvicorn (`WARNING import-entities returned ...`) |
-| `window.cytoscape` undefined | Script non chargé ou ordre incorrect dans `index.html` | Vérifier que `cytoscape.min.js` est avant `GraphPage.jsx` dans `index.html` |
-| `sql: "down"` dans `/graph/health` | `SQL_CONNECTION_STRING` au format ADO.NET au lieu de ODBC | Reformater en `Driver={ODBC Driver 18 for SQL Server};Server=tcp:...` |
-
-### F8 — Module Exploration
-
-#### I. Vue d'ensemble
-
-Le **Module Exploration**, troisième onglet de l'interface (`Exploration ArchiMate`, aux côtés de `Chat` et `Graphe ADG-M`), est une interface CRUD complète sur le graphe Neo4j pour les éléments et relations **ArchiMate 3.x** (`:ArchiMateElement`). Il permet de créer, consulter, modifier et supprimer des nœuds et relations à la main — en complément de l'extraction automatique GPT-4o (F7) — avec validations ArchiMate, RBAC par rôle et journal d'audit.
-
-Référence détaillée : `notebooklm-azure/docs/specs/SDD_Exploration_v1.md` et `PLAN_EXPLORATION_v1.md`.
-
-#### II. RBAC — rôles et en-tête `X-User-Role`
-
-Le sélecteur de rôle (`RoleSelector`, persistant en `localStorage`) place un en-tête `X-User-Role` sur chaque appel `explorationApi`. `fn-adgm-graph` (`function_app.py`) applique `require_role(req, ...)` par opération :
-
-| Rôle | Lecture (nœuds/relations/orphelins) | Création/modification/suppression simple | Suppression cascade | Bulk-tag | Audit (`/exploration/audit`) |
-|---|---|---|---|---|---|
-| `VIEWER` | ✅ | ❌ (403 `AUTH_INSUFFICIENT_ROLE`) | ❌ | ❌ | ❌ |
-| `ARCHITECT` | ✅ | ✅ | ❌ (403) | ✅ | ❌ |
-| `ADMIN` | ✅ | ✅ | ✅ | ✅ | ✅ |
-
-#### III. Endpoints `/api/graph/exploration/*`
-
-Tous relayés par le proxy `api/routers/graph.py` vers `fn-adgm-graph` (Azure Function).
-
-| Méthode | Route | Description |
-|---|---|---|
-| GET | `/exploration/nodes` | Liste paginée, filtres `layer`/`elementType`/`aspect`/`name`/`tags`/`orphansOnly` |
-| GET | `/exploration/nodes/{id}` | Détail nœud + relations entrantes/sortantes |
-| POST | `/exploration/nodes` | Création (ARCHITECT/ADMIN) |
-| PATCH | `/exploration/nodes/{id}` | Modification (ARCHITECT/ADMIN) |
-| DELETE | `/exploration/nodes/{id}` | Suppression — `?cascade=true` requiert ADMIN ; sans cascade, 409 `NODE_HAS_RELATIONS` si `relCount > 0` |
-| GET | `/exploration/orphans` | Nœuds sans aucune relation |
-| POST | `/exploration/nodes/bulk-tag` | Ajout/retrait d'un tag sur une liste de nœuds (ARCHITECT/ADMIN) |
-| GET | `/exploration/relations` | Liste paginée, filtres `relationType`/`sourceId`/`targetId`/`sourceLayer`/`targetLayer` |
-| GET | `/exploration/relations/{id}` | Détail relation |
-| POST | `/exploration/relations` | Création — valide ArchiMate (VAL-03/05/06/07/08), `confirmWarnings` pour outrepasser un avertissement 422 `ARCHIMATE_WARN` |
-| PATCH | `/exploration/relations/{id}` | Modification (`name`, `description`, `weight`, `accessType`) |
-| DELETE | `/exploration/relations/{id}` | Suppression directe |
-| GET | `/exploration/audit` | Journal `:AuditLog` (ADMIN) — filtres `entityId`/`entityType`/`operation`/`userId`/`since` |
-| GET | `/exploration/health` | Healthcheck |
-
-#### IV. Journal d'audit (`:AuditLog`)
-
-Chaque mutation (création/modification/suppression de nœud ou relation, suppression cascade, bulk-tag) écrit, dans la **même transaction Neo4j**, un nœud `:AuditLog { id, operation, entityType, entityId, userId, userRole, payload, timestamp, ipAddress }` via `_exploration_write_audit`. `payload` est un JSON `{before, after}` (`after: null` pour une suppression, `before: null` pour une création). `ipAddress` est masquée sur les deux derniers octets (`_exploration_client_ip`).
-
-`operation` ∈ `CREATE | UPDATE | DELETE | DELETE_CASCADE`. Pour `DELETE_CASCADE`, `payload.after.relCount` indique le nombre de relations supprimées avec le nœud.
-
-Consultable via la vue **Audit** (onglet visible uniquement pour `ADMIN`), avec filtres opération/type/ID/date et détail JSON dépliable par ligne.
-
-#### V. Invalidation cross-onglets
-
-Toute mutation Exploration émet `window.dispatchEvent(new CustomEvent('adgm:graph-changed'))`. `GraphPage.jsx` écoute cet événement et incrémente son `refreshKey`, déclenchant un refetch de `/graph/nodes` et `/graph/arcs` — sans rechargement de page (cf. `frontend/tests/e2e/exploration_cross_tab.md`).
-
-#### VI. Gestion des erreurs (toasts)
-
-`explorationApi.handleApiError(err)` normalise toute erreur HTTP en `{ message, retryable, retryAfter }` (cf. SDD §7) :
-
-- **403 / 404** (formulaires nœud/relation) : toast rouge + fermeture du formulaire (retour à la liste/détail) ; un 404 déclenche aussi `adgm:graph-changed`.
-- **404** (consultation détail nœud) : toast + retour automatique à la liste.
-- **500 / 503** : toast + bannière d'erreur inline avec bouton **Réessayer** (relance le `load()` du composant).
-- **429** : toast incluant le délai `Retry-After` si fourni par le serveur.
-- Erreur réseau (pas de réponse) : traitée comme 503 — toast + bouton Réessayer.
-
-Les toasts sont émis via l'événement `adgm:toast` (même convention que `adgm:graph-changed`) et affichés par `<ToastStack>` dans `ExplorationPage.jsx`, avec auto-dismiss après 6 s.
-
-#### VII. Composants frontend (`frontend/src/ExplorationPage.jsx`)
-
-| Composant | Rôle |
-|---|---|
-| `NodeListView` | Liste filtrable des nœuds, sélection multiple + bulk-tag (ARCHITECT/ADMIN) |
-| `NodeDetailView` | Détail nœud, relations entrantes/sortantes, actions édition/suppression |
-| `NodeFormView` | Création/édition d'un nœud (couche, type, aspect, tags, stéréotype, métadonnées) |
-| `OrphanListView` | Nœuds sans relation (N7) |
-| `RelListView` / `RelFormView` | Liste et formulaire de relations, avec avertissements ArchiMate (422) |
-| `AuditListView` | Journal d'audit (ADMIN uniquement) |
-| `DeleteConfirmModal` / `DeleteRelationConfirmModal` | Confirmation de suppression, avec option cascade pour ADMIN |
-| `ToastStack` | Notifications transversales (succès implicite via fermeture, erreurs via toasts) |
+| `GET /api/legacykb/*` → 502 | `neo4j-legacykb` injoignable ou `NEO4J_LEGACYKB_PASSWORD` absent | Vérifier la configuration Neo4j AuraDB / Key Vault |
+| `GET /api/legacykb/nodes/{id}` → 404 | Identifiant mal formé ou nœud absent du dump | Vérifier le format `e|{type}|{name}` ou `c|{id}` (cf. `legacykb_client.parse_node_id`) |
+| Réponses du Chat sans `graph_references` sur une question CardDemo | GPT-4o n'a pas invoqué les tools `legacykb_*` | Vérifier le system prompt (`_LEGACYKB_TOOLS_BLOCK` dans `generator.py`) et le mode (Rapide a un prompt tools réduit) |
+| `window.ReactFlow` / `window.dagre` undefined | Script vendor non chargé ou ordre incorrect dans `index.html` | Vérifier `jsx-runtime-shim.js` → `xyflow-react.umd.js` → `dagre.min.js` avant `LegacyKbPage.jsx` |
+| "Recentrer la disposition" ne change rien | Bundle ne contient pas le nœud sélectionné dans son arbre couvrant | Explorer le nœud (double-clic) avant de redisposer |

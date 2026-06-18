@@ -1,6 +1,4 @@
-# Digest épinglé : python:3.11-slim (amd64, mai 2026)
-# Mettre à jour via : docker pull python:3.11-slim && docker inspect --format='{{index .RepoDigests 0}}' python:3.11-slim
-FROM python:3.11-slim@sha256:02ebabf8ab1cb440135cdcbb31c81d1ef00e6fbdad12ad1c752a0c047759f495
+FROM python:3.11-slim
 
 WORKDIR /app
 

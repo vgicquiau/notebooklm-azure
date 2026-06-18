@@ -18,6 +18,23 @@ param deployerObjectId string
 @description('Image Docker initiale du Container App (placeholder pour premier déploiement)')
 param apiImageTag string = 'mcr.microsoft.com/azuredocs/containerapps-helloworld:latest'
 
+@description('Déployer le conteneur neo4j-legacykb (golden source GraphRAG)')
+param deployLegacyKb bool = true
+
+@description('Mot de passe du compte neo4j du conteneur neo4j-legacykb')
+@secure()
+param neo4jLegacyKbPassword string = ''
+
+@description('URI bolt:// du conteneur neo4j-legacykb (golden source GraphRAG) consommé par l\'API')
+param neo4jLegacyKbUri string = ''
+
+@description('Clé API partagée protégeant les endpoints /api/* — stockée dans Key Vault')
+@secure()
+param apiKey string = ''
+
+@description('Email pour les alertes Azure Monitor (redémarrages ACI neo4j-legacykb). Laisser vide pour désactiver les alertes.')
+param alertEmail string = ''
+
 var suffix = '${projectName}-${environment}'
 var tags = {
   project: projectName
@@ -96,6 +113,18 @@ module registry 'modules/registry.bicep' = {
   }
 }
 
+// ── Neo4j Legacy KB (golden source GraphRAG, conteneur ACI dédié) ────────────────
+module neo4jLegacyKb 'modules/neo4j-legacykb.bicep' = if (deployLegacyKb) {
+  name: 'neo4jLegacyKb'
+  params: {
+    suffix: suffix
+    location: location
+    tags: tags
+    neo4jPassword: neo4jLegacyKbPassword
+    alertEmail: alertEmail
+  }
+}
+
 // ── Container Apps (API) ──────────────────────────────────────────────────────
 module containerapp 'modules/containerapp.bicep' = {
   name: 'containerapp'
@@ -105,6 +134,8 @@ module containerapp 'modules/containerapp.bicep' = {
     tags: tags
     apiImageTag: apiImageTag
     appInsightsConnectionString: monitoring.outputs.appInsightsConnectionString
+    keyVaultUri: keyvault.outputs.uri
+    neo4jLegacyKbUri: deployLegacyKb ? neo4jLegacyKb.?outputs.?uri ?? '' : neo4jLegacyKbUri
   }
 }
 
@@ -191,6 +222,24 @@ resource kvStorageAccount 'Microsoft.KeyVault/vaults/secrets@2023-07-01' = {
   }
 }
 
+// Clé API — uniquement si fournie au déploiement.
+resource kvApiKey 'Microsoft.KeyVault/vaults/secrets@2023-07-01' = if (!empty(apiKey)) {
+  parent: kv
+  name: 'api-key'
+  properties: {
+    value: apiKey
+  }
+}
+
+// Mot de passe neo4j-legacykb — uniquement si fourni (instance golden source externe au déploiement).
+resource kvNeo4jLegacyKbPassword 'Microsoft.KeyVault/vaults/secrets@2023-07-01' = if (!empty(neo4jLegacyKbPassword)) {
+  parent: kv
+  name: 'neo4j-legacykb-password'
+  properties: {
+    value: neo4jLegacyKbPassword
+  }
+}
+
 // ── Outputs ───────────────────────────────────────────────────────────────────
 output apiUrl string = containerapp.outputs.apiUrl
 output registryLoginServer string = registry.outputs.loginServer
@@ -199,3 +248,8 @@ output openAIEndpoint string = openai.outputs.endpoint
 output searchEndpoint string = search.outputs.endpoint
 output storageAccountName string = storage.outputs.accountName
 output docIntEndpoint string = docint.outputs.endpoint
+output neo4jLegacyKbUri string = neo4jLegacyKb.?outputs.?uri ?? ''
+output neo4jLegacyKbFqdn string = neo4jLegacyKb.?outputs.?fqdn ?? ''
+output neo4jLegacyKbStorageAccount string = neo4jLegacyKb.?outputs.?storageAccountName ?? ''
+output neo4jLegacyKbShareName string = neo4jLegacyKb.?outputs.?shareName ?? ''
+output neo4jLegacyKbSslShareName string = neo4jLegacyKb.?outputs.?sslShareName ?? ''

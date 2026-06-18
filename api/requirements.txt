@@ -13,3 +13,6 @@ azure-monitor-opentelemetry==1.8.8
 # Proxy serveur-à-serveur vers fn-adgm-graph (api/routers/graph.py) — déjà présent
 # en transitif via openai, épinglé ici en direct car utilisé explicitement.
 httpx==0.28.1
+
+# Lecture directe de l'instance Neo4j neo4j-legacykb (api/routers/legacykb.py)
+neo4j==6.2.0

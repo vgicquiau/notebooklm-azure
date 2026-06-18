@@ -2,15 +2,225 @@
 // Props: messages[], isLoading, input, onInputChange(), onSend(), onSaveNote(),
 //        mode, onModeChange()
 
-// ── Rendu Markdown ─────────────────────────────────────────────
-const MarkdownContent = ({ text }) => {
-  if (!text) return null;
-  const html = DOMPurify.sanitize(marked.parse(text));
-  return (
+// ── Icônes inline pour le bouton de copie Mermaid (DOM brut, hors React) ──
+const _MERMAID_COPY_SVG = '<svg width="14" height="14" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="6.2" y="6.2" width="8" height="8" rx="2"/><path d="M11.5 6.2V4.6a2 2 0 0 0-2-2H4.6a2 2 0 0 0-2 2v4.9a2 2 0 0 0 2 2h1.6"/></svg>';
+const _MERMAID_CHECK_SVG = '<svg width="14" height="14" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 9.5l4.5 4.5 7.5-8"/></svg>';
+
+// ── Surligne la première occurrence d'un texte et fait défiler jusqu'à elle ──
+const _highlightAndScroll = (container, query) => {
+  if (!query) return;
+  if (container.querySelector('mark.nlaz-highlight')) return; // déjà fait
+
+  const target = query.trim().toLowerCase();
+  if (!target) return;
+
+  const walker = document.createTreeWalker(container, NodeFilter.SHOW_TEXT);
+  let node;
+  while ((node = walker.nextNode())) {
+    const text = node.nodeValue;
+    const idx = text.toLowerCase().indexOf(target);
+    if (idx !== -1) {
+      const range = document.createRange();
+      range.setStart(node, idx);
+      range.setEnd(node, idx + target.length);
+      const mark = document.createElement('mark');
+      mark.className = 'nlaz-highlight';
+      range.surroundContents(mark);
+      mark.scrollIntoView({ block: 'center' });
+      return;
+    }
+  }
+};
+
+// ── Modale plein écran : diagramme Mermaid zoomable/déplaçable ──
+const MermaidZoomModal = ({ svg, onClose }) => {
+  const [scale, setScale] = React.useState(1);
+  const [pos, setPos] = React.useState({ x: 0, y: 0 });
+  const [dragOrigin, setDragOrigin] = React.useState(null);
+
+  React.useEffect(() => {
+    const handler = (e) => { if (e.key === 'Escape') onClose(); };
+    window.addEventListener('keydown', handler);
+    return () => window.removeEventListener('keydown', handler);
+  }, [onClose]);
+
+  const clampScale = (v) => Math.min(4, Math.max(0.3, v));
+
+  const handleWheel = (e) => {
+    e.preventDefault();
+    const factor = e.deltaY > 0 ? 0.9 : 1.1;
+    setScale(s => clampScale(s * factor));
+  };
+
+  const handleMouseDown = (e) => {
+    setDragOrigin({ x: e.clientX, y: e.clientY, pos });
+  };
+  const handleMouseMove = (e) => {
+    if (!dragOrigin) return;
+    setPos({ x: dragOrigin.pos.x + (e.clientX - dragOrigin.x), y: dragOrigin.pos.y + (e.clientY - dragOrigin.y) });
+  };
+  const stopDrag = () => setDragOrigin(null);
+
+  const toolBtn = {
+    display: 'grid', placeItems: 'center', minWidth: 38, height: 38, padding: '0 12px',
+    borderRadius: 9, border: '1px solid rgba(0,0,0,0.13)', background: 'rgba(255,255,255,0.72)',
+    color: T.ink, fontFamily: T.font, fontSize: 13, fontWeight: 600, cursor: 'pointer',
+    boxShadow: '0 1px 3px rgba(0,0,0,0.08)',
+  };
+
+  return ReactDOM.createPortal(
     <div
-      className="nlaz-md"
-      dangerouslySetInnerHTML={{ __html: html }}
-    />
+      style={{
+        position: 'fixed', inset: 0, zIndex: 600,
+        background: 'rgba(246,246,243,0.88)',
+        backdropFilter: 'blur(18px)',
+        WebkitBackdropFilter: 'blur(18px)',
+        display: 'flex', flexDirection: 'column',
+        animation: 'nlCiteModalIn .18s ease',
+      }}
+      onClick={onClose}
+    >
+      <div
+        style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, padding: 14 }}
+        onClick={e => e.stopPropagation()}
+      >
+        <button title="Zoom -" onClick={() => setScale(s => clampScale(s / 1.2))} style={toolBtn}>−</button>
+        <button title="Réinitialiser" onClick={() => { setScale(1); setPos({ x: 0, y: 0 }); }} style={{ ...toolBtn, minWidth: 56 }}>
+          {Math.round(scale * 100)}%
+        </button>
+        <button title="Zoom +" onClick={() => setScale(s => clampScale(s * 1.2))} style={toolBtn}>+</button>
+        <button title="Fermer (Échap)" onClick={onClose} style={toolBtn}><Ic.Close s={16} /></button>
+      </div>
+
+      <div
+        style={{
+          flex: 1, overflow: 'hidden',
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+          cursor: dragOrigin ? 'grabbing' : 'grab',
+        }}
+        onClick={e => e.stopPropagation()}
+        onWheel={handleWheel}
+        onMouseDown={handleMouseDown}
+        onMouseMove={handleMouseMove}
+        onMouseUp={stopDrag}
+        onMouseLeave={stopDrag}
+      >
+        <div
+          className="nlaz-mermaid-zoom"
+          style={{
+            transform: `translate(${pos.x}px, ${pos.y}px) scale(${scale})`,
+            transition: dragOrigin ? 'none' : 'transform .08s ease-out',
+          }}
+          dangerouslySetInnerHTML={{ __html: svg }}
+        />
+      </div>
+    </div>,
+    document.body
+  );
+};
+
+// ── Rendu Markdown ─────────────────────────────────────────────
+const MarkdownContent = ({ text, hasCitations, onCitationClick, highlightText }) => {
+  const ref = React.useRef(null);
+  const onCitationClickRef = React.useRef(onCitationClick);
+  onCitationClickRef.current = onCitationClick;
+  const [zoomedSvg, setZoomedSvg] = React.useState(null);
+  const setZoomedSvgRef = React.useRef(setZoomedSvg);
+  setZoomedSvgRef.current = setZoomedSvg;
+
+  // Rendu des blocs ```mermaid en diagrammes SVG (mermaid.js, vendor) + bouton de
+  // copie du code source, affiché en haut à droite au survol (nlaz-mermaid-copy)
+  React.useEffect(() => {
+    const container = ref.current;
+    if (!container) return;
+
+    // Transforme les références textuelles [N] en vignettes cliquables (.nlaz-cite)
+    if (hasCitations) {
+      container.querySelectorAll('.nlaz-cite').forEach((el) => {
+        el.onclick = () => onCitationClickRef.current?.(Number(el.dataset.cite));
+      });
+    }
+
+    // Surligne et centre le passage correspondant à la citation (modale de source)
+    if (highlightText) _highlightAndScroll(container, highlightText);
+
+    const blocks = container.querySelectorAll('pre > code.language-mermaid');
+    blocks.forEach((codeEl, i) => {
+      const pre = codeEl.parentElement;
+      // Garde synchrone : si un render async est déjà en vol pour ce bloc
+      // (re-render React pendant que mermaid.render() est pending), on ne
+      // relance pas — évite la race condition double-render / erreur Mermaid.
+      if (pre.dataset.mermaidPending) return;
+      pre.dataset.mermaidPending = '1';
+      const source = codeEl.textContent;
+      const id = `nlaz-mermaid-${Date.now()}-${i}`;
+      mermaid.render(id, source)
+        .then(({ svg }) => {
+          // Seconde ligne de défense après securityLevel:'strict' de Mermaid —
+          // purifie le SVG avant injection dans le DOM (défense en profondeur XSS).
+          const cleanSvg = DOMPurify.sanitize(svg, {
+            USE_PROFILES: { svg: true, svgFilters: true },
+            ADD_TAGS: ['foreignObject', 'style'],
+            ADD_ATTR: ['requiredExtensions', 'xmlns', 'viewBox', 'dominant-baseline',
+                       'text-anchor', 'dy', 'class', 'style'],
+          });
+          const wrapper = document.createElement('div');
+          wrapper.className = 'nlaz-mermaid';
+          wrapper.innerHTML = cleanSvg;
+          wrapper.title = 'Cliquer pour agrandir';
+          // Les ids internes (clipPath, marqueurs, styles scopés #id) sont préfixés
+          // par `id` — on les renomme pour la copie affichée dans la modale afin
+          // d'éviter toute collision avec ce diagramme déjà présent dans la page.
+          const zoomSvg = cleanSvg.split(id).join(`${id}-zoom`);
+          wrapper.addEventListener('click', () => setZoomedSvgRef.current(zoomSvg));
+
+          const copyBtn = document.createElement('button');
+          copyBtn.type = 'button';
+          copyBtn.className = 'nlaz-mermaid-copy';
+          copyBtn.title = 'Copier le code Mermaid';
+          copyBtn.innerHTML = _MERMAID_COPY_SVG;
+          copyBtn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            navigator.clipboard.writeText(source).then(() => {
+              copyBtn.innerHTML = _MERMAID_CHECK_SVG;
+              copyBtn.classList.add('nlaz-mermaid-copy--done');
+              setTimeout(() => {
+                copyBtn.innerHTML = _MERMAID_COPY_SVG;
+                copyBtn.classList.remove('nlaz-mermaid-copy--done');
+              }, 1500);
+            });
+          });
+          wrapper.appendChild(copyBtn);
+
+          pre.replaceWith(wrapper);
+        })
+        .catch(() => {
+          pre.dataset.mermaidPending = '';
+          pre.classList.add('nlaz-mermaid-error');
+        });
+    });
+  }, [text, highlightText]);
+
+  if (!text) return null;
+
+  // Remplace les références textuelles [N] par des vignettes cliquables avant
+  // le rendu Markdown (le span survit à marked.parse + DOMPurify.sanitize)
+  const source = hasCitations
+    ? text.replace(/\[(\d+)\]/g, '<sup class="nlaz-cite" data-cite="$1">$1</sup>')
+    : text;
+
+  const html = DOMPurify.sanitize(marked.parse(source));
+  return (
+    <>
+      <div
+        ref={ref}
+        className="nlaz-md"
+        dangerouslySetInnerHTML={{ __html: html }}
+      />
+      {zoomedSvg && (
+        <MermaidZoomModal svg={zoomedSvg} onClose={() => setZoomedSvg(null)} />
+      )}
+    </>
   );
 };
 
@@ -149,7 +359,7 @@ const CitationModal = ({ citation, onClose }) => {
         {/* Corps — texte du chunk */}
         <div style={{ flex: 1, overflowY: 'auto', padding: '18px 22px 22px' }}>
           {citation.content
-            ? <MarkdownContent text={citation.content} />
+            ? <MarkdownContent text={citation.content} highlightText={citation.snippet} />
             : <p style={{ color: T.muted, fontFamily: T.font, fontSize: 14 }}>
                 Contenu non disponible.
               </p>
@@ -185,14 +395,18 @@ const SourceCard = ({ citation, onClick }) => {
       }}
       title="Voir le passage source"
     >
-      {/* Badge numéroté */}
-      <span style={{
-        display: 'grid', placeItems: 'center',
-        width: 20, height: 20, borderRadius: 6, flexShrink: 0,
-        background: T.azure, color: '#fff', fontSize: 10.5, fontWeight: 700,
-      }}>
-        {citation.id}
-      </span>
+      {/* Badge(s) numéroté(s) — un par occurrence [N] citant cette source */}
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 4, flexShrink: 0 }}>
+        {(citation.ids ?? [citation.id]).map(id => (
+          <span key={id} style={{
+            display: 'grid', placeItems: 'center',
+            width: 20, height: 20, borderRadius: 6, flexShrink: 0,
+            background: T.azure, color: '#fff', fontSize: 10.5, fontWeight: 700,
+          }}>
+            {id}
+          </span>
+        ))}
+      </div>
       <div style={{ minWidth: 0 }}>
         <div style={{
           fontSize: 12.5, fontWeight: 600, color: T.ink,
@@ -211,6 +425,44 @@ const SourceCard = ({ citation, onClick }) => {
           }}>
             {citation.snippet}
           </div>
+        )}
+      </div>
+    </div>
+  );
+};
+
+// ── Fiche "base de connaissances consultée" (legacy KB, neo4j-legacykb) ──────────
+const GraphRefCard = ({ graphRef }) => {
+  const [hovered, setHovered] = React.useState(false);
+  return (
+    <div
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
+      style={{
+        display: 'flex', alignItems: 'center', gap: 10, padding: '11px 13px',
+        border: `1px solid ${hovered ? T.azureBorder : T.border}`,
+        borderRadius: T.radiusMd,
+        background: hovered ? T.azureSoft : T.white,
+        transition: 'background .12s, border-color .12s',
+      }}
+      title={graphRef.id}
+    >
+      <span style={{
+        display: 'grid', placeItems: 'center',
+        width: 20, height: 20, borderRadius: 6, flexShrink: 0,
+        background: T.azure, color: '#fff', fontSize: 10.5, fontWeight: 700,
+      }}>
+        <Ic.Doc s={12} />
+      </span>
+      <div style={{ minWidth: 0 }}>
+        <div style={{
+          fontSize: 12.5, fontWeight: 600, color: T.ink,
+          overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+        }}>
+          {graphRef.nom}
+        </div>
+        {graphRef.type && (
+          <div style={{ fontSize: 12, color: T.sub }}>{graphRef.type}</div>
         )}
       </div>
     </div>
@@ -245,6 +497,22 @@ const AssistantMessage = ({ msg, onSaveNote }) => {
   const visibleCitations = (msg.citations ?? []).filter(c => citedNums.has(c.id));
   const hasCitations = visibleCitations.length > 0;
 
+  // Regroupe les vignettes citant la même source (fiche) — n'affiche la source
+  // qu'une fois, avec toutes les vignettes [N] qui y renvoient
+  const groupedCitations = [];
+  const groupBySource = new Map();
+  visibleCitations.forEach(c => {
+    const key = `${c.source}|${c.page}`;
+    const group = groupBySource.get(key);
+    if (group) {
+      group.ids.push(c.id);
+    } else {
+      const newGroup = { ...c, ids: [c.id] };
+      groupBySource.set(key, newGroup);
+      groupedCitations.push(newGroup);
+    }
+  });
+
   const handleCitationClick = React.useCallback((num) => {
     const c = visibleCitations.find(c => c.id === num);
     if (c) setOpenCitation(c);
@@ -274,8 +542,25 @@ const AssistantMessage = ({ msg, onSaveNote }) => {
               Références
             </div>
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(210px, 1fr))', gap: 10 }}>
-              {visibleCitations.map(c => (
-                <SourceCard key={c.id} citation={c} onClick={() => setOpenCitation(c)} />
+              {groupedCitations.map(c => (
+                <SourceCard key={c.ids.join(',')} citation={c} onClick={() => setOpenCitation(c)} />
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* Base de connaissances legacy consultée (neo4j-legacykb, via tools) */}
+        {(msg.graphReferences ?? []).length > 0 && (
+          <div style={{ marginTop: 14, marginBottom: 14 }}>
+            <div style={{
+              fontSize: 11.5, fontWeight: 700, letterSpacing: 0.6,
+              textTransform: 'uppercase', color: T.muted, marginBottom: 9,
+            }}>
+              Base de connaissances consultée
+            </div>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(210px, 1fr))', gap: 10 }}>
+              {msg.graphReferences.map(ref => (
+                <GraphRefCard key={ref.id} graphRef={ref} />
               ))}
             </div>
           </div>

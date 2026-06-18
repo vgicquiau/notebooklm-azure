@@ -187,6 +187,8 @@
 | `PRODUIT` | `Composant`, `Bounded_Context` → `Evenement_Domaine` | Ce composant produit cet événement | `fiabilite` |
 | `CONSOMME_EVENEMENT` | `Composant`, `Bounded_Context` → `Evenement_Domaine` | Ce composant consomme cet événement | `fiabilite` |
 | `DEPEND_DE` *(Ext #3 — extension additive)* | `Domaine_Fonctionnel`→`Domaine_Fonctionnel`, `Fonction`→`Fonction`, `Processus_Fonctionnel`→`Processus_Fonctionnel` | Dépendance générique entre deux entités du même label. `nature` précise le type de dépendance : `DONNEES` (flux de données entre domaines), `ORDONNANCEMENT` (dépendance d'exécution entre domaines), `GOUVERNANCE` (un domaine gouverne/pilote un autre), `APPEL` (une fonction invoque une autre fonction), `DECLENCHEMENT` (un processus déclenche un autre processus) | `fiabilite`, `nature: DONNEES\|ORDONNANCEMENT\|APPEL\|DECLENCHEMENT\|GOUVERNANCE`, `description` (optionnelle) |
+| `APPARTIENT_DOMAINE` *(Ext #4 — extension additive)* | `Composant`, `Job_Batch`, `Structure_Partagee`, `Store_Echange` → `Domaine_Fonctionnel` | Rattachement d'un artefact applicatif/données à son domaine fonctionnel. Typiquement issu d'un clustering automatique (communautés GraphRAG/Louvain) plutôt que d'une extraction documentaire directe — `fiabilite` est alors `HYPOTHÈSE` jusqu'à validation humaine via Exploration. | `fiabilite` |
+| `CONTIENT_PROGRAMME` *(Ext #4 — extension additive)* | `Job_Batch` → `Composant` | Ce job batch exécute ce composant. Distinct de `CONTIENT_STEP` (qui passe par un `Unite_Execution` intermédiaire) — utilisé quand la source ne décrit pas les steps individuellement (ex. import GraphRAG). | `fiabilite` |
 
 ---
 
@@ -272,6 +274,10 @@
 
 // ── RELATIONS ──────────────────────────────────────────────────────────────
 // (voir Partie B pour la liste complète)
+// Ext #4 (extension additive, B.2) : APPARTIENT_DOMAINE (Composant|Job_Batch|
+// Structure_Partagee|Store_Echange -> Domaine_Fonctionnel), CONTIENT_PROGRAMME
+// (Job_Batch -> Composant) — issues d'imports automatiques (ex. GraphRAG), fiabilite
+// HYPOTHÈSE par défaut.
 // Propriété obligatoire sur toute relation : fiabilite: FAIT|HYPOTHÈSE|SUPPOSÉ
 
 // ── PROPRIÉTÉ MÉTA-FIABILITÉ ───────────────────────────────────────────────
