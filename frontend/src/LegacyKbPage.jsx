@@ -77,8 +77,16 @@ const RELATION_COLORS = {
 // Mots-clés techniques mainframe détectés dans `technical_description` (tags)
 const TECH_TAGS = ['VSAM', 'CICS', 'DB2', 'SQL', 'MQ', 'IMS', 'KSDS', 'JCL', 'COPY', 'PACBASE', 'GOBACK'];
 
-const NODE_W = 220;
-const NODE_H = 56;
+// Nœuds carrés — format uniforme, ratio 1:1, meilleure grille dans les zones.
+const NODE_W = 90;
+const NODE_H = 90;
+
+// Labels abrégés pour la pastille de type (badge compact dans le nœud carré).
+const ENTITY_TYPE_SHORT = {
+  Program: 'PRG', BatchJob: 'JOB', Copybook: 'CPY',
+  GenericFile: 'FIC', 'External/Doc': 'EXT',
+};
+const COMMUNITY_LEVEL_SHORT = { 2: 'DOM', 1: 'SDOM' };
 
 // Marge des zones de regroupement par communauté (le haut inclut l'espace
 // pour l'étiquette de titre de la zone).
@@ -86,10 +94,9 @@ const ZONE_PADDING_X = 24;
 const ZONE_PADDING_TOP = 34;
 const ZONE_PADDING_BOTTOM = 16;
 
-// Disposition en grille des membres d'une zone (carré/rectangle plutôt que
-// colonne) — pas horizontal/vertical entre deux membres adjacents.
-const ZONE_GRID_GAP_X = NODE_W + 24;
-const ZONE_GRID_GAP_Y = NODE_H + 14;
+// Disposition en grille des membres d'une zone — espacement uniforme entre nœuds carrés.
+const ZONE_GRID_GAP_X = NODE_W + 20;
+const ZONE_GRID_GAP_Y = NODE_H + 16;
 
 // ── Couleur → rgba (teinte/bordure des zones de regroupement) ────────────────
 const _hexToRgba = (hex, alpha) => {
@@ -131,25 +138,27 @@ const HANDLE_SIDES = [
   { id: 'left',   position: Position.Left },
 ];
 
-// ── Nœud custom — entité (pastille ronde) ou communauté (pastille carrée) ─────
+// ── Nœud custom — carré 90×90, badge de type abrégé + nom sur 2 lignes ────────
+// Format carré : hiérarchie plus lisible en layout TB, grilles de zone compactes.
 const LegacyNode = ({ data }) => {
   const isEntity = data.kind === 'entity';
   const color = isEntity
     ? (ENTITY_COLORS[data.type] ?? '#9e9e9e')
     : (COMMUNITY_COLORS[data.level] ?? '#bdbdbd');
+  const shortLabel = isEntity
+    ? (ENTITY_TYPE_SHORT[data.type] ?? data.type.slice(0, 3).toUpperCase())
+    : (COMMUNITY_LEVEL_SHORT[data.level] ?? `N${data.level}`);
 
-  // Points d'ancrage invisibles — toujours présents pour l'accroche des arêtes,
-  // mais masqués visuellement (cf. demande : pas de poignées de connexion affichées).
   const handleStyle = { background: 'transparent', border: 'none', width: 1, height: 1, opacity: 0 };
 
   return (
     <div style={{
-      display: 'flex', flexDirection: 'column', gap: 5,
-      width: NODE_W, height: NODE_H, boxSizing: 'border-box', padding: '7px 12px',
+      display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 5,
+      width: NODE_W, height: NODE_H, boxSizing: 'border-box', padding: '8px',
       borderRadius: T.radiusSm,
       border: data.isCenter ? `2px solid ${T.azure}` : 'none',
       background: T.white,
-      fontFamily: T.font, color: T.ink,
+      fontFamily: T.font, color: T.ink, textAlign: 'center',
       boxShadow: data.highlighted
         ? '0 2px 6px rgba(28,27,24,0.12), 0 0 0 3px rgba(251,140,0,0.45)'
         : '0 2px 6px rgba(28,27,24,0.12)',
@@ -161,16 +170,20 @@ const LegacyNode = ({ data }) => {
         </React.Fragment>
       ))}
       <span style={{
-        alignSelf: 'flex-start', flexShrink: 0,
-        padding: '2px 8px', borderRadius: 999,
+        flexShrink: 0,
+        padding: '2px 7px', borderRadius: 999,
         background: `linear-gradient(135deg, ${_hexToShade(color, 0.5)}, ${color})`,
-        fontSize: 10, fontWeight: 700, color: T.white, whiteSpace: 'nowrap',
+        fontSize: 9, fontWeight: 700, color: T.white, letterSpacing: 0.5,
+        maxWidth: '100%', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
       }}>
-        {isEntity ? (ENTITY_TYPE_LABELS[data.type] ?? data.type) : (COMMUNITY_LEVEL_LABELS[data.level] ?? `Niveau ${data.level}`)}
+        {shortLabel}
       </span>
       <span style={{
-        fontSize: 12, fontWeight: 600,
-        overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+        fontSize: 11, fontWeight: 600, width: '100%', lineHeight: 1.35,
+        overflow: 'hidden',
+        display: '-webkit-box',
+        WebkitLineClamp: 2,
+        WebkitBoxOrient: 'vertical',
       }}>
         {data.nom}
       </span>
@@ -653,7 +666,10 @@ const _layout = (bundle, centerId, positions, visibleKinds, highlightedIds) => {
   // `nodesep`/`ranksep` généreux — avec des zones désormais dimensionnées
   // (cf. `clusterGrid`), un espacement trop faible laissait les rectangles de
   // zone chevaucher leurs voisins.
-  g.setGraph({ rankdir: 'LR', nodesep: 50, ranksep: 110 });
+  // TB (top→bottom) : la hiérarchie se lit de haut en bas — BatchJob en haut,
+  // Programmes en dessous, Fichiers/Copybooks au bas. Rang = distance de dépendance.
+  // ranksep généreux pour respirer entre niveaux ; nodesep laisse de l'air entre voisins.
+  g.setGraph({ rankdir: 'TB', nodesep: 60, ranksep: 120 });
   g.setDefaultEdgeLabel(() => ({}));
   // Filet de sécurité : un nœud créé implicitement par setEdge/setParent (id
   // référencé par une arête ou un parent mais jamais explicitement ajouté via
@@ -919,7 +935,7 @@ const _layout = (bundle, centerId, positions, visibleKinds, highlightedIds) => {
         source: from,
         target: to,
         label,
-        type: 'smoothstep',
+        type: 'straight',
         markerEnd: { type: MarkerType.ArrowClosed, color: edgeColor },
         style: { stroke: edgeColor, strokeOpacity: 0.75 },
         labelStyle: { fontSize: 10, fill: T.muted },
