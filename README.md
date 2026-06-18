@@ -210,15 +210,20 @@ notebooklm-azure/
 ├── api/
 │   ├── main.py                 # FastAPI app, middlewares, lifespan (Key Vault → env)
 │   ├── routers/
-│   │   ├── chat.py             # POST /api/chat (+ tool-calling legacy KB)
+│   │   ├── chat.py             # POST /api/chat · GET /api/chat/history/{id} · POST /api/chat/clear
 │   │   ├── ingest.py           # POST /api/ingest, GET /api/ingest/{job_id}
 │   │   ├── legacykb.py         # GET /api/legacykb/* (golden source CardDemo)
 │   │   └── sources.py          # GET/DELETE /api/sources
-│   └── services/
-│       ├── retriever.py        # Recherche vectorielle Azure AI Search
-│       ├── generator.py        # Génération RAG (GPT-4o + tools)
-│       ├── graph_tools.py      # Tools function-calling → legacykb_*
-│       └── legacykb_client.py  # Client Neo4j
+│   ├── services/
+│   │   ├── retriever.py        # Recherche vectorielle Azure AI Search
+│   │   ├── generator.py        # Génération RAG (GPT-4o + tools)
+│   │   ├── graph_tools.py      # Tools function-calling → legacykb_*
+│   │   ├── legacykb_client.py  # Client Neo4j
+│   │   ├── session_store.py    # Persistance SQLite des sessions de chat
+│   │   ├── compactor.py        # Compaction glissante de l'historique (résumé LLM)
+│   │   └── rate_limiter.py     # Rate limiting /api/chat (20 req/IP/60s)
+│   └── data/
+│       └── chat_history.db     # Base SQLite (créée au démarrage, non commitée)
 ├── ingest/
 │   ├── chunkers/               # Un chunker par format (PDF, DOCX, PPTX, XLSX, MD, TXT)
 │   ├── embedder.py             # Génération d'embeddings par batch
