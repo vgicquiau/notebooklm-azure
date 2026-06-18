@@ -3,7 +3,7 @@
 > **Projet** : Agent documentaire RAG sur Azure  
 > **Auteur** : Vincent Gicquiau — Lead Solution Architect  
 > **Date** : Juin 2026  
-> **Version** : 1.1
+> **Version** : 1.2
 
 ---
 
@@ -184,6 +184,8 @@ flowchart LR
 | **Extraction PDF** | Azure Document Intelligence prebuilt-layout | — |
 | **Tokenisation** | tiktoken cl100k_base | — |
 | **Base de connaissances Legacy KB** | Neo4j AuraDB (`neo4j-legacykb`, driver Python `neo4j`) | golden source, lecture seule |
+| **Persistance des sessions** | SQLite (`api/data/chat_history.db`) | historique conversationnel durable |
+| **Rate limiting** | Fenêtre glissante 60 s, 20 req/IP en mémoire | `api/services/rate_limiter.py` |
 | **Infrastructure** | Bicep (IaC) | — |
 | **Conteneur** | Docker / App Service for Containers | — |
 | **Monitoring** | Application Insights | — |
@@ -288,8 +290,9 @@ sequenceDiagram
 | Méthode | Route | Description | Corps / Paramètres |
 |---|---|---|---|
 | `POST` | `/api/chat` | Requête RAG — génère une réponse sourcée | `{message, mode, top_k, session_id?, injected_notes[]}` |
-| `DELETE` | `/api/chat/{session_id}` | Purge l'historique d'une session | — |
-| `POST` | `/api/ingest` | Upload + lancement de l'ingestion (202) | `multipart/form-data` — champ `file` (PDF/DOCX/MD, max 50 Mo) |
+| `GET` | `/api/chat/history/{session_id}` | Ré-hydrate l'historique complet d'une session (frontend reload) | — → `{messages[], summary}` |
+| `POST` | `/api/chat/clear` | Purge l'historique d'une session | `{session_id}` |
+| `POST` | `/api/ingest` | Upload + lancement de l'ingestion (202) | `multipart/form-data` — champ `file` (PDF/DOCX/PPTX/XLSX/MD/TXT/code, max 50 Mo) |
 | `GET` | `/api/ingest/{job_id}` | Polling du statut d'un job d'ingestion | — → `{job_id, status, filename, message, chunks}` |
 | `GET` | `/api/legacykb/*` | Lecture du graphe `neo4j-legacykb` (santé, stats, domaines, recherche, voisinage) — voir F7 | — |
 | `GET` | `/health` | Health check | — → `{status: "ok"}` |
@@ -330,11 +333,18 @@ Les trois modes ajustent simultanément le comportement du LLM et la quantité d
 
 ### Mémoire conversationnelle
 
-Chaque session est identifiée par un `session_id` UUID généré côté serveur. L'historique est conservé en mémoire (dict Python) jusqu'à 40 messages (20 tours).
+Chaque session est identifiée par un `session_id` UUID généré côté serveur. L'historique est **persisté dans SQLite** (`api/data/chat_history.db`) et survit aux redémarrages de l'application. Les sessions inactives depuis plus de 24 h sont automatiquement purgées (`SESSION_TTL_SECONDS = 86 400`).
 
-À chaque requête, les **8 derniers messages** (4 tours) sont injectés dans le contexte envoyé au LLM — fenêtre glissante pour limiter la consommation de tokens tout en maintenant la cohérence conversationnelle.
+À chaque requête, tous les messages **non compactés** de la session sont envoyés au LLM. Un mécanisme de **compaction glissante** (`api/services/compactor.py`) évite la croissance illimitée du contexte :
 
-**Limite** : les sessions sont perdues au redémarrage de l'application (mémoire volatile). Pour une persistance durable, il faudrait stocker les sessions dans Azure Cosmos DB ou Redis Cache.
+- Déclenchement : dès que la session dépasse **12 tours non compactés** (24 messages)
+- Compaction : les **4 tours les plus anciens** (8 messages) sont résumés par le LLM (mode peu coûteux) et fusionnés dans `sessions.summary_text`
+- Les messages compactés restent en base (affichage UI / export) mais ne sont plus envoyés au LLM
+- Échec silencieux : la compaction est best-effort et ne bloque jamais une requête de chat
+
+L'historique complet d'une session peut être ré-hydraté par le frontend après un reload de page via `GET /api/chat/history/{session_id}`.
+
+**Rate limiting** : l'endpoint `/api/chat` est limité à **20 requêtes par IP sur 60 secondes** (fenêtre glissante en mémoire, `api/services/rate_limiter.py`). Dépassement → HTTP 429.
 
 ---
 
@@ -417,7 +427,7 @@ App
 | Upload de document | Bouton "Ajouter un document" → `FormData POST /api/ingest` → polling `GET /api/ingest/{job_id}` |
 | Toast d'ingestion | Progression temps réel (pending → running → done/error) avec auto-dismiss succès 6s |
 | Persistance locale | Notes et `session_id` conservés dans `localStorage` (survie au reload) |
-| Nouvelle conversation | Purge l'historique serveur (`DELETE /api/chat/{session_id}`) + reset état local |
+| Nouvelle conversation | Purge l'historique serveur (`POST /api/chat/clear`) + reset état local |
 
 ---
 
@@ -494,7 +504,22 @@ Tous les endpoints `/api/*` sont protégés par une clé partagée. Le middlewar
 
 - Header accepté : `X-API-Key: <key>` ou `Authorization: Bearer <key>`
 - Si `API_KEY` est vide : accès libre (mode développement local non configuré)
-- Routes exclues : `/health`, `/api/config` (probe et config publique du frontend)
+- Routes exclues : `/health` (probe de liveness)
+
+**Livraison de l'API Key au frontend** : la clé est injectée dynamiquement à la volée dans `index.html` sous forme d'une balise `<meta name="nlaz-api-key" content="…">` (endpoint `GET /`). Elle n'est donc pas accessible à un `curl` anonyme sans avoir d'abord chargé la page.
+
+### Headers de sécurité HTTP (`SecurityHeadersMiddleware`)
+
+Ajouté sur toutes les réponses de l'API :
+
+| Header | Valeur | Objectif |
+|--------|--------|----------|
+| `X-Content-Type-Options` | `nosniff` | Prévenir le MIME-sniffing |
+| `X-Frame-Options` | `DENY` | Bloquer le clickjacking |
+| `Referrer-Policy` | `strict-origin-when-cross-origin` | Limiter les fuites d'URL |
+| `Permissions-Policy` | `geolocation=(), microphone=(), camera=()` | Désactiver les APIs navigateur non utilisées |
+| `Content-Security-Policy` | `default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval'…` | Bloquer les injections XSS ; `unsafe-eval`/`unsafe-inline` requis par Babel Standalone |
+| `Strict-Transport-Security` | `max-age=31536000; includeSubDomains` | Forcer HTTPS (ignoré silencieusement sur HTTP local) |
 
 ### Contrôle d'accès Azure OpenAI
 
@@ -628,27 +653,25 @@ Les 3 modes permettent d'optimiser le ratio qualité/coût :
 | Limite | Statut | Explication |
 |---|---|---|
 | **Contexte partiel** | Structurel | Le LLM ne voit que 5 à 20 extraits par requête. Pour les questions transversales ("tous les flux"), certains éléments peuvent être manqués si les chunks correspondants ne sont pas dans le top-K récupéré. |
-| **Sessions volatiles** | Structurel | Les historiques de conversation sont perdus au redémarrage de l'App Service (stockage in-memory). |
+| **Sessions volatiles** | Résolu ✅ | L'historique est persisté en SQLite (`api/data/chat_history.db`). Les sessions survivent aux redémarrages ; elles expirent après 24 h d'inactivité. |
 | **Ingestion manuelle** | Partiellement résolu ✅ | L'upload via l'interface UI permet d'ajouter des documents à la volée. L'ingestion automatique sur nouveau blob (Azure Function) n'est pas encore en place. |
 | **Pas de streaming** | Structurel | La réponse est affichée en une seule fois après génération complète (pas de streaming token-by-token). |
-| **Formats non supportés** | Structurel | Seuls PDF, DOCX et Markdown sont supportés. Les fichiers Excel, PowerPoint ou images scannées ne sont pas ingérés. |
+| **Formats non supportés** | Partiellement résolu ✅ | PDF, DOCX, PPTX, XLSX, Markdown, TXT et code source sont supportés via l'upload UI. Le script CLI `ingest.py` supporte actuellement uniquement PDF, DOCX et Markdown. Les images scannées (sans couche texte) ne sont pas ingérées. |
 | **Viewer document original** | Connu | Le viewer de citation affiche le texte extrait du chunk (déjà dans l'index). Le fichier original (PDF visuel, mise en page) n'est pas accessible car supprimé après ingestion. |
 
 ### Axes d'amélioration prioritaires
 
 1. **Streaming de la réponse** — Server-Sent Events (SSE) côté API + rendu progressif côté frontend → meilleure expérience pour les réponses longues en mode Approfondi
 
-2. **Persistance des sessions** — Stocker les historiques dans Azure Cosmos DB ou Azure Cache for Redis → survie aux redémarrages
+2. **Extension CLI ingest** — Ajouter le support PPTX, XLSX et TXT/code au script `ingest.py` (les chunkers existent déjà, seule la liste `SUPPORTED_EXTENSIONS` doit être étendue)
 
 3. **Ingestion automatisée** — Azure Function déclenchée sur nouveau blob dans le Storage Account → ingestion en continu sans intervention manuelle (complémentaire à l'upload UI existant)
 
 4. **Viewer PDF natif** — Conserver le fichier original après ingestion (Azure Blob Storage), exposer un endpoint `GET /api/document/{hash}`, intégrer PDF.js → affichage du document à la page citée
 
-5. **Support Excel/PowerPoint** — Document Intelligence supporte `.xlsx` et `.pptx` via le modèle `prebuilt-layout`
+5. **Feedback utilisateur** — Boutons 👍/👎 sur les réponses, stockés dans Cosmos DB → données pour évaluer et améliorer la qualité du RAG
 
-6. **Feedback utilisateur** — Boutons 👍/👎 sur les réponses, stockés dans Cosmos DB → données pour évaluer et améliorer la qualité du RAG
-
-7. **Évaluation RAG** — Mettre en place des métriques (faithfulness, context precision) via Azure AI Evaluation ou Ragas pour mesurer objectivement la qualité des réponses
+6. **Évaluation RAG** — Mettre en place des métriques (faithfulness, context precision) via Azure AI Evaluation ou Ragas pour mesurer objectivement la qualité des réponses
 
 ---
 
@@ -689,8 +712,8 @@ Permet à tout membre de l'équipe d'interroger en langage naturel l'ensemble du
 |---|---|
 | Questions en langage naturel (français) | Réponses depuis la mémoire générale du LLM |
 | Réponses Markdown structurées avec citations `[N]` | Streaming token-by-token |
-| Historique conversationnel (4 tours glissants) | Persistance des sessions entre redémarrages |
-| 3 modes d'analyse (voir F2) | Modes personnalisés par utilisateur |
+| Historique conversationnel persistant (SQLite) avec compaction | Modes personnalisés par utilisateur |
+| 3 modes d'analyse (voir F2) | — |
 
 **Parcours Utilisateur**
 
@@ -703,7 +726,7 @@ And seules les sources effectivement citées apparaissent dans "Références"
 
 Given l'utilisateur a reçu une réponse
 When il pose une question de suivi implicite ("Et pour le module B ?")
-Then la requête inclut les 8 derniers messages d'historique
+Then la requête inclut l'historique non compacté de la session (SQLite)
 And la réponse tient compte du contexte conversationnel
 
 Given aucun chunk pertinent n'est trouvé
@@ -712,11 +735,12 @@ Then l'API retourne "Aucun document pertinent trouvé pour cette question."
 ```
 
 **Règles de Gestion**
-- Message : 1 à 4 000 caractères (validation Pydantic)
+- Message : 1 à 32 000 caractères (validation Pydantic)
 - `top_k` : 5 / 10 / 20 selon le mode
 - `max_tokens` : 600 / 2 000 / 4 000 selon le mode
-- Historique envoyé au LLM : 8 derniers messages (fenêtre glissante)
-- Session expirée au redémarrage de l'API (stockage in-memory)
+- Historique envoyé au LLM : tous les messages non compactés (compaction automatique au-delà de 12 tours)
+- Sessions persistées en SQLite ; expiration après 24 h d'inactivité
+- Rate limit : 20 requêtes par IP sur 60 secondes (HTTP 429 en cas de dépassement)
 
 **Cas Limites et Gestion des Erreurs**
 
@@ -725,6 +749,7 @@ Then l'API retourne "Aucun document pertinent trouvé pour cette question."
 | Azure OpenAI indisponible (503) | Message d'erreur dans le chat |
 | Azure AI Search indisponible | HTTP 503 → message d'erreur dans le chat |
 | Quota TPM dépassé (429) | Retry backoff exponentiel — tenacity, 3 essais |
+| Rate limit dépassé (20 req/60s) | HTTP 429 → message d'erreur côté front |
 | Message vide soumis | Bouton désactivé côté front + validation Pydantic (`min_length=1`) |
 | Réponse tronquée par `max_tokens` | Comportement GPT-4o attendu en mode Rapide |
 
@@ -732,7 +757,7 @@ Then l'API retourne "Aucun document pertinent trouvé pour cette question."
 
 #### III. Architecture Technique
 
-**Composants impactés** : `ChatPanel.jsx` · `App.jsx` · `api/routers/chat.py` · `api/services/retriever.py` · `api/services/generator.py`
+**Composants impactés** : `ChatPanel.jsx` · `App.jsx` · `api/routers/chat.py` · `api/services/retriever.py` · `api/services/generator.py` · `api/services/session_store.py` · `api/services/compactor.py` · `api/services/rate_limiter.py`
 
 **Contrat d'Interface**
 
@@ -740,7 +765,9 @@ Then l'API retourne "Aucun document pertinent trouvé pour cette question."
 POST /api/chat
 Body: { message, session_id?, top_k, mode, injected_notes[] }
 Response 200: { answer, session_id, sources[]{file,page,section,score,content}, tokens_used }
-DELETE /api/chat/{session_id}   → purge historique
+
+GET  /api/chat/history/{session_id}   → ré-hydratation frontend : { messages[], summary }
+POST /api/chat/clear                  → purge historique : Body { session_id }
 ```
 
 **Diagramme d'états — message**
