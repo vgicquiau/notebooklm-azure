@@ -126,10 +126,17 @@
     mermaid.initialize({ startOnLoad: false, theme: 'neutral', securityLevel: 'strict' });
   </script>
 
-  <!-- React Flow (xyflow) + dagre — rendu du graphe Legacy KB (LegacyKbPage), expose window.ReactFlow / window.dagre -->
+  <!-- React Flow (xyflow) — rendu du graphe Legacy KB (LegacyKbPage), expose window.ReactFlow -->
   <script src="vendor/jsx-runtime-shim.js"></script>
   <script src="vendor/xyflow-react.umd.js"></script>
-  <script src="vendor/dagre.min.js"></script>
+
+  <!-- d3-force — layout force-directed du graphe Legacy KB, expose window.d3.
+       Modules d3 individuels (pas le bundle complet) : chaque fichier fusionne ses
+       exports dans window.d3 — ordre de dépendance obligatoire (force en dernier). -->
+  <script src="vendor/d3-dispatch.min.js"></script>
+  <script src="vendor/d3-quadtree.min.js"></script>
+  <script src="vendor/d3-timer.min.js"></script>
+  <script src="vendor/d3-force.min.js"></script>
 
   <!-- Composants React (ordre impératif : tokens → Header → SourcesRail → NotesRail → ChatPanel → LegacyKbPage → App) -->
   <script type="text/babel" src="src/tokens.jsx"></script>

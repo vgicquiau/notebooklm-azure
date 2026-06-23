@@ -136,6 +136,9 @@ module containerapp 'modules/containerapp.bicep' = {
     appInsightsConnectionString: monitoring.outputs.appInsightsConnectionString
     keyVaultUri: keyvault.outputs.uri
     neo4jLegacyKbUri: deployLegacyKb ? neo4jLegacyKb.?outputs.?uri ?? '' : neo4jLegacyKbUri
+    registryLoginServer: registry.outputs.loginServer
+    gpt4oDeploymentName: openai.outputs.gpt4oDeploymentName
+    embeddingDeploymentName: openai.outputs.embeddingDeploymentName
   }
 }
 

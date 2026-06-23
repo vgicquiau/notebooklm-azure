@@ -5,6 +5,9 @@ param apiImageTag string
 param appInsightsConnectionString string
 param keyVaultUri string = ''
 param neo4jLegacyKbUri string = ''
+param registryLoginServer string
+param gpt4oDeploymentName string
+param embeddingDeploymentName string
 
 resource apiIdentity 'Microsoft.ManagedIdentity/userAssignedIdentities@2023-01-31' = {
   name: 'id-api-${suffix}'
@@ -22,25 +25,21 @@ resource roleAcrPull 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
   }
 }
 
-resource appServicePlan 'Microsoft.Web/serverFarms@2023-12-01' = {
-  name: 'asp-${suffix}'
+resource environment 'Microsoft.App/managedEnvironments@2023-05-01' = {
+  name: 'cae-${suffix}'
   location: location
   tags: tags
-  kind: 'linux'
-  sku: {
-    name: 'B2'
-    tier: 'Basic'
-  }
   properties: {
-    reserved: true
+    appLogsConfiguration: {
+      destination: 'azure-monitor'
+    }
   }
 }
 
-resource api 'Microsoft.Web/sites@2023-12-01' = {
-  name: 'app-api-${suffix}'
+resource api 'Microsoft.App/containerApps@2023-05-01' = {
+  name: 'ca-api-${suffix}'
   location: location
   tags: tags
-  kind: 'app,linux,container'
   identity: {
     type: 'UserAssigned'
     userAssignedIdentities: {
@@ -48,46 +47,72 @@ resource api 'Microsoft.Web/sites@2023-12-01' = {
     }
   }
   properties: {
-    serverFarmId: appServicePlan.id
-    httpsOnly: true
-    siteConfig: {
-      linuxFxVersion: 'DOCKER|${apiImageTag}'
-      acrUseManagedIdentityCreds: true
-      acrUserManagedIdentityID: apiIdentity.properties.clientId
-      alwaysOn: true
-      appSettings: concat(
-        [
-          {
-            name: 'AZURE_CLIENT_ID'
-            value: apiIdentity.properties.clientId
+    managedEnvironmentId: environment.id
+    configuration: {
+      ingress: {
+        external: true
+        targetPort: 8000
+        transport: 'auto'
+      }
+      registries: [
+        {
+          server: registryLoginServer
+          identity: apiIdentity.id
+        }
+      ]
+    }
+    template: {
+      containers: [
+        {
+          name: 'api'
+          image: apiImageTag
+          resources: {
+            cpu: json('0.5')
+            memory: '1Gi'
           }
-          {
-            name: 'APPLICATIONINSIGHTS_CONNECTION_STRING'
-            value: appInsightsConnectionString
-          }
-          {
-            name: 'WEBSITES_PORT'
-            value: '8000'
-          }
-        ],
-        empty(keyVaultUri) ? [] : [
-          {
-            name: 'AZURE_KEYVAULT_URI'
-            value: keyVaultUri
-          }
-        ],
-        empty(neo4jLegacyKbUri) ? [] : [
-          {
-            name: 'NEO4J_LEGACYKB_URI'
-            value: neo4jLegacyKbUri
-          }
-        ]
-      )
+          env: concat(
+            [
+              {
+                name: 'AZURE_CLIENT_ID'
+                value: apiIdentity.properties.clientId
+              }
+              {
+                name: 'APPLICATIONINSIGHTS_CONNECTION_STRING'
+                value: appInsightsConnectionString
+              }
+              {
+                name: 'AZURE_OPENAI_GPT4O_DEPLOYMENT'
+                value: gpt4oDeploymentName
+              }
+              {
+                name: 'AZURE_OPENAI_EMBEDDING_DEPLOYMENT'
+                value: embeddingDeploymentName
+              }
+            ],
+            empty(keyVaultUri) ? [] : [
+              {
+                name: 'AZURE_KEYVAULT_URI'
+                value: keyVaultUri
+              }
+            ],
+            empty(neo4jLegacyKbUri) ? [] : [
+              {
+                name: 'NEO4J_LEGACYKB_URI'
+                value: neo4jLegacyKbUri
+              }
+            ]
+          )
+        }
+      ]
+      scale: {
+        minReplicas: 1
+        maxReplicas: 1
+      }
     }
   }
   dependsOn: [roleAcrPull]
 }
 
-output apiUrl string = 'https://${api.properties.defaultHostName}'
+output apiUrl string = 'https://${api.properties.configuration.ingress.fqdn}'
 output principalId string = apiIdentity.properties.principalId
 output name string = api.name

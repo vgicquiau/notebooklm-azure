@@ -66,7 +66,7 @@ L'interface s'ouvre automatiquement sur `http://127.0.0.1:8000`.
 └─────────────────────────┬────────────────────────────────────────┘
                           │ HTTP  (API Key : X-API-Key header)
 ┌─────────────────────────▼────────────────────────────────────────┐
-│  FastAPI (Python 3.11) — Azure App Service for Containers         │
+│  FastAPI (Python 3.11) — Azure Container Apps                     │
 │  POST /api/chat (+ tools legacykb_*)  GET/DELETE /api/sources     │
 │  POST /api/ingest         GET /api/ingest/{job_id}                │
 │  GET /api/legacykb/*  (health, stats, domains, search, neighbors) │
@@ -146,8 +146,9 @@ Le fichier `.env` (généré par `deploy.ps1` ou copié depuis `.env.example`) d
 | `AZURE_DOCINT_ENDPOINT` | Endpoint Azure Document Intelligence | Oui |
 | `AZURE_STORAGE_ACCOUNT_NAME` | Nom du compte de stockage | Oui |
 | `API_KEY` | Clé d'authentification pour les endpoints `/api/*` | Recommandé en prod |
-| `NEO4J_LEGACYKB_URI` | URI `bolt://` ou `bolt+s://` du conteneur neo4j-legacykb | Pour la vue Legacy KB |
+| `NEO4J_LEGACYKB_URI` | URI `bolt://` (local sans TLS) ou `bolt+ssc://` (prod, cert auto-signé) du conteneur neo4j-legacykb | Pour la vue Legacy KB |
 | `NEO4J_LEGACYKB_PASSWORD` | Mot de passe neo4j | Pour la vue Legacy KB |
+| `NOTEBOOKLM_API_URL` | URL de l'API déployée — utilisée par `mcp-legacykb` pour passer par l'API HTTPS plutôt qu'une connexion Bolt directe | Pour le serveur MCP legacykb |
 | `CORS_ALLOWED_ORIGINS` | Origines CORS autorisées (virgule-séparées) | Si frontend sur domaine différent |
 
 En production, tous les secrets (`API_KEY`, endpoints, mot de passe neo4j) sont lus depuis **Azure Key Vault** via Managed Identity — le `.env` de prod ne contient pas de secrets.
@@ -283,10 +284,16 @@ gh pr create
 Voir **[GUIDE-DEPLOIEMENT.md](GUIDE-DEPLOIEMENT.md)** pour le détail complet.
 
 ```powershell
-# Déployer (crée ou met à jour toutes les ressources Azure)
+# Déployer (crée ou met à jour toutes les ressources Azure, importe le dump GraphML)
 .\deploy.ps1 -SkipSSL          # avec proxy d'entreprise
 .\deploy.ps1 -ImageOnly        # rebuild l'image Docker uniquement
-.\deploy.ps1 -Neo4jUri "bolt+s://mon-neo4j:7687"  # neo4j externe existant
+.\deploy.ps1 -Neo4jUri "bolt+ssc://mon-neo4j:7687"  # neo4j externe existant
+
+# Re-importer seul le dump GraphML (nouveau dump, ou nouvelle instance neo4j-legacykb)
+.\import-neo4j-legacykb.ps1 -ResourceGroup rg-mon-rg -SkipSSL
+
+# Migrer vers un nouveau Resource Group / subscription (durée de vie limitée du RG)
+.\migrate-rg.ps1 -SourceResourceGroup rg-actuel -DestResourceGroup rg-nouveau -DestSubscription "Ma Sub"
 
 # Supprimer toutes les ressources Azure
 .\teardown.ps1

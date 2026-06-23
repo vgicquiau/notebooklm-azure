@@ -129,13 +129,13 @@ flowchart LR
         SRCH[Azure AI Search S1\nsrch-nlmazure-prod\nHNSW + BM25 + Semantic Ranker]
         KV[Azure Key Vault\nkv-nlmazure-prod]
         ACR[Azure Container Registry\nnlmazureprod]
-        APP[App Service\napp-api-nlmazure-prod\nDocker · Linux]
+        APP[Azure Container Apps\nca-api-nlmazure-prod\nDocker · Linux]
         APPI[Application Insights\nappi-nlmazure-prod]
         ST[Blob Storage\nstnlmazureprod]
         MI[Managed Identity\nid-api-nlmazure-prod]
     end
 
-    subgraph frontend["🌐 Frontend (servi par App Service)"]
+    subgraph frontend["🌐 Frontend (servi par Container Apps)"]
         UI[index.html · React 18 · Babel\nmarked.js · mermaid.js · xyflow · dagre]
         SRC[src/tokens.jsx · Header.jsx · SourcesRail.jsx\nNotesRail.jsx · ChatPanel.jsx · LegacyKbPage.jsx · App.jsx]
     end
@@ -187,7 +187,7 @@ flowchart LR
 | **Persistance des sessions** | SQLite (`api/data/chat_history.db`) | historique conversationnel durable |
 | **Rate limiting** | Fenêtre glissante 60 s, 20 req/IP en mémoire | `api/services/rate_limiter.py` |
 | **Infrastructure** | Bicep (IaC) | — |
-| **Conteneur** | Docker / App Service for Containers | — |
+| **Conteneur** | Docker / Azure Container Apps | — |
 | **Monitoring** | Application Insights | — |
 
 ---
@@ -352,7 +352,7 @@ L'historique complet d'une session peut être ré-hydraté par le frontend aprè
 
 ### Structure de l'application web
 
-L'UI est une **Single Page Application React 18** servie statiquement par le même App Service que l'API. Elle utilise React via CDN avec Babel Standalone pour transpiler le JSX à la volée — **aucune étape de build** (`npm`, `webpack`, `vite`) n'est nécessaire.
+L'UI est une **Single Page Application React 18** servie statiquement par le même Container App que l'API. Elle utilise React via CDN avec Babel Standalone pour transpiler le JSX à la volée — **aucune étape de build** (`npm`, `webpack`, `vite`) n'est nécessaire.
 
 ```
 frontend/
@@ -401,7 +401,7 @@ App
 │       └── NoteModal (portal → document.body, conditionnel)
 └── (vue "legacykb")
     └── LegacyKbPage
-        ├── LegacyKbCanvas (React Flow — nœuds :Entity/:Community, zones par communauté)
+        ├── LegacyKbCanvas (React Flow — nœuds :Entity/:Community, layout force-directed d3-force)
         ├── NodeContextMenu (recentrer la vue, recentrer la disposition, retirer)
         ├── NodeDetailPanel (résumé, relations, tags techniques)
         └── DomainBreadcrumb (navigation par domaine fonctionnel)
@@ -445,7 +445,7 @@ App
 ```mermaid
 flowchart TD
     subgraph identites["Identités"]
-        MI[User-Assigned Managed Identity\nid-api-<suffix>\nApp Service → Azure services]
+        MI[User-Assigned Managed Identity\nid-api-<suffix>\nContainer App → Azure services]
         DEV[Identité développeur\nEntra ID / az login]
     end
 
@@ -481,7 +481,7 @@ En local, le SDK Azure utilise `DefaultAzureCredential` qui essaie les providers
 1. `EnvironmentCredential` — variables d'env (non configurées → skip)
 2. `ManagedIdentityCredential` — IMDS endpoint (non disponible en local → skip)
 3. `AzureCliCredential` ✅ — token `az login` — **utilisé en local**
-4. En production (App Service) : `ManagedIdentityCredential` ✅ via `AZURE_CLIENT_ID`
+4. En production (Container Apps) : `ManagedIdentityCredential` ✅ via `AZURE_CLIENT_ID`
 
 ### Chargement des secrets depuis Key Vault (lifespan)
 
@@ -496,7 +496,7 @@ Au démarrage de l'API (lifespan FastAPI), `_load_secrets_from_keyvault()` charg
 | `neo4j-legacykb-password` | `NEO4J_LEGACYKB_PASSWORD` |
 | `api-key` | `API_KEY` |
 
-Ce chargement ne se déclenche que si `AZURE_KEYVAULT_URI` est défini (injecté par Bicep dans les `appSettings` de l'App Service). En local, les variables sont lues directement depuis `.env`.
+Ce chargement ne se déclenche que si `AZURE_KEYVAULT_URI` est défini (injecté par Bicep dans les variables d'environnement du Container App). En local, les variables sont lues directement depuis `.env`.
 
 ### Authentification client → API (`APIKeyMiddleware`)
 
@@ -527,7 +527,7 @@ Ajouté sur toutes les réponses de l'API :
 
 ### Isolation des secrets dans l'image Docker
 
-Le fichier `.dockerignore` exclut `**/.env` du contexte de build. L'image ne contient donc aucun secret. En production, les variables d'environnement proviennent exclusivement de l'`appSettings` de l'App Service (injecté par Bicep) et de Key Vault (chargé au startup).
+Le fichier `.dockerignore` exclut `**/.env` du contexte de build. L'image ne contient donc aucun secret. En production, les variables d'environnement proviennent exclusivement de la configuration du Container App (injectée par Bicep) et de Key Vault (chargé au startup).
 
 ---
 
@@ -544,11 +544,11 @@ Convention de nommage : `{type}-{projectName}-{env}`. Région par défaut : `swe
 | Azure Document Intelligence | `di-nlmavgi-prod` | S0 | Extraction et analyse structurelle des PDF |
 | Azure Key Vault | `kv-nlmavgi-prod` | Standard | Secrets (endpoints, api-key, neo4j-password) |
 | Azure Container Registry | `acrnlmavgiprod` | Basic | Images Docker de l'API |
-| App Service Plan | `asp-nlmavgi-prod` | B2 Linux | Plan hébergement App Service |
-| App Service | `app-api-nlmavgi-prod` | (B2) | API FastAPI + frontend servi en conteneur Docker |
+| Container Apps Environment | `cae-nlmavgi-prod` | — | Environnement managé hébergeant le Container App |
+| Azure Container App | `ca-api-nlmavgi-prod` | 0.5 vCPU / 1Gi | API FastAPI + frontend servi en conteneur Docker |
 | Blob Storage | `stnlmavgiprod` | Standard LRS | Documents sources |
 | Application Insights | `appi-nlmavgi-prod` | — | Monitoring, traces, logs |
-| Managed Identity | `id-api-nlmavgi-prod` | User-Assigned | Identité de l'App Service pour les appels Azure |
+| Managed Identity | `id-api-nlmavgi-prod` | User-Assigned | Identité du Container App pour les appels Azure |
 | ACI neo4j-legacykb | `neo4j-legacykb-nlmavgi` | (ACI) | Base graphe GraphRAG CardDemo (golden source) |
 
 > L'ACI neo4j-legacykb est déployé conditionnellement (`deployLegacyKb=true`). Si une instance externe est fournie via `-Neo4jUri`, l'ACI n'est pas créé.
@@ -567,7 +567,7 @@ infra/
 ├── main.bicep                  — orchestration, params, rôles IAM, secrets KV
 ├── main.parameters.json        — valeurs par défaut (non commité en prod)
 └── modules/
-    ├── containerapp.bicep      — App Service + UAMI + appSettings (KV URI, neo4j URI…)
+    ├── containerapp.bicep      — Container Apps (env managé) + UAMI + variables d'env (KV URI, neo4j URI…)
     ├── openai.bicep            — Azure OpenAI + déploiements GPT-4o + Embeddings
     ├── search.bicep            — Azure AI Search S1 + semantic search
     ├── keyvault.bicep          — Key Vault RBAC + accès déployeur
@@ -586,7 +586,7 @@ infra/
 | `environment` | `prod` | Suffixe d'environnement |
 | `location` | région du RG | Région Azure |
 | `deployerObjectId` | *(requis)* | Object ID AAD du déployeur — droits Key Vault |
-| `apiImageTag` | placeholder | Image Docker de l'App Service |
+| `apiImageTag` | placeholder | Image Docker du Container App |
 | `deployLegacyKb` | `true` | Crée l'ACI neo4j-legacykb |
 | `neo4jLegacyKbPassword` | `''` | Mot de passe neo4j (→ KV secret) |
 | `neo4jLegacyKbUri` | `''` | URI bolt:// externe si `deployLegacyKb=false` |
@@ -631,9 +631,9 @@ Contrepartie : les vecteurs sont 2× plus lourds en stockage et la recherche HNS
 - **Vectoriel seul** : échoue sur les termes exacts rares (codes, acronymes, noms de modules)
 - **Hybride RRF** : combine les deux — les termes exacts sont trouvés par BM25, les intentions par les vecteurs
 
-### Pourquoi App Service et non Container Apps ?
+### Pourquoi Azure Container Apps et non App Service ?
 
-La souscription Azure sandbox utilisée ne dispose pas des droits nécessaires pour enregistrer le fournisseur de ressources `Microsoft.App` (requis par Container Apps). App Service for Containers offre les mêmes capacités (Docker, Managed Identity, HTTPS) sur `Microsoft.Web`, qui est déjà enregistré.
+Le projet a d'abord utilisé App Service for Containers (`Microsoft.Web/serverFarms` + `sites`) car la souscription sandbox initiale ne pouvait pas enregistrer le fournisseur `Microsoft.App`. Sur la souscription lab actuelle, `Microsoft.App` est enregistré et la policy locations l'autorise — mais l'App Service Plan (B-series puis S-series) a rencontré une pénurie de capacité persistante (`Conflict — No available instances`) spécifique à ce resource group/région, indépendante du SKU. Container Apps repose sur un pool de capacité serverless/Consumption distinct de la flotte App Service, ce qui contourne le problème.
 
 ### Pourquoi un system prompt en 3 variantes (modes) ?
 
@@ -699,7 +699,7 @@ Permet à tout membre de l'équipe d'interroger en langage naturel l'ensemble du
 
 **Indicateurs de succès**
 - Taux de réponses avec au moins une citation (`sources.length > 0`)
-- Absence de réponse "Aucun document pertinent trouvé" (signe d'un corpus mal indexé)
+- Taux de réponses s'appuyant sur la base de connaissances legacy quand l'index vectoriel ne renvoie rien de pertinent
 - Temps de réponse < 8s en mode Standard (P95)
 
 ---
@@ -729,9 +729,11 @@ When il pose une question de suivi implicite ("Et pour le module B ?")
 Then la requête inclut l'historique non compacté de la session (SQLite)
 And la réponse tient compte du contexte conversationnel
 
-Given aucun chunk pertinent n'est trouvé
+Given aucun chunk pertinent n'est trouvé dans l'index vectoriel
 When l'utilisateur pose une question
-Then l'API retourne "Aucun document pertinent trouvé pour cette question."
+Then le Generator est appelé malgré tout, avec un contexte documentaire vide
+And il peut répondre via les tools legacykb_* (base de connaissances legacy CardDemo)
+And s'il n'a ni chunk ni résultat legacykb pertinent, il le signale en texte libre
 ```
 
 **Règles de Gestion**
@@ -1453,9 +1455,9 @@ flowchart TB
 
 **`frontend/src/LegacyKbPage.jsx`**
 
-Composant React (Babel standalone, React Flow + dagre vendorisés en UMD) gérant la vue complète :
-- `LegacyKbCanvas` — canvas React Flow (`Background`, `Controls`, `MiniMap`), nœuds custom `LegacyNode` (entités : pastille ronde colorée par `type` ; communautés : pastille carrée) et `ZoneNode` (regroupement visuel par communauté)
-- `_layout` — calcul d'un layout `dagre` (gauche → droite) sur le "bundle" courant (nœuds + arêtes chargés), avec simplification du schéma et résolution des chevauchements
+Composant React (Babel standalone, React Flow + d3-force vendorisés en UMD) gérant la vue complète :
+- `LegacyKbCanvas` — canvas React Flow (`Background`, `Controls`, `MiniMap`), nœud custom unique `LegacyNode` (carré 90×90, entités et communautés confondues — couleur par `type`/niveau de domaine)
+- `_prepareSimulation` — prépare la topologie (nœuds/liens, amorçage concentrique par distance BFS depuis le centre) ; la disposition finale est calculée en continu par une simulation `d3-force` (liens, répulsion, anti-collision) lancée dans le composant, pas par un layout statique
 - Recherche (`legacykb_search`), navigation par domaine fonctionnel (`DomainBreadcrumb`, communautés niveau 2)
 - Exploration progressive : double-clic sur un nœud → charge son voisinage (`/legacykb/nodes/{id}/neighbors`) et le fusionne dans le bundle
 - `NodeDetailPanel` — résumé exécutif dépliable (`ExpandableText`), compteurs de relations par type (`RelationBars`), tags techniques détectés (`TechTagList`)
@@ -1513,7 +1515,43 @@ Tools function-calling pour GPT-4o (`LEGACYKB_TOOL_DEFINITIONS`, exécutés par 
 (:Entity)     -[:EXECUTES]->         (:Entity)        -- exécution par un batch job
 ```
 
-#### V. Recentrage et redisposition de la vue
+#### V. Pipeline d'alimentation de la base Neo4j
+
+La base `neo4j-legacykb` est peuplée à partir d'un dump GraphML généré par le pipeline GraphRAG (extraction des entités et relations depuis le corpus CardDemo). Ce pipeline est **externe** à NotebookLM Azure — il produit le fichier `repartition_cleaned_export.graphml`.
+
+```mermaid
+flowchart LR
+    A[🗂️ Corpus CardDemo\nCOBOL · JCL · copybooks] --> B[Pipeline GraphRAG\nextraction entités + relations]
+    B --> C[repartition_cleaned_export.graphml\ndocs/extract/]
+    C --> D[import-neo4j-legacykb.ps1\nautomatique via deploy.ps1]
+    D --> E[az storage file upload\nAzure Files neo4j-import]
+    E --> F[APOC : apoc.import.graphml\nvia API HTTPS Neo4j :7473]
+    F --> G[(neo4j-legacykb\n5 812 nœuds\n19 368 relations)]
+    G -->|optionnel| H[fix_utf8.cypher\ncorrection double-encodage\ndes nœuds :Community]
+```
+
+**Étapes du script `import-neo4j-legacykb.ps1` :**
+
+| Étape | Description |
+|-------|-------------|
+| **1. Upload** | Upload de `repartition_cleaned_export.graphml` dans le partage Azure Files monté en `/var/lib/neo4j/import/` via `az storage file upload --auth-mode login` (pas de clé de compte exposée) |
+| **2. Attente Neo4j** | Polling HTTPS sur `:7473` toutes les 5 s, jusqu'à 3 min (démarrage conteneur + installation APOC) |
+| **3. Import GraphML** | `CALL apoc.import.graphml('file:///var/lib/neo4j/import/...', {readLabels: true})` via l'API transactionnelle HTTPS de Neo4j → upsert des nœuds et relations |
+| **4. (optionnel) Fix UTF-8** | Si les titres Community sont corrompus (double-encodage Latin-1), appliquer `fix_utf8.cypher` via le browser Neo4j ou `Invoke-RestMethod` |
+
+**Relancer l'import sans redéploiement :**
+
+```powershell
+.\import-neo4j-legacykb.ps1 `
+    -ResourceGroup rg-<ProjectName>-prod `
+    -StorageAccountName <storage_output_bicep> `
+    -Fqdn <neo4j_fqdn> `
+    -Neo4jPassword (Read-Host -AsSecureString)
+```
+
+Voir **[GUIDE-DEPLOIEMENT.md § Mettre à jour le dump GraphML](GUIDE-DEPLOIEMENT.md#mettre-à-jour-le-dump-graphml-dans-neo4j-sans-redéploiement-complet)** pour le détail.
+
+#### VI. Recentrage et redisposition de la vue
 
 | Action | Déclencheur | Effet |
 |---|---|---|
@@ -1531,6 +1569,8 @@ Les deux actions mettent à jour `centerId`/`selectedId` ; `_layout` reconstruit
 | Symptôme | Cause | Action |
 |---|---|---|
 | `GET /api/legacykb/*` → 502 | `neo4j-legacykb` injoignable ou `NEO4J_LEGACYKB_PASSWORD` absent | Vérifier la configuration Neo4j AuraDB / Key Vault |
+| Graphe vide — aucun nœud affiché | Import GraphML non exécuté ou échoué | Relancer `import-neo4j-legacykb.ps1` ; vérifier que `repartition_cleaned_export.graphml` est dans `docs/extract/` |
+| Titres Community illisibles (`Ã©` au lieu de `é`) | Double-encodage UTF-8/Latin-1 lors de l'import APOC | Appliquer `fix_utf8.cypher` via le browser Neo4j ou `Invoke-RestMethod` |
 | `GET /api/legacykb/nodes/{id}` → 404 | Identifiant mal formé ou nœud absent du dump | Vérifier le format `e|{type}|{name}` ou `c|{id}` (cf. `legacykb_client.parse_node_id`) |
 | Réponses du Chat sans `graph_references` sur une question CardDemo | GPT-4o n'a pas invoqué les tools `legacykb_*` | Vérifier le system prompt (`_LEGACYKB_TOOLS_BLOCK` dans `generator.py`) et le mode (Rapide a un prompt tools réduit) |
 | `window.ReactFlow` / `window.dagre` undefined | Script vendor non chargé ou ordre incorrect dans `index.html` | Vérifier `jsx-runtime-shim.js` → `xyflow-react.umd.js` → `dagre.min.js` avant `LegacyKbPage.jsx` |

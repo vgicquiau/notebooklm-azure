@@ -1,0 +1,9 @@
+{
+  "servers": {
+    "legacykb": {
+      "type": "stdio",
+      "command": "${workspaceFolder}\\mcp-legacykb\\.venv\\Scripts\\python.exe",
+      "args": ["${workspaceFolder}\\mcp-legacykb\\server.py"]
+    }
+  }
+}

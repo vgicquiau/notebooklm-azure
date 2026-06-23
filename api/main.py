@@ -15,9 +15,9 @@ mimetypes.add_type("text/plain", ".md")
 from azure.identity import DefaultAzureCredential, ManagedIdentityCredential
 from azure.keyvault.secrets import SecretClient
 from dotenv import load_dotenv
-from fastapi import FastAPI, Request, HTTPException
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import Response
+from fastapi.responses import JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.base import BaseHTTPMiddleware
 
@@ -93,7 +93,10 @@ class APIKeyMiddleware(BaseHTTPMiddleware):
             provided = x_api_key
 
         if not provided or not secrets.compare_digest(provided, api_key):
-            raise HTTPException(status_code=401, detail="Non autorisé.")
+            # Lever HTTPException ici ne serait pas converti en réponse JSON propre :
+            # BaseHTTPMiddleware.dispatch() est en dehors du middleware de gestion
+            # d'exceptions de Starlette, donc l'exception remonterait en 500 brut.
+            return JSONResponse(status_code=401, content={"detail": "Non autorisé."})
 
         return await call_next(request)
 
