@@ -38,11 +38,17 @@ infra/main.parameters.json
 # Documents métier — ne jamais versionner
 documents/
 
+# Documents métier — ne jamais versionner
+docs/
+
 # Historique de chat persistant (SQLite)
 api/data/
 
 # Corpus de référence — données sensibles
 doc-archimind/
+
+# Corpus de référence — données sensibles
+Generation/
 
 # Exports/données générées par le pipeline GraphRAG (volumineux, régénérables)
 docs/extract/*.graphml
@@ -51,3 +57,18 @@ ingest/graphrag_mapped.json
 # Outillage spécifique à Claude Code (local, non nécessaire au fonctionnement de l'app)
 .claude/
 CLAUDE.md
+
+# Données client / extracts — jamais versionnés
+*.xlsx
+
+# Specs internes et archives — gardées en local uniquement
+Archive/
+
+# Toolkit dupliqué (non maintenu dans ce repo)
+kit-copilot-agent/
+
+# Markdown hors documentation publique (seuls README/ARCHITECTURE/GUIDE-DEPLOIEMENT sont commités)
+.github/agents/*.md
+.github/copilot-instructions.md
+mcp-legacykb/README.md
+frontend/tests/e2e/*.md
