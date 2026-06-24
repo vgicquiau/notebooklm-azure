@@ -154,7 +154,35 @@ const LegacyNode = ({ data }) => {
   );
 };
 
-const NODE_TYPES = { legacyNode: LegacyNode };
+// ── Badge "+N" — représente un groupe de références externes repliées (cf.
+//    EXT_BADGE_MIN dans `_prepareSimulation`). Cliquer le déplie en nœuds
+//    individuels (cf. `handleNodeClick`) ; pas de menu contextuel ni de détail.
+const ExtBadgeNode = ({ data }) => {
+  const color = ENTITY_COLORS['External/Doc'];
+  const handleStyle = { background: 'transparent', border: 'none', width: 1, height: 1, opacity: 0 };
+  return (
+    <div
+      title="Déplier les références externes"
+      style={{
+        display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 4,
+        width: NODE_W, height: NODE_H, boxSizing: 'border-box', padding: '8px',
+        borderRadius: T.radiusSm,
+        background: T.white, border: `2px dashed ${color}`,
+        fontFamily: T.font, textAlign: 'center', cursor: 'pointer',
+        boxShadow: '0 2px 6px rgba(28,27,24,0.18)',
+      }}
+    >
+      <Handle type="target" position={Position.Top} style={handleStyle} />
+      <Handle type="source" position={Position.Top} style={handleStyle} />
+      <span style={{ fontSize: 18, fontWeight: 700, color }}>+{data.count}</span>
+      <span style={{ fontSize: 10, fontWeight: 600, color: T.muted, lineHeight: 1.3 }}>
+        références externes
+      </span>
+    </div>
+  );
+};
+
+const NODE_TYPES = { legacyNode: LegacyNode, extBadgeNode: ExtBadgeNode };
 
 // ── Menu contextuel nœud (style Neo4j) — affiché au clic, ancré au curseur ────
 const NodeContextMenu = ({ x, y, onRecenter, onRecenterLayout, onRemove, onClose }) => {
@@ -481,26 +509,79 @@ const EDGE_TYPES = { floating: FloatingEdge };
 // `visibleKinds` (Set de clés `_nodeKindKey`) filtre les types/niveaux affichés
 // (menu "Affichage") — un nœud absent de cet ensemble est entièrement exclu du
 // schéma (lui et ses arêtes).
-const _prepareSimulation = (bundle, centerId, positions, visibleKinds) => {
+// ── Repli des références externes en badge "+N" ──────────────────────────────
+// Les nœuds `External/Doc` n'ont presque toujours qu'un seul voisin (le
+// programme/job qui les référence) et n'apportent individuellement que peu
+// d'information visuelle — c'est le "mur gris" qui sature le schéma quand un
+// nœud central en référence des dizaines. À partir de `EXT_BADGE_MIN` enfants
+// EXT partageant le même voisin unique, on les fusionne en un seul nœud de
+// synthèse `extBadge` (sauf si l'utilisateur a explicitement déplié ce groupe
+// — `expandedBadges`, clé = id du voisin/parent).
+const EXT_BADGE_MIN = 2;
+
+const _prepareSimulation = (bundle, centerId, positions, visibleKinds, expandedBadges) => {
   if (!bundle) return null;
 
   const filteredNodeMap = new Map(
     [...bundle.nodeMap].filter(([, n]) => !visibleKinds || visibleKinds.has(_nodeKindKey(n)))
   );
-  const visibleIds = new Set(filteredNodeMap.keys());
   const allEdges = bundle.edgeList.filter(e => filteredNodeMap.has(e.from) && filteredNodeMap.has(e.to));
 
+  // Voisinage (ids distincts, pas un compte d'arêtes — une paire peut avoir
+  // plusieurs arêtes parallèles de types différents) pour repérer les EXT à
+  // exactement un voisin.
+  const neighborsOf = new Map();
+  const addNeighbor = (a, b) => {
+    if (a === b) return;
+    if (!neighborsOf.has(a)) neighborsOf.set(a, new Set());
+    neighborsOf.get(a).add(b);
+  };
+  allEdges.forEach(e => { addNeighbor(e.from, e.to); addNeighbor(e.to, e.from); });
+
+  const extGroups = new Map(); // parentId -> [extNodeId, ...]
+  filteredNodeMap.forEach((n, id) => {
+    if (n.kind !== 'entity' || n.type !== 'External/Doc' || id === centerId) return;
+    const neighbors = neighborsOf.get(id);
+    if (!neighbors || neighbors.size !== 1) return;
+    const [parentId] = neighbors;
+    if (!extGroups.has(parentId)) extGroups.set(parentId, []);
+    extGroups.get(parentId).push(id);
+  });
+
+  const collapsedExtId = new Map(); // extNodeId -> badgeId (membres repliés uniquement)
+  const badgeInfo = new Map(); // badgeId -> { parentId, memberIds }
+  extGroups.forEach((memberIds, parentId) => {
+    if (memberIds.length < EXT_BADGE_MIN || expandedBadges?.has(parentId)) return;
+    const badgeId = `__extbadge__${parentId}`;
+    badgeInfo.set(badgeId, { parentId, memberIds });
+    memberIds.forEach(id => collapsedExtId.set(id, badgeId));
+  });
+
+  // ── Carte logique des nœuds affichés : nœuds réels non repliés + badges ──────
+  const logicalNodeMap = new Map();
+  filteredNodeMap.forEach((n, id) => { if (!collapsedExtId.has(id)) logicalNodeMap.set(id, n); });
+  badgeInfo.forEach(({ parentId, memberIds }, badgeId) => {
+    logicalNodeMap.set(badgeId, {
+      id: badgeId, kind: 'extBadge', parentId, memberIds, count: memberIds.length,
+    });
+  });
+  const visibleIds = new Set(logicalNodeMap.keys());
+
+  const remap = (id) => collapsedExtId.get(id) ?? id;
+
   // Les arêtes parallèles entre une même paire de nœuds (plusieurs types de
-  // relation) sont fusionnées en une seule, pour réduire le nombre de flux
-  // affichés à l'écran. Map imbriquée (from -> to -> types) pour éviter de
-  // construire une clé composite à partir d'identifiants contenant `|`.
+  // relation, ou plusieurs EXT repliés dans le même badge) sont fusionnées en
+  // une seule, pour réduire le nombre de flux affichés à l'écran. Map imbriquée
+  // (from -> to -> types) pour éviter de construire une clé composite à partir
+  // d'identifiants contenant `|`.
   const edgeGroups = new Map(); // from -> Map(to -> Set<type>)
   allEdges.forEach(e => {
-    if (e.from === e.to) return;
-    if (!edgeGroups.has(e.from)) edgeGroups.set(e.from, new Map());
-    const byTarget = edgeGroups.get(e.from);
-    if (!byTarget.has(e.to)) byTarget.set(e.to, new Set());
-    byTarget.get(e.to).add(e.type);
+    const from = remap(e.from), to = remap(e.to);
+    if (from === to) return;
+    if (!edgeGroups.has(from)) edgeGroups.set(from, new Map());
+    const byTarget = edgeGroups.get(from);
+    if (!byTarget.has(to)) byTarget.set(to, new Set());
+    byTarget.get(to).add(e.type);
   });
 
   // ── Liens de simulation ────────────────────────────────────────────────────
@@ -555,8 +636,7 @@ const _prepareSimulation = (bundle, centerId, positions, visibleKinds) => {
   const GOLDEN_ANGLE = 2.399963229728653; // ~137.5° — répartition régulière sans alignement
   const RING_SPACING = NODE_W * 2.4;
   let ringIdx = 0;
-  const simNodes = [...bundle.nodeMap.values()]
-    .filter(n => visibleIds.has(n.id))
+  const simNodes = [...logicalNodeMap.values()]
     .map(n => {
       const node = { id: n.id };
       const saved = positions?.get(n.id); // {x,y} coin haut-gauche sauvegardé
@@ -581,7 +661,7 @@ const _prepareSimulation = (bundle, centerId, positions, visibleKinds) => {
       return node;
     });
 
-  return { simNodes, simLinks, edgeGroups, visibleIds };
+  return { simNodes, simLinks, edgeGroups, visibleIds, logicalNodeMap };
 };
 
 // ── Position (coin haut-gauche) de chaque nœud à partir de l'état courant de la
@@ -592,14 +672,20 @@ const _topLeftFromSimNodes = (simNodes) => {
   return topLeft;
 };
 
-const _buildGraphNodes = (topLeft, bundle, visibleIds, centerId, highlightedIds) =>
-  [...bundle.nodeMap.values()]
-    .filter(n => visibleIds.has(n.id))
+// Un badge "+N" hérite du surlignage si l'une des références qu'il contient
+// est ciblée par le chat (impact_paths/legacykb_highlight) — sinon le
+// surlignage disparaîtrait silencieusement derrière le repli.
+const _isHighlighted = (n, highlightedIds) =>
+  !highlightedIds ? false
+    : highlightedIds.has(n.id) || (n.memberIds?.some(id => highlightedIds.has(id)) ?? false);
+
+const _buildGraphNodes = (topLeft, logicalNodeMap, centerId, highlightedIds) =>
+  [...logicalNodeMap.values()]
     .map(n => ({
       id: n.id,
-      type: 'legacyNode',
+      type: n.kind === 'extBadge' ? 'extBadgeNode' : 'legacyNode',
       position: topLeft.get(n.id) ?? { x: 0, y: 0 },
-      data: { ...n, isCenter: n.id === centerId, highlighted: highlightedIds?.has(n.id) ?? false },
+      data: { ...n, isCenter: n.id === centerId, highlighted: _isHighlighted(n, highlightedIds) },
     }));
 
 // Le point de connexion sur le pourtour de chaque nœud n'est pas figé ici : il est
@@ -632,6 +718,7 @@ const _buildEdges = (edgeGroups) => {
 // Couleur des nœuds dans la mini-carte — reflète la sémantique entité/communauté
 const _miniMapNodeColor = (node) => {
   const data = node.data ?? {};
+  if (data.kind === 'extBadge') return ENTITY_COLORS['External/Doc'];
   return data.kind === 'entity'
     ? (ENTITY_COLORS[data.type] ?? '#9e9e9e')
     : (COMMUNITY_COLORS[data.level] ?? '#bdbdbd');
@@ -887,6 +974,11 @@ const LegacyKbPage = ({ apiFetch }) => {
   // ── Menu "Affichage" — types/niveaux de nœuds visibles dans le graphe ─────
   const [visibleKinds, setVisibleKinds] = React.useState(() => new Set(VISIBILITY_OPTIONS.map(o => o.key)));
   const [showDisplayMenu, setShowDisplayMenu] = React.useState(false);
+
+  // ── Références externes dépliées manuellement (cf. EXT_BADGE_MIN) — clé =
+  //    id du nœud parent dont les enfants EXT sont actuellement repliés en
+  //    badge "+N" ; une fois déplié, reste déplié pour le reste de la session.
+  const [expandedBadges, setExpandedBadges] = React.useState(() => new Set());
 
   const toggleVisibleKind = React.useCallback((key) => {
     setVisibleKinds(prev => {
@@ -1162,7 +1254,7 @@ const LegacyKbPage = ({ apiFetch }) => {
   // (cf. effet séparé plus bas), pour qu'un simple surlignage depuis le mini-chat ou
   // le bouton "Effacer" ne fasse pas repartir l'animation physique depuis zéro.
   React.useEffect(() => {
-    const prep = _prepareSimulation(bundle, centerId, positionsRef.current, visibleKinds);
+    const prep = _prepareSimulation(bundle, centerId, positionsRef.current, visibleKinds, expandedBadges);
     if (!prep) {
       setFlowNodes([]);
       setFlowEdges([]);
@@ -1174,14 +1266,18 @@ const LegacyKbPage = ({ apiFetch }) => {
     setFlowEdges(_buildEdges(prep.edgeGroups));
 
     const renderFromTopLeft = (topLeft) => {
-      const nodes = _buildGraphNodes(topLeft, bundle, prep.visibleIds, centerId, highlightedIdsRef.current);
+      const nodes = _buildGraphNodes(topLeft, prep.logicalNodeMap, centerId, highlightedIdsRef.current);
       setFlowNodes(nodes.map(n => ({ ...n, data: { ...n.data, onFreeze: freezeNode } })));
     };
 
+    // Rayon de collision = demi-diagonale du carré 90×90 (~63.6px) + petite marge,
+    // sinon les coins peuvent se chevaucher (`NODE_W*0.62` ≈ 56px sous-dimensionnait
+    // le rayon réel) ; charge plus forte pour écarter franchement les nœuds denses
+    // au lieu de laisser un agglomérat se former autour des hubs.
     const simulation = forceSimulation(prep.simNodes)
-      .force('link', forceLink(prep.simLinks).id(d => d.id).distance(NODE_W * 1.8).strength(0.3))
-      .force('charge', forceManyBody().strength(-260))
-      .force('collide', forceCollide(NODE_W * 0.62))
+      .force('link', forceLink(prep.simLinks).id(d => d.id).distance(NODE_W * 2).strength(0.3))
+      .force('charge', forceManyBody().strength(-420))
+      .force('collide', forceCollide(NODE_W * 0.75))
       .force('x', forceX(0).strength(0.02))
       .force('y', forceY(0).strength(0.02));
     simulationRef.current = simulation;
@@ -1201,7 +1297,7 @@ const LegacyKbPage = ({ apiFetch }) => {
       simulationRef.current = null;
       simulation.stop();
     };
-  }, [bundle, centerId, visibleKinds]);
+  }, [bundle, centerId, visibleKinds, expandedBadges]);
 
   // ── Physique live pendant le drag (style Neo4j Bloom) ─────────────────────────
   // Sans ça, déplacer un nœud à la main le réécrit instantanément sans relancer la
@@ -1238,7 +1334,7 @@ const LegacyKbPage = ({ apiFetch }) => {
   // Patch léger du surlignage (anneau doré) sans relancer la simulation physique —
   // ne touche que `data.highlighted` sur les nœuds déjà affichés.
   React.useEffect(() => {
-    setFlowNodes(prev => prev.map(n => ({ ...n, data: { ...n.data, highlighted: highlightedIds.has(n.id) } })));
+    setFlowNodes(prev => prev.map(n => ({ ...n, data: { ...n.data, highlighted: _isHighlighted(n.data, highlightedIds) } })));
   }, [highlightedIds]);
 
   const onNodesChange = React.useCallback((changes) => {
@@ -1271,6 +1367,13 @@ const LegacyKbPage = ({ apiFetch }) => {
     if (clickTimerRef.current) clearTimeout(clickTimerRef.current);
     clickTimerRef.current = setTimeout(() => {
       clickTimerRef.current = null;
+      // Badge "+N" références externes : un clic le déplie au lieu d'ouvrir le
+      // menu contextuel (pas de détail/recentrage qui aient du sens pour un
+      // nœud de synthèse).
+      if (node.data?.kind === 'extBadge') {
+        setExpandedBadges(prev => new Set(prev).add(node.data.parentId));
+        return;
+      }
       setSelectedId(id);
       setContextMenu({ nodeId: id, x: clientX, y: clientY });
     }, 250);
@@ -1281,6 +1384,11 @@ const LegacyKbPage = ({ apiFetch }) => {
       clickTimerRef.current = null;
     }
     setContextMenu(null);
+    // Badge "+N" : pas d'id réel à explorer côté backend — le double-clic déplie.
+    if (node.data?.kind === 'extBadge') {
+      setExpandedBadges(prev => new Set(prev).add(node.data.parentId));
+      return;
+    }
     exploreNode(node.id);
   }, [exploreNode]);
   const handlePaneClick = React.useCallback(() => {
