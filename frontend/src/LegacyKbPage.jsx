@@ -7,10 +7,11 @@
 // window.ReactFlow) ; layout force-directed via d3-force (window.d3).
 
 const API_BASE = window.location.origin + '/api';
-// AUDIT-2026-06 : neo4j-legacykb n'a plus d'IP publique -- routes /api/legacykb/*
-// uniquement vers ca-api (intégré au VNet), via <meta name="nlaz-legacykb-api-url">
-// injecté par api/main.py depuis NOTEBOOKLM_API_URL. Le reste (ex. /chat plus bas)
-// reste sur API_BASE (same-origin, backend local).
+// AUDIT-2026-06 : neo4j-legacykb n'a plus d'IP publique -- routes /api/legacykb/* ET /api/chat
+// (le tool-calling legacykb du chat s'exécute côté backend, cf. api/services/graph_tools.py)
+// vers ca-api (intégré au VNet), via <meta name="nlaz-legacykb-api-url"> injecté par
+// api/main.py depuis NOTEBOOKLM_API_URL. Absent en production (pas de frontend déployé) --
+// fallback same-origin (ca-api se sert alors lui-même).
 const LEGACYKB_API_BASE =
   (document.querySelector('meta[name="nlaz-legacykb-api-url"]')?.content || window.location.origin) + '/api';
 const _uid = () => Math.random().toString(36).slice(2, 10);
@@ -806,7 +807,7 @@ const LegacyKbChat = ({ apiFetch, onGraphAction }) => {
     setMessages(prev => [...prev, { role: 'user', content: text }]);
     setLoading(true);
     try {
-      const res = await apiFetch(`${API_BASE}/chat`, {
+      const res = await apiFetch(`${LEGACYKB_API_BASE}/chat`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ message: text, session_id: sessionIdRef.current, mode: 'standard' }),

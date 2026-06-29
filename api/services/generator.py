@@ -60,14 +60,14 @@ def _extract_graph_action(tool_name: str, result: dict[str, Any]) -> Optional[di
     return None
 
 
-# Bloc décrivant la base de connaissances legacy CardDemo (neo4j-legacykb), accessible
+# Bloc décrivant la base de connaissances legacy (neo4j-legacykb), accessible
 # via les tools legacykb_search / legacykb_get_entity / legacykb_get_relations.
 _LEGACYKB_TOOLS_BLOCK = """
 
 ## Base de connaissances legacy (outils)
 
 En complément des documents fournis en contexte, tu as accès en lecture à la base de
-connaissances legacy du système CardDemo (graphe issu d'une analyse GraphRAG du code COBOL) :
+connaissances legacy du système modélisé (graphe issu d'une analyse GraphRAG du code COBOL) :
 programmes, copybooks, batch jobs, fichiers/tables, et domaines fonctionnels, avec leurs
 descriptions et leurs relations (appels entre programmes, inclusions de copybooks, accès aux
 fichiers en lecture/écriture, appartenance à un domaine fonctionnel, exécution par un job).
@@ -96,7 +96,7 @@ _LEGACYKB_TOOLS_BLOCK_RAPIDE = """
 
 ## Base de connaissances legacy (outils)
 
-Pour toute question sur un élément nommé ou un concept/thème du système CardDemo, utilise
+Pour toute question sur un élément nommé ou un concept/thème du système legacy, utilise
 `legacykb_search` (avec `search_descriptions=true` pour les recherches conceptuelles :
 "commande", "réassort", "TGAHA01"…). Pour montrer/surligner des éléments dans le graphe,
 utilise `legacykb_highlight` sur tous les identifiants trouvés. Pour une question d'impact,

@@ -29,8 +29,8 @@ async def chat(request_data: ChatRequest, request: Request):
         raise HTTPException(status_code=503, detail="Service de recherche temporairement indisponible.")
 
     # Pas de court-circuit si `chunks` est vide : le Generator est appelé quand même,
-    # car il peut répondre via les tools legacykb_* (base de connaissances legacy
-    # CardDemo) même en l'absence de documents pertinents dans l'index vectoriel.
+    # car il peut répondre via les tools legacykb_* (base de connaissances legacy)
+    # même en l'absence de documents pertinents dans l'index vectoriel.
     try:
         answer, tokens_used, graph_refs, graph_action = generator.generate(
             query=request_data.message,

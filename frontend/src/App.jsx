@@ -3,6 +3,14 @@
 const uid = () => Math.random().toString(36).slice(2, 10);
 
 const API_BASE = window.location.origin + '/api';
+// AUDIT-2026-06 : neo4j-legacykb n'a plus d'IP publique -- le tool-calling legacykb du
+// chat (api/services/graph_tools.py) s'exécute côté backend, donc /api/chat doit lui
+// aussi cibler ca-api (intégré au VNet) plutôt que le backend local, sans quoi le chat
+// échoue silencieusement à joindre neo4j-legacykb (cf. LEGACYKB_API_BASE, même pattern
+// que Header.jsx/LegacyKbPage.jsx pour /api/legacykb/*). Absent en production (pas de
+// frontend déployé) -- fallback same-origin.
+const LEGACYKB_API_BASE =
+  (document.querySelector('meta[name="nlaz-legacykb-api-url"]')?.content || window.location.origin) + '/api';
 
 // top_k par mode (économie de tokens sur Rapide, exhaustivité sur Approfondi)
 const MODE_TOP_K = { rapide: 5, standard: 10, approfondi: 20 };
@@ -96,7 +104,7 @@ const App = () => {
   // La clé API est déjà disponible synchronement depuis le <meta> injecté (SEC-001).
   React.useEffect(() => {
     fetchSources();
-    _apiFetch(`${API_BASE}/chat/history/${sessionId}`)
+    _apiFetch(`${LEGACYKB_API_BASE}/chat/history/${sessionId}`)
       .then(r => r.ok ? r.json() : null)
       .then(data => { if (data?.messages?.length) setMessages(data.messages); })
       .catch(() => { /* le cache local reste affiché en cas d'échec */ });
@@ -128,7 +136,7 @@ const App = () => {
     setIsLoading(true);
 
     try {
-      const res = await _apiFetch(`${API_BASE}/chat`, {
+      const res = await _apiFetch(`${LEGACYKB_API_BASE}/chat`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -286,7 +294,7 @@ const App = () => {
 
   // ── Nouvelle conversation ──────────────────────────────────
   const clearSession = React.useCallback(async () => {
-    await _apiFetch(`${API_BASE}/chat/clear`, {
+    await _apiFetch(`${LEGACYKB_API_BASE}/chat/clear`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ session_id: sessionId }),

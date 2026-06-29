@@ -1,10 +1,12 @@
 // src/Header.jsx — Barre supérieure
 // Props: onClearSession(), view, onViewChange(view), apiFetch(url, options)
 
-// AUDIT-2026-06 : neo4j-legacykb n'a plus d'IP publique -- en local, ce backend ne peut
-// plus l'atteindre. <meta name="nlaz-legacykb-api-url"> (injecté par api/main.py depuis
-// NOTEBOOKLM_API_URL) pointe vers ca-api, intégré au VNet, pour les routes /api/legacykb/*
-// uniquement. Absent en production (pas de frontend déployé) -- fallback same-origin.
+// AUDIT-2026-06 : neo4j-legacykb n'a plus d'IP publique -- en local, le backend local ne
+// peut plus l'atteindre directement, ni en lecture (/api/legacykb/*) ni via le tool-calling
+// legacykb du chat (/api/chat, cf. api/services/graph_tools.py). <meta
+// name="nlaz-legacykb-api-url"> (injecté par api/main.py depuis NOTEBOOKLM_API_URL) pointe
+// donc vers ca-api, intégré au VNet, pour ces deux familles de routes (cf. App.jsx,
+// LegacyKbPage.jsx). Absent en production (pas de frontend déployé) -- fallback same-origin.
 const LEGACYKB_API_BASE =
   (document.querySelector('meta[name="nlaz-legacykb-api-url"]')?.content || window.location.origin) + '/api';
 
