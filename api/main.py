@@ -29,6 +29,7 @@ from api.routers.sources import router as sources_router
 from api.services.retriever import Retriever
 from api.services.generator import Generator
 from api.services import session_store
+from ingest.indexer import Indexer
 
 # Chemin explicite -- sans argument, find_dotenv() remonte depuis le dossier de CE
 # fichier (api/), pas depuis le cwd : il trouve api/.env (legacy, désynchronisé) avant
@@ -186,6 +187,16 @@ async def lifespan(app: FastAPI):
         credential = DefaultAzureCredential()
 
     app.state.credential = credential
+
+    # Garantit l'existence de l'index Azure AI Search au démarrage -- create_or_update_index
+    # est idempotent (aucun impact si l'index existe déjà). Sans ce filet, un index supprimé
+    # ou jamais créé (nouveau déploiement, redéploiement infra recréant le service Search)
+    # ne se remarque qu'au premier appel utilisateur, en 500 sur /api/sources.
+    try:
+        Indexer(endpoint=os.environ["AZURE_SEARCH_ENDPOINT"], credential=credential).ensure_index()
+    except Exception as e:
+        logger.error(f"Impossible de créer/vérifier l'index Azure AI Search 'notebooklm-chunks' : {e}")
+
     app.state.retriever = Retriever(credential)
     app.state.generator = Generator(credential)
     logger.info("API NotebookLM Azure démarrée.")
