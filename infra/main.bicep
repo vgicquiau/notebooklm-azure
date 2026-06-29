@@ -39,6 +39,11 @@ param alertEmail string = ''
 param corsAllowedOrigins string = 'http://127.0.0.1:8000'
 
 var suffix = '${projectName}-${environment}'
+// Les noms de Key Vault sont uniques globalement (tous tenants Azure confondus, comme les
+// comptes de stockage) — un nom prévisible 'kv-<suffix>' peut donc collisionner avec un vault
+// détenu par un tenant tiers (vu en prod : 'kv-nlmavgi-prod' déjà pris alors qu'absent de cet
+// abonnement, actif ou soft-deleted). On ajoute un hash court et déterministe.
+var kvSuffix = '${take(suffix, 14)}-${substring(uniqueString(resourceGroup().id), 0, 6)}'
 // Tags obligatoires (policy abonnement "Agentic Studio — Baseline Security", découverte
 // lors de la migration réseau AUDIT-2026-06 -- absente lors des déploiements précédents,
 // donc jamais déclenchée avant la création de nouvelles ressources réseau type VNet/NSG).
@@ -75,7 +80,7 @@ module monitoring 'modules/monitoring.bicep' = {
 module keyvault 'modules/keyvault.bicep' = {
   name: 'keyvault'
   params: {
-    suffix: suffix
+    suffix: kvSuffix
     location: location
     tags: tags
     deployerObjectId: deployerObjectId
@@ -176,7 +181,7 @@ resource apiIdentity 'Microsoft.ManagedIdentity/userAssignedIdentities@2023-01-3
 }
 
 resource kv 'Microsoft.KeyVault/vaults@2023-07-01' existing = {
-  name: 'kv-${suffix}'
+  name: 'kv-${kvSuffix}'
   dependsOn: [keyvault]
 }
 
