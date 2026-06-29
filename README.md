@@ -1,6 +1,6 @@
 # NotebookLM Azure
 
-Agent RAG (Retrieval-Augmented Generation) à interface conversationnelle, inspiré de NotebookLM. Indexez vos documents dans Azure AI Search, posez des questions en langage naturel, obtenez des réponses sourcées avec citations cliquables. Inclut une vue **Legacy KB** pour explorer le graphe GraphRAG de l'application mainframe CardDemo.
+Agent RAG (Retrieval-Augmented Generation) à interface conversationnelle, inspiré de NotebookLM. Indexez vos documents dans Azure AI Search, posez des questions en langage naturel, obtenez des réponses sourcées avec citations cliquables. Inclut une vue **Legacy KB** pour explorer le graphe GraphRAG d'une application mainframe legacy.
 
 ---
 
@@ -52,7 +52,7 @@ L'interface s'ouvre automatiquement sur `http://127.0.0.1:8000`.
 - **Rail notes** : enregistrement des réponses de l'agent, indexation d'une note comme source
 - **Interface redimensionnable** : les deux rails sont redimensionnables par glisser-déposer
 - **Legacy KB** : vue graphe (React Flow/dagre) du dump GraphRAG `neo4j-legacykb` — exploration par domaine fonctionnel, recherche, recentrage et redisposition sur un nœud
-- **Tool-calling Legacy KB dans le Chat** : GPT-4o interroge directement `neo4j-legacykb` pour répondre aux questions sur l'application CardDemo (programmes, copybooks, batch jobs, domaines fonctionnels)
+- **Tool-calling Legacy KB dans le Chat** : GPT-4o interroge directement `neo4j-legacykb` pour répondre aux questions sur l'application legacy modélisée (programmes, copybooks, batch jobs, domaines fonctionnels)
 
 ---
 
@@ -154,7 +154,7 @@ Le fichier `.env` (généré par `deploy.ps1` ou copié depuis `.env.example`) d
 | `API_KEY` | Clé d'authentification pour les endpoints `/api/*` | Recommandé en prod |
 | `NEO4J_LEGACYKB_URI` | URI `bolt://` (local sans TLS) ou `bolt+ssc://` (prod, cert auto-signé) du conteneur neo4j-legacykb — IP **privée**, change à chaque recréation de l'ACI | Pour la vue Legacy KB |
 | `NEO4J_LEGACYKB_PASSWORD` | Mot de passe neo4j | Pour la vue Legacy KB |
-| `NOTEBOOKLM_API_URL` | FQDN public de l'API déployée (`ca-api`) — change à chaque recréation de l'environnement Container Apps. Utilisée par `mcp-legacykb`, et par le backend local pour le CORS/CSP afin que le frontend local puisse appeler `ca-api` en cross-origin pour `/api/legacykb/*` (`neo4j-legacykb` n'a plus d'IP publique) | Pour `mcp-legacykb` et pour la vue Legacy KB en local |
+| `NOTEBOOKLM_API_URL` | FQDN public de l'API déployée (`ca-api`) — change à chaque recréation de l'environnement Container Apps. Utilisée par `mcp-legacykb`, et par le backend local pour le CORS/CSP afin que le frontend local puisse appeler `ca-api` en cross-origin pour `/api/legacykb/*` **et** `/api/chat*` (le tool-calling legacykb du chat s'exécute côté backend — `neo4j-legacykb` n'a plus d'IP publique, cf. `LEGACYKB_API_BASE` dans `App.jsx`/`LegacyKbPage.jsx`) | Pour `mcp-legacykb`, pour la vue Legacy KB en local, et pour que le Chat local accède au tool-calling legacykb |
 | `CORS_ALLOWED_ORIGINS` | Origines CORS autorisées sur `ca-api` (virgule-séparées) — défaut `http://127.0.0.1:8000` pour le frontend local | Si frontend sur domaine différent |
 
 En production, tous les secrets (`API_KEY`, endpoints, mot de passe neo4j) sont lus depuis **Azure Key Vault** via Managed Identity — le `.env` de prod ne contient pas de secrets. `NEO4J_LEGACYKB_URI` et `NOTEBOOKLM_API_URL` ne sont jamais des valeurs fixes : elles changent chaque fois que l'ACI ou l'environnement Container Apps sont recréés.
@@ -202,7 +202,7 @@ Les réponses de l'agent peuvent être sauvegardées comme notes (bouton **Enreg
 
 ### Vue Legacy KB
 
-Accessible via le menu en haut de page. Explore le graphe neo4j-legacykb (dump GraphRAG de l'application mainframe CardDemo) :
+Accessible via le menu en haut de page. Explore le graphe neo4j-legacykb (dump GraphRAG d'une application mainframe legacy) :
 - Recherche de nœuds par nom ou domaine fonctionnel
 - Visualisation des relations (React Flow + dagre)
 - Recentrage et redisposition sur un nœud sélectionné
@@ -219,7 +219,7 @@ notebooklm-azure/
 │   ├── routers/
 │   │   ├── chat.py             # POST /api/chat · GET /api/chat/history/{id} · POST /api/chat/clear
 │   │   ├── ingest.py           # POST /api/ingest, GET /api/ingest/{job_id}
-│   │   ├── legacykb.py         # GET /api/legacykb/* (golden source CardDemo)
+│   │   ├── legacykb.py         # GET /api/legacykb/* (golden source legacy)
 │   │   └── sources.py          # GET/DELETE /api/sources
 │   ├── services/
 │   │   ├── retriever.py        # Recherche vectorielle Azure AI Search
@@ -252,7 +252,7 @@ notebooklm-azure/
 ├── start-dev.ps1               # Lancement du serveur de développement local
 ├── azure-functions/            # fn-adgm-graph / fn-adgm-ingest — conservés au repos
 │                               # (retrait du graphe ADG-M le 2026-06-13)
-├── doc-archimind/              # Corpus de référence CardDemo (architecture mainframe)
+├── doc-archimind/              # Corpus de référence legacy (architecture mainframe)
 └── docs/
     ├── specs/                  # Spécifications produit (SDD_*, plans, audits)
     └── archive/sprint0/        # Scripts du bootstrap initial (superseded)

@@ -145,7 +145,7 @@ flowchart LR
             APP
         end
         subgraph snetaci["snet-aci-legacykb (10.20.1.0/27)\nNSG : entrée 7473/7687 depuis snet-cae uniquement"]
-            NEO[(neo4j-legacykb — ACI auto-hébergé\nIP privée, pas de FQDN public\n:Entity · :Community\nGraphRAG CardDemo)]
+            NEO[(neo4j-legacykb — ACI auto-hébergé\nIP privée, pas de FQDN public\n:Entity · :Community\nGraphRAG legacy)]
         end
     end
 
@@ -308,7 +308,7 @@ sequenceDiagram
 
 ### Tool-calling Legacy KB
 
-En complément de la recherche RAG dans Azure AI Search, GPT-4o dispose de trois tools function-calling (`LEGACYKB_TOOL_DEFINITIONS`, `api/services/graph_tools.py`) donnant un accès en lecture au graphe `neo4j-legacykb` : `legacykb_search`, `legacykb_get_entity`, `legacykb_get_relations`. Le modèle les invoque lui-même (`tool_choice="auto"`) lorsque la question porte sur un programme, copybook, batch job ou domaine fonctionnel CardDemo. Chaque appel de tool est tracé et renvoyé au frontend dans `ChatResponse.graph_references` pour traçabilité.
+En complément de la recherche RAG dans Azure AI Search, GPT-4o dispose de trois tools function-calling (`LEGACYKB_TOOL_DEFINITIONS`, `api/services/graph_tools.py`) donnant un accès en lecture au graphe `neo4j-legacykb` : `legacykb_search`, `legacykb_get_entity`, `legacykb_get_relations`. Le modèle les invoque lui-même (`tool_choice="auto"`) lorsque la question porte sur un programme, copybook, batch job ou domaine fonctionnel du système legacy modélisé. Chaque appel de tool est tracé et renvoyé au frontend dans `ChatResponse.graph_references` pour traçabilité.
 
 ### Recherche hybride dans Azure AI Search
 
@@ -584,7 +584,7 @@ Convention de nommage : `{type}-{projectName}-{env}`. Région par défaut : `swe
 | Blob Storage | `stnlmavgiprod` | Standard LRS | Documents sources |
 | Application Insights | `appi-nlmavgi-prod` | — | Monitoring, traces, logs |
 | Managed Identity | `id-api-nlmavgi-prod` | User-Assigned | Identité du Container App (et du Job) pour les appels Azure |
-| ACI neo4j-legacykb | `aci-neo4j-legacykb-nlmavgi-prod` | (ACI) | Base graphe GraphRAG CardDemo (golden source), déployée dans `snet-aci-legacykb` — IP privée uniquement, aucune IP publique ni FQDN |
+| ACI neo4j-legacykb | `aci-neo4j-legacykb-nlmavgi-prod` | (ACI) | Base graphe GraphRAG legacy (golden source), déployée dans `snet-aci-legacykb` — IP privée uniquement, aucune IP publique ni FQDN |
 
 > L'ACI neo4j-legacykb est déployé conditionnellement (`deployLegacyKb=true`). Si une instance externe est fournie via `-Neo4jUri`, l'ACI n'est pas créé.
 
@@ -771,7 +771,7 @@ And la réponse tient compte du contexte conversationnel
 Given aucun chunk pertinent n'est trouvé dans l'index vectoriel
 When l'utilisateur pose une question
 Then le Generator est appelé malgré tout, avec un contexte documentaire vide
-And il peut répondre via les tools legacykb_* (base de connaissances legacy CardDemo)
+And il peut répondre via les tools legacykb_* (base de connaissances legacy)
 And s'il n'a ni chunk ni résultat legacykb pertinent, il le signale en texte libre
 ```
 
@@ -1456,13 +1456,13 @@ sequenceDiagram
 
 #### I. Vue d'ensemble
 
-La **Legacy KB** ajoute une deuxième vue à l'interface (`LegacyKbPage.jsx`, bascule depuis le `Header`). Elle donne un accès en lecture, sous forme de graphe interactif, à l'intégralité du dump GraphRAG `repartition_cleaned_export.graphml` importé dans une instance Neo4j auto-hébergée séparée (`neo4j-legacykb`, conteneur Azure Container Instances — jamais AuraDB) : 5 812 nœuds `:Entity`/`:Community` et 19 368 relations décrivant l'application mainframe **CardDemo** (programmes COBOL, copybooks, batch jobs, fichiers, domaines fonctionnels).
+La **Legacy KB** ajoute une deuxième vue à l'interface (`LegacyKbPage.jsx`, bascule depuis le `Header`). Elle donne un accès en lecture, sous forme de graphe interactif, à l'intégralité du dump GraphRAG `repartition_cleaned_export.graphml` importé dans une instance Neo4j auto-hébergée séparée (`neo4j-legacykb`, conteneur Azure Container Instances — jamais AuraDB) : 5 812 nœuds `:Entity`/`:Community` et 19 368 relations décrivant une application mainframe legacy (programmes COBOL, copybooks, batch jobs, fichiers, domaines fonctionnels).
 
-Depuis une migration réseau (audit sécurité, finding CVSS 8.3 : la base était joignable directement depuis Internet), `neo4j-legacykb` n'a plus d'IP publique ni de FQDN — elle est déployée dans un VNet privé, joignable uniquement depuis le sous-réseau de l'environnement Container Apps (`ca-api`). En conséquence, **le backend local (`start-dev.ps1`) ne peut plus atteindre `neo4j-legacykb` directement** (pas de VPN/Bastion mis en place) : seuls `ca-api` (intégré au VNet) et le Container Apps Job d'import peuvent l'atteindre. C'est pourquoi l'exploration visuelle du graphe en local appelle `ca-api` en cross-origin pour les routes `/api/legacykb/*` (voir section 7, CORS) — c'est aussi le seul moyen de parcourir visuellement le graphe, car l'image Docker déployée ne contient jamais le frontend.
+Depuis une migration réseau (audit sécurité, finding CVSS 8.3 : la base était joignable directement depuis Internet), `neo4j-legacykb` n'a plus d'IP publique ni de FQDN — elle est déployée dans un VNet privé, joignable uniquement depuis le sous-réseau de l'environnement Container Apps (`ca-api`). En conséquence, **le backend local (`start-dev.ps1`) ne peut plus atteindre `neo4j-legacykb` directement** (pas de VPN/Bastion mis en place) : seuls `ca-api` (intégré au VNet) et le Container Apps Job d'import peuvent l'atteindre. C'est pourquoi le frontend local appelle `ca-api` en cross-origin à la fois pour les routes `/api/legacykb/*` (exploration visuelle du graphe — voir section 7, CORS) et pour `/api/chat*` (le tool-calling legacykb du chat s'exécute côté backend, cf. `api/services/graph_tools.py` — sans ce routage, le backend local échouerait à joindre `neo4j-legacykb` et le chat répondrait que la base est inaccessible) — c'est aussi le seul moyen de parcourir visuellement le graphe, car l'image Docker déployée ne contient jamais le frontend.
 
-Cette base est la **golden source** de référence pour le legacy CardDemo. Elle est consultée de deux façons :
+Cette base est la **golden source** de référence pour le système legacy modélisé. Elle est consultée de deux façons :
 - **Exploration visuelle** — l'onglet "Legacy KB" (`LegacyKbPage.jsx`), graphe React Flow/dagre
-- **Tool-calling depuis le Chat** — GPT-4o interroge directement `neo4j-legacykb` via les tools `legacykb_*` (cf. section 5, "Tool-calling Legacy KB") pour répondre aux questions sur CardDemo
+- **Tool-calling depuis le Chat** — GPT-4o interroge directement `neo4j-legacykb` via les tools `legacykb_*` (cf. section 5, "Tool-calling Legacy KB") pour répondre aux questions sur le système legacy modélisé
 
 L'instance ADG-M (Function App `fn-adgm-graph`, Cytoscape) qui exploitait auparavant une partie de ce dump a été retirée le 2026-06-13 ; `azure-functions/` est conservé "au repos" mais n'est plus consommé par l'application (voir `CLAUDE.md`).
 
@@ -1560,11 +1560,11 @@ Tools function-calling pour GPT-4o (`LEGACYKB_TOOL_DEFINITIONS`, exécutés par 
 
 #### V. Pipeline d'alimentation de la base Neo4j
 
-La base `neo4j-legacykb` est peuplée à partir d'un dump GraphML généré par le pipeline GraphRAG (extraction des entités et relations depuis le corpus CardDemo). Ce pipeline est **externe** à NotebookLM Azure — il produit le fichier `repartition_cleaned_export.graphml`.
+La base `neo4j-legacykb` est peuplée à partir d'un dump GraphML généré par le pipeline GraphRAG (extraction des entités et relations depuis le corpus legacy). Ce pipeline est **externe** à NotebookLM Azure — il produit le fichier `repartition_cleaned_export.graphml`.
 
 ```mermaid
 flowchart LR
-    A[🗂️ Corpus CardDemo\nCOBOL · JCL · copybooks] --> B[Pipeline GraphRAG\nextraction entités + relations]
+    A[🗂️ Corpus legacy\nCOBOL · JCL · copybooks] --> B[Pipeline GraphRAG\nextraction entités + relations]
     B --> C[repartition_cleaned_export.graphml\ningest/extract/]
     C --> D[import-neo4j-legacykb.ps1\nautomatique via deploy.ps1]
     D --> E[az storage file upload\nAzure Files neo4j-import\ncontrol-plane, fonctionne malgré le VNet]
@@ -1615,11 +1615,12 @@ Les deux actions mettent à jour `centerId`/`selectedId` ; `_layout` reconstruit
 |---|---|---|
 | `GET /api/legacykb/*` → 502 (depuis `ca-api`) | `neo4j-legacykb` injoignable ou `NEO4J_LEGACYKB_PASSWORD` absent | Vérifier que l'ACI est démarré et joignable depuis `snet-cae` (NSG), et la configuration Key Vault |
 | `GET /api/legacykb/*` → erreur réseau (depuis le backend local, `start-dev.ps1`) | `neo4j-legacykb` n'a plus d'IP publique — le poste local ne peut pas l'atteindre directement (pas de VPN/Bastion) | Comportement attendu ; vérifier que `NOTEBOOKLM_API_URL` est défini dans `.env` (le frontend local doit appeler `ca-api` en cross-origin, pas le backend local) |
-| Page Legacy KB locale bloquée par CORS/CSP | `CORS_ALLOWED_ORIGINS` non configuré sur `ca-api`, ou CSP `connect-src` n'autorise pas `NOTEBOOKLM_API_URL` | Vérifier le paramètre Bicep `corsAllowedOrigins` sur `ca-api` et que `.env` local définit `NOTEBOOKLM_API_URL` |
+| Le Chat répond que la base de connaissances legacy est inaccessible (en local) | Même cause que ci-dessus : le tool-calling legacykb (`api/services/graph_tools.py`) s'exécute côté backend, et le backend *local* ne peut pas joindre `neo4j-legacykb` | Comportement attendu si `NOTEBOOKLM_API_URL` n'est pas défini. Depuis `LEGACYKB_API_BASE` (App.jsx/LegacyKbPage.jsx), `/api/chat*` est routé vers `ca-api` en cross-origin au même titre que `/api/legacykb/*` — vérifier que `NOTEBOOKLM_API_URL` est défini dans `.env` |
+| Page Legacy KB ou Chat locaux bloqués par CORS/CSP | `CORS_ALLOWED_ORIGINS` non configuré sur `ca-api`, ou CSP `connect-src` n'autorise pas `NOTEBOOKLM_API_URL` | Vérifier le paramètre Bicep `corsAllowedOrigins` sur `ca-api` (doit inclure l'origine du frontend local, ex. `http://127.0.0.1:8000`) et que `.env` local définit `NOTEBOOKLM_API_URL` |
 | Graphe vide — aucun nœud affiché | Import GraphML non exécuté ou échoué | Relancer `import-neo4j-legacykb.ps1` ; vérifier que `repartition_cleaned_export.graphml` est dans `ingest/extract/` (pas `docs/extract/`, exclu de Git en entier) |
 | Import échoue avec `ManagedEnvironmentCannotAddVnetToExistingEnv` ou `SubnetIdCannotChange` | Tentative d'appliquer cette architecture réseau à un déploiement Container Apps/ACI préexistant | Voir GUIDE-DEPLOIEMENT.md § Réseau privé — recréation forcée nécessaire (RG vierge non affecté) |
 | Titres Community illisibles (`Ã©` au lieu de `é`) | Double-encodage UTF-8/Latin-1 lors de l'import APOC | Le correctif `fix_utf8.cypher` est appliqué automatiquement par le Job d'import (`caj-import-legacykb-<suffix>`) |
 | `GET /api/legacykb/nodes/{id}` → 404 | Identifiant mal formé ou nœud absent du dump | Vérifier le format `e|{type}|{name}` ou `c|{id}` (cf. `legacykb_client.parse_node_id`) |
-| Réponses du Chat sans `graph_references` sur une question CardDemo | GPT-4o n'a pas invoqué les tools `legacykb_*` | Vérifier le system prompt (`_LEGACYKB_TOOLS_BLOCK` dans `generator.py`) et le mode (Rapide a un prompt tools réduit) |
+| Réponses du Chat sans `graph_references` sur une question portant sur le système legacy | GPT-4o n'a pas invoqué les tools `legacykb_*` | Vérifier le system prompt (`_LEGACYKB_TOOLS_BLOCK` dans `generator.py`) et le mode (Rapide a un prompt tools réduit) |
 | `window.ReactFlow` / `window.dagre` undefined | Script vendor non chargé ou ordre incorrect dans `index.html` | Vérifier `jsx-runtime-shim.js` → `xyflow-react.umd.js` → `dagre.min.js` avant `LegacyKbPage.jsx` |
 | "Recentrer la disposition" ne change rien | Bundle ne contient pas le nœud sélectionné dans son arbre couvrant | Explorer le nœud (double-clic) avant de redisposer |

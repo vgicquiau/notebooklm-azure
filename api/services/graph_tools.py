@@ -1,6 +1,6 @@
 """Tools function-calling (OpenAI) donnant au Chat un accès en lecture à `neo4j-legacykb`.
 
-Base de connaissances legacy CardDemo (dump GraphRAG, cf. api/services/legacykb_client.py) :
+Base de connaissances legacy (dump GraphRAG, cf. api/services/legacykb_client.py) :
 - :Entity (Program, BatchJob, Copybook, GenericFile...) avec descriptions fonctionnelle/technique
 - :Community (domaines fonctionnels, niveaux 1/2) avec résumés fonctionnel/technique
 - Relations : CALLS, INCLUDES, READS/INSERTS/UPDATES/DELETES/CREATES, IN_COMMUNITY, EXECUTES, ...
@@ -19,11 +19,11 @@ LEGACYKB_TOOL_DEFINITIONS = [
         "function": {
             "name": "legacykb_search",
             "description": (
-                "Recherche dans la base de connaissances legacy CardDemo (graphe GraphRAG) "
+                "Recherche dans la base de connaissances legacy (graphe GraphRAG) "
                 "des programmes COBOL, copybooks, batch jobs ou domaines fonctionnels dont le "
                 "nom/titre contient le terme donné (recherche par sous-chaîne, insensible à la "
                 "casse). À utiliser dès que l'utilisateur mentionne un nom (même partiel) de "
-                "programme, copybook, job ou domaine fonctionnel du système CardDemo."
+                "programme, copybook, job ou domaine fonctionnel du système legacy."
             ),
             "parameters": {
                 "type": "object",
@@ -57,7 +57,7 @@ LEGACYKB_TOOL_DEFINITIONS = [
             "name": "legacykb_get_entity",
             "description": (
                 "Récupère le détail complet d'un élément de la base de connaissances legacy "
-                "CardDemo (programme, copybook, batch job ou domaine fonctionnel) à partir de "
+                "(programme, copybook, batch job ou domaine fonctionnel) à partir de "
                 "son identifiant (obtenu via legacykb_search). Pour un programme/copybook/job, "
                 "renvoie ses descriptions fonctionnelle et technique. Pour un domaine "
                 "fonctionnel (community), renvoie ses résumés fonctionnel et technique."
@@ -139,7 +139,7 @@ LEGACYKB_TOOL_DEFINITIONS = [
                 "Liste les relations directes (appels de programmes CALLS, inclusions de "
                 "copybooks INCLUDES, accès fichiers READS/INSERTS/UPDATES/DELETES/CREATES, "
                 "appartenance à un domaine fonctionnel IN_COMMUNITY, exécution par un batch job "
-                "EXECUTES, etc.) d'un élément de la base de connaissances legacy CardDemo, dans "
+                "EXECUTES, etc.) d'un élément de la base de connaissances legacy, dans "
                 "les deux sens, avec les éléments voisins. À utiliser pour répondre aux questions "
                 "sur les dépendances, chaînes d'appel, accès aux données, ou le domaine "
                 "fonctionnel d'un programme/copybook/job."
