@@ -50,8 +50,11 @@ doc-archimind/
 # Corpus de référence — données sensibles
 Generation/
 
-# Exports/données générées par le pipeline GraphRAG (volumineux, régénérables)
-docs/extract/*.graphml
+# Exports/données générées par le pipeline GraphRAG (volumineux, régénérables) -- le dossier
+# ingest/extract/ lui-même reste suivi (avec son README) pour qu'il existe après un clone,
+# seuls les fichiers de dump y sont exclus (cf. ingest/extract/README.md)
+ingest/extract/*.graphml
+ingest/extract/*.jsonl
 ingest/graphrag_mapped.json
 
 # Outillage spécifique à Claude Code (local, non nécessaire au fonctionnement de l'app)

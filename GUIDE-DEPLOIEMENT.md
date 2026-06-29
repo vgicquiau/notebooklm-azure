@@ -168,7 +168,14 @@ ce script ne se connecte plus jamais directement à Neo4j (impossible — plus d
    - **`.jsonl`** : une ligne JSON par nœud/relation (`{"_type": "node", "id", "labels", "props"}` / `{"_type": "relationship", "fromId", "toId", "relType", "props"}`) ; création par lots via `apoc.create.node`/`apoc.create.relationship`, sans upsert — toujours additif, utiliser `-PurgeBeforeImport` pour réimporter sans dupliquer
 4. `import-neo4j-legacykb.ps1` attend la fin de l'exécution du Job (jusqu'à 10 min) et relit son résultat (déposé en JSON dans le même partage Azure Files, via `az storage file download`)
 
-> **Si le dump est absent** (`docs/extract/repartition_cleaned_export.graphml` par défaut), l'import est ignoré silencieusement et un avertissement est affiché. L'application démarre mais la vue Legacy KB retournera des erreurs 502 / un graphe vide.
+> **Si le dump est absent** (`ingest/extract/repartition_cleaned_export.graphml` par défaut), l'import est ignoré silencieusement et un avertissement est affiché. L'application démarre mais la vue Legacy KB retournera des erreurs 502 / un graphe vide.
+>
+> **⚠️ `ingest/extract/`, pas `docs/extract/`** : tout le dossier `docs/` est exclu de Git
+> (`.gitignore`) — après un `git clone`, `docs/extract/` **n'existe pas du tout**, ce qui ne
+> laissait aucune information à un nouvel utilisateur sur où déposer son export. `ingest/`
+> n'est lui pas exclu : `ingest/extract/` (avec un `README.md` qui explique quoi y mettre)
+> existe donc déjà après le clone. Déposez-y votre fichier `.graphml` ou `.jsonl` avant de
+> lancer `deploy.ps1`/`import-neo4j-legacykb.ps1`/`migrate-rg.ps1`.
 
 > **Si `-Neo4jUri` est fourni** : l'ACI n'est pas créé et cet import est ignoré — vous êtes responsable de peupler votre instance Neo4j externe.
 
@@ -294,7 +301,7 @@ de ce type existe.
 
 ### Mettre à jour le dump GraphML dans Neo4j (sans redéploiement complet)
 
-Lorsque le fichier `docs/extract/repartition_cleaned_export.graphml` est mis à jour — ou pour
+Lorsque le fichier `ingest/extract/repartition_cleaned_export.graphml` est mis à jour — ou pour
 repeupler une nouvelle instance neo4j-legacykb (nouveau `-ProjectName`, nouveau Resource Group...)
 — relancez l'import seul sans toucher à l'infrastructure. `-StorageAccountName` et `-JobName` sont
 découverts automatiquement depuis `-ResourceGroup` (cas courant : un seul conteneur
@@ -573,7 +580,7 @@ depuis les secrets du Key Vault déplacé, jamais régénérés) — aucun clien
 | `ingest.py` : `DisableLocalAuthError` | `disableLocalAuth: true` actif, `az login` non détecté | Vérifier `az account show` renvoie votre compte |
 | Container App ne démarre pas (CrashLoopBackOff) | Variables env manquantes ou image incorrecte | `az containerapp logs show -g <rg> -n ca-api-<suffix> --container api --tail 100 --follow false` (nécessite `$env:REQUESTS_CA_BUNDLE` si proxy Zscaler) |
 | neo4j-legacykb inaccessible | ACI en cours de démarrage (2-3 min) | Attendre et retester `/api/legacykb/health` |
-| Import GraphML ignoré (`dump introuvable`) | Fichier absent de `docs/extract/` | Placer `repartition_cleaned_export.graphml` dans `docs/extract/` et relancer `import-neo4j-legacykb.ps1` |
+| Import GraphML ignoré (`dump introuvable`) | Fichier absent de `ingest/extract/` (pas `docs/extract/`, exclu de Git en entier — cf. § Phase 4c) | Placer `repartition_cleaned_export.graphml` dans `ingest/extract/` et relancer `import-neo4j-legacykb.ps1` |
 | Import GraphML échoué (`APOC not found`) | Plugin APOC non installé dans le conteneur | Vérifier l'image neo4j (`neo4j:5.22-community` + `apoc`/`graph-data-science` dans `NEO4J_PLUGINS`) |
 | Import JSONL échoué (`Instance Neo4j legacy-kb injoignable`), reproductible (pas un aléa réseau) | Lot de nœuds trop volumineux pour le timeout HTTP de 30s (`legacykb_client._execute`) — typiquement des `:Entity` avec de gros vecteurs d'embedding | Réduire `_JSONL_NODE_BATCH_SIZE` dans `api/scripts/import_legacykb.py`, rebuilder l'image (`az acr build`) et la repousser sur le Job (`az containerapp job update --image ...`) |
 | Nœuds Community avec caractères corrompus | Double-encodage UTF-8/Latin-1 lors de l'import | Appliqué automatiquement par le Job d'import (`fix_utf8.cypher`) — aucune action manuelle requise |

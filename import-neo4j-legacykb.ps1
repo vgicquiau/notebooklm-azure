@@ -42,7 +42,10 @@
 .PARAMETER DumpPath
     Chemin du fichier à importer -- .graphml ou .jsonl (format détecté par l'extension
     côté Job, cf. api/scripts/import_legacykb.py). Défaut :
-    docs/extract/repartition_cleaned_export.graphml.
+    ingest/extract/repartition_cleaned_export.graphml -- ce dossier (contrairement à
+    docs/extract/, utilisé avant et totalement exclu de Git) est suivi par Git : il existe
+    donc déjà après un `git clone`, à charge de l'utilisateur d'y déposer son propre fichier
+    (voir ingest/extract/README.md, lui aussi suivi par Git).
 
 .PARAMETER ProjectName
     Préfixe du projet (suffixe des ressources "*-legacykb-<ProjectName>-<Environment>").
@@ -84,7 +87,7 @@
     # Import d'un export au format JSONL (ex. généré par un autre outil que le pipeline
     # GraphRAG habituel) -- format détecté automatiquement par l'extension du fichier
     .\import-neo4j-legacykb.ps1 -ResourceGroup rg-sp5-d-vgi-azu-repart-nlm-txt `
-        -DumpPath docs\extract\mon_export.jsonl -PurgeBeforeImport -SkipSSL
+        -DumpPath ingest\extract\mon_export.jsonl -PurgeBeforeImport -SkipSSL
 #>
 param(
     [Parameter(Mandatory)] [string]$ResourceGroup,
@@ -187,12 +190,16 @@ if (-not $StorageAccountName -or -not $JobName) {
 }
 
 if (-not $DumpPath) {
-    $DumpPath = Join-Path $ProjectRoot "docs\extract\repartition_cleaned_export.graphml"
+    # ingest/extract/ (et pas docs/extract/, utilisé avant) -- docs/ est entierement exclu de
+    # Git (.gitignore), ce dossier n'existe donc pas du tout apres un `git clone` et un nouvel
+    # utilisateur ne pouvait pas savoir qu'il fallait le creer lui-meme. ingest/ est suivi par
+    # Git : ce dossier (et son README expliquant quoi y deposer) existent deja apres le clone.
+    $DumpPath = Join-Path $ProjectRoot "ingest\extract\repartition_cleaned_export.graphml"
 }
 
 if (-not (Test-Path $DumpPath)) {
-    Write-Host "  !!   Dump GraphML introuvable ($DumpPath) — import ignoré" -ForegroundColor Yellow
-    Write-Host "       Placez votre export dans docs/extract/ et relancez ce script." -ForegroundColor DarkGray
+    Write-Host "  !!   Dump introuvable ($DumpPath) — import ignoré" -ForegroundColor Yellow
+    Write-Host "       Deposez votre export (.graphml ou .jsonl) dans ingest\extract\ -- voir ingest\extract\README.md -- et relancez ce script." -ForegroundColor DarkGray
     exit 0
 }
 

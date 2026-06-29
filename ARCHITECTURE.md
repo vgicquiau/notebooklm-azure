@@ -1565,7 +1565,7 @@ La base `neo4j-legacykb` est peuplée à partir d'un dump GraphML généré par 
 ```mermaid
 flowchart LR
     A[🗂️ Corpus CardDemo\nCOBOL · JCL · copybooks] --> B[Pipeline GraphRAG\nextraction entités + relations]
-    B --> C[repartition_cleaned_export.graphml\ndocs/extract/]
+    B --> C[repartition_cleaned_export.graphml\ningest/extract/]
     C --> D[import-neo4j-legacykb.ps1\nautomatique via deploy.ps1]
     D --> E[az storage file upload\nAzure Files neo4j-import\ncontrol-plane, fonctionne malgré le VNet]
     E --> F[Container Apps Job\ncaj-import-legacykb-&lt;suffix&gt;\ndepuis snet-cae]
@@ -1616,7 +1616,7 @@ Les deux actions mettent à jour `centerId`/`selectedId` ; `_layout` reconstruit
 | `GET /api/legacykb/*` → 502 (depuis `ca-api`) | `neo4j-legacykb` injoignable ou `NEO4J_LEGACYKB_PASSWORD` absent | Vérifier que l'ACI est démarré et joignable depuis `snet-cae` (NSG), et la configuration Key Vault |
 | `GET /api/legacykb/*` → erreur réseau (depuis le backend local, `start-dev.ps1`) | `neo4j-legacykb` n'a plus d'IP publique — le poste local ne peut pas l'atteindre directement (pas de VPN/Bastion) | Comportement attendu ; vérifier que `NOTEBOOKLM_API_URL` est défini dans `.env` (le frontend local doit appeler `ca-api` en cross-origin, pas le backend local) |
 | Page Legacy KB locale bloquée par CORS/CSP | `CORS_ALLOWED_ORIGINS` non configuré sur `ca-api`, ou CSP `connect-src` n'autorise pas `NOTEBOOKLM_API_URL` | Vérifier le paramètre Bicep `corsAllowedOrigins` sur `ca-api` et que `.env` local définit `NOTEBOOKLM_API_URL` |
-| Graphe vide — aucun nœud affiché | Import GraphML non exécuté ou échoué | Relancer `import-neo4j-legacykb.ps1` ; vérifier que `repartition_cleaned_export.graphml` est dans `docs/extract/` |
+| Graphe vide — aucun nœud affiché | Import GraphML non exécuté ou échoué | Relancer `import-neo4j-legacykb.ps1` ; vérifier que `repartition_cleaned_export.graphml` est dans `ingest/extract/` (pas `docs/extract/`, exclu de Git en entier) |
 | Import échoue avec `ManagedEnvironmentCannotAddVnetToExistingEnv` ou `SubnetIdCannotChange` | Tentative d'appliquer cette architecture réseau à un déploiement Container Apps/ACI préexistant | Voir GUIDE-DEPLOIEMENT.md § Réseau privé — recréation forcée nécessaire (RG vierge non affecté) |
 | Titres Community illisibles (`Ã©` au lieu de `é`) | Double-encodage UTF-8/Latin-1 lors de l'import APOC | Le correctif `fix_utf8.cypher` est appliqué automatiquement par le Job d'import (`caj-import-legacykb-<suffix>`) |
 | `GET /api/legacykb/nodes/{id}` → 404 | Identifiant mal formé ou nœud absent du dump | Vérifier le format `e|{type}|{name}` ou `c|{id}` (cf. `legacykb_client.parse_node_id`) |
