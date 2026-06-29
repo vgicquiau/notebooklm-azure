@@ -15,6 +15,15 @@ COPY api/ ./api/
 # existe sur disque -- absent ici, le conteneur ne sert donc que l'API JSON
 # (pas de page web publique, pas de fuite de l'API Key via une page HTML).
 
+# ingest/indexer.py est importé par api/main.py (ensure_index() au démarrage,
+# auto-réparation de l'index Azure AI Search) et par api/routers/ingest.py.
+# N'a besoin que d'azure-search-documents/azure-identity (déjà dans
+# api/requirements.txt) -- les autres modules d'ingest/ (chunkers, embedder,
+# CLI ingest.py) ne sont pas utilisables ici, leurs dépendances propres
+# (ingest/requirements.txt) ne sont pas installées dans cette image.
+COPY ingest/__init__.py ./ingest/__init__.py
+COPY ingest/indexer.py ./ingest/indexer.py
+
 # Utilisé uniquement par api/scripts/import_legacykb.py (Container Apps Job,
 # AUDIT-2026-06) -- même image que ca-api, réutilisée pour l'import legacykb
 # désormais exécuté depuis l'intérieur du VNet plutôt que depuis le poste de
