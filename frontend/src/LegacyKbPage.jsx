@@ -4,9 +4,15 @@
 // Lecture seule, via api/routers/legacykb.py (connexion directe à l'instance Neo4j
 // neo4j-legacykb, distincte du graphe ADG-M, retiré). Recherche par nom/titre, puis
 // exploration progressive du voisinage par double-clic. Rendu avec React Flow (xyflow,
-// window.ReactFlow) + dagre (window.dagre) pour le layout.
+// window.ReactFlow) ; layout force-directed via d3-force (window.d3).
 
 const API_BASE = window.location.origin + '/api';
+// AUDIT-2026-06 : neo4j-legacykb n'a plus d'IP publique -- routes /api/legacykb/*
+// uniquement vers ca-api (intégré au VNet), via <meta name="nlaz-legacykb-api-url">
+// injecté par api/main.py depuis NOTEBOOKLM_API_URL. Le reste (ex. /chat plus bas)
+// reste sur API_BASE (same-origin, backend local).
+const LEGACYKB_API_BASE =
+  (document.querySelector('meta[name="nlaz-legacykb-api-url"]')?.content || window.location.origin) + '/api';
 const _uid = () => Math.random().toString(36).slice(2, 10);
 
 const {
@@ -20,7 +26,19 @@ const {
   MarkerType,
   applyNodeChanges,
   useReactFlow,
+  useInternalNode,
+  getStraightPath,
+  BaseEdge,
 } = window.ReactFlow;
+
+const {
+  forceSimulation,
+  forceLink,
+  forceManyBody,
+  forceCollide,
+  forceX,
+  forceY,
+} = window.d3;
 
 // ── Couleurs/formes par type d'entité et niveau de communauté ─────────────────
 const ENTITY_COLORS = {
@@ -77,7 +95,7 @@ const RELATION_COLORS = {
 // Mots-clés techniques mainframe détectés dans `technical_description` (tags)
 const TECH_TAGS = ['VSAM', 'CICS', 'DB2', 'SQL', 'MQ', 'IMS', 'KSDS', 'JCL', 'COPY', 'PACBASE', 'GOBACK'];
 
-// Nœuds carrés — format uniforme, ratio 1:1, meilleure grille dans les zones.
+// Nœuds carrés — format uniforme, ratio 1:1.
 const NODE_W = 90;
 const NODE_H = 90;
 
@@ -88,58 +106,7 @@ const ENTITY_TYPE_SHORT = {
 };
 const COMMUNITY_LEVEL_SHORT = { 2: 'DOM', 1: 'SDOM' };
 
-// Marge des zones de regroupement par communauté (le haut inclut l'espace
-// pour l'étiquette de titre de la zone).
-const ZONE_PADDING_X = 24;
-const ZONE_PADDING_TOP = 34;
-const ZONE_PADDING_BOTTOM = 16;
-
-// Disposition en grille des membres d'une zone — espacement uniforme entre nœuds carrés.
-const ZONE_GRID_GAP_X = NODE_W + 20;
-const ZONE_GRID_GAP_Y = NODE_H + 16;
-
-// ── Couleur → rgba (teinte/bordure des zones de regroupement) ────────────────
-const _hexToRgba = (hex, alpha) => {
-  const h = hex.replace('#', '');
-  const r = parseInt(h.substring(0, 2), 16);
-  const g = parseInt(h.substring(2, 4), 16);
-  const b = parseInt(h.substring(4, 6), 16);
-  return `rgba(${r}, ${g}, ${b}, ${alpha})`;
-};
-
-// ── Couleur → teinte opaque (mélange avec le blanc) — fond des nœuds, qui ne
-// doivent pas être transparents (contrairement aux zones de regroupement).
-const _hexToTint = (hex, alpha) => {
-  const h = hex.replace('#', '');
-  const r = parseInt(h.substring(0, 2), 16);
-  const g = parseInt(h.substring(2, 4), 16);
-  const b = parseInt(h.substring(4, 6), 16);
-  const mix = (c) => Math.round(c * alpha + 255 * (1 - alpha));
-  return `rgb(${mix(r)}, ${mix(g)}, ${mix(b)})`;
-};
-
-// ── Couleur → ton foncé (mélange avec le noir) — extrémité sombre du dégradé
-// des pills de type.
-const _hexToShade = (hex, alpha) => {
-  const h = hex.replace('#', '');
-  const r = parseInt(h.substring(0, 2), 16);
-  const g = parseInt(h.substring(2, 4), 16);
-  const b = parseInt(h.substring(4, 6), 16);
-  const mix = (c) => Math.round(c * (1 - alpha));
-  return `rgb(${mix(r)}, ${mix(g)}, ${mix(b)})`;
-};
-
-// Points d'ancrage multiples — un par côté, chacun cumulant source + target
-// pour permettre à dagre/_pickHandles de router les arêtes au plus court.
-const HANDLE_SIDES = [
-  { id: 'top',    position: Position.Top },
-  { id: 'right',  position: Position.Right },
-  { id: 'bottom', position: Position.Bottom },
-  { id: 'left',   position: Position.Left },
-];
-
 // ── Nœud custom — carré 90×90, badge de type abrégé + nom sur 2 lignes ────────
-// Format carré : hiérarchie plus lisible en layout TB, grilles de zone compactes.
 const LegacyNode = ({ data }) => {
   const isEntity = data.kind === 'entity';
   const color = isEntity
@@ -152,28 +119,29 @@ const LegacyNode = ({ data }) => {
   const handleStyle = { background: 'transparent', border: 'none', width: 1, height: 1, opacity: 0 };
 
   return (
-    <div style={{
-      display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 5,
-      width: NODE_W, height: NODE_H, boxSizing: 'border-box', padding: '8px',
-      borderRadius: T.radiusSm,
-      border: data.isCenter ? `2px solid ${T.azure}` : 'none',
-      background: T.white,
-      fontFamily: T.font, color: T.ink, textAlign: 'center',
-      boxShadow: data.highlighted
-        ? '0 2px 6px rgba(28,27,24,0.12), 0 0 0 3px rgba(251,140,0,0.45)'
-        : '0 2px 6px rgba(28,27,24,0.12)',
-    }}>
-      {HANDLE_SIDES.map(({ id, position }) => (
-        <React.Fragment key={id}>
-          <Handle type="target" position={position} id={`${id}-target`} style={handleStyle} />
-          <Handle type="source" position={position} id={`${id}-source`} style={handleStyle} />
-        </React.Fragment>
-      ))}
+    <div
+      onMouseDown={() => data.onFreeze?.(data.id)}
+      style={{
+        display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 5,
+        width: NODE_W, height: NODE_H, boxSizing: 'border-box', padding: '8px',
+        borderRadius: T.radiusSm,
+        border: data.isCenter ? `2px solid ${T.white}` : 'none',
+        background: color,
+        fontFamily: T.font, color: T.white, textAlign: 'center',
+        boxShadow: data.highlighted
+          ? '0 2px 6px rgba(28,27,24,0.25), 0 0 0 3px rgba(251,140,0,0.7)'
+          : '0 2px 6px rgba(28,27,24,0.25)',
+      }}
+    >
+      {/* Un seul handle source/target par nœud — le point de connexion réel sur le
+          pourtour est calculé géométriquement par `FloatingEdge`, pas par xyflow. */}
+      <Handle type="target" position={Position.Top} style={handleStyle} />
+      <Handle type="source" position={Position.Top} style={handleStyle} />
       <span style={{
         flexShrink: 0,
         padding: '2px 7px', borderRadius: 999,
-        background: `linear-gradient(135deg, ${_hexToShade(color, 0.5)}, ${color})`,
-        fontSize: 9, fontWeight: 700, color: T.white, letterSpacing: 0.5,
+        background: T.white,
+        fontSize: 9, fontWeight: 700, color, letterSpacing: 0.5,
         maxWidth: '100%', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
       }}>
         {shortLabel}
@@ -184,6 +152,7 @@ const LegacyNode = ({ data }) => {
         display: '-webkit-box',
         WebkitLineClamp: 2,
         WebkitBoxOrient: 'vertical',
+        textShadow: '0 1px 2px rgba(0,0,0,0.25)',
       }}>
         {data.nom}
       </span>
@@ -191,51 +160,36 @@ const LegacyNode = ({ data }) => {
   );
 };
 
-// ── Nœud zone — englobe les entités d'une même communauté (regroupement) ─────
-// Porte les mêmes ancrages que LegacyNode (HANDLE_SIDES) pour pouvoir recevoir
-// des arêtes vers/depuis d'autres zones ou communautés (relations SUBCOMMUNITY_OF
-// redirigées depuis le nœud :Community masqué que cette zone représente).
-const ZoneNode = ({ data }) => {
-  const color = COMMUNITY_COLORS[data.level] ?? '#bdbdbd';
+// ── Badge "+N" — représente un groupe de références externes repliées (cf.
+//    EXT_BADGE_MIN dans `_prepareSimulation`). Cliquer le déplie en nœuds
+//    individuels (cf. `handleNodeClick`) ; pas de menu contextuel ni de détail.
+const ExtBadgeNode = ({ data }) => {
+  const color = ENTITY_COLORS['External/Doc'];
   const handleStyle = { background: 'transparent', border: 'none', width: 1, height: 1, opacity: 0 };
   return (
-    <div style={{
-      position: 'relative',
-      width: data.width, height: data.height,
-      borderRadius: T.radiusLg,
-      background: _hexToRgba(color, 0.06),
-      border: `1.5px dashed ${_hexToRgba(color, 0.35)}`,
-      boxSizing: 'border-box',
-      cursor: 'grab',
-    }}>
-      {HANDLE_SIDES.map(({ id, position }) => (
-        <React.Fragment key={id}>
-          <Handle type="target" position={position} id={`${id}-target`} style={handleStyle} />
-          <Handle type="source" position={position} id={`${id}-source`} style={handleStyle} />
-        </React.Fragment>
-      ))}
-      <div
-        onClick={e => { e.stopPropagation(); data.onSelect?.(); }}
-        style={{
-          position: 'absolute', top: -11, left: 14,
-          display: 'flex', alignItems: 'center', gap: 5,
-          fontFamily: T.font, fontSize: 11, fontWeight: 700, color: T.white,
-          background: `linear-gradient(135deg, ${_hexToShade(color, 0.5)}, ${color})`,
-          padding: '2px 9px', borderRadius: 999, whiteSpace: 'nowrap',
-          cursor: 'pointer', userSelect: 'none',
-        }}
-        title="Cliquer pour voir le détail de la communauté"
-      >
-        {data.rawId && (
-          <span style={{ opacity: 0.8, fontSize: 10 }}>{data.rawId}</span>
-        )}
-        {data.nom}
-      </div>
+    <div
+      onMouseDown={() => data.onFreeze?.(data.id)}
+      title="Déplier les références externes"
+      style={{
+        display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 4,
+        width: NODE_W, height: NODE_H, boxSizing: 'border-box', padding: '8px',
+        borderRadius: T.radiusSm,
+        background: T.white, border: `2px dashed ${color}`,
+        fontFamily: T.font, textAlign: 'center', cursor: 'pointer',
+        boxShadow: '0 2px 6px rgba(28,27,24,0.18)',
+      }}
+    >
+      <Handle type="target" position={Position.Top} style={handleStyle} />
+      <Handle type="source" position={Position.Top} style={handleStyle} />
+      <span style={{ fontSize: 18, fontWeight: 700, color }}>+{data.count}</span>
+      <span style={{ fontSize: 10, fontWeight: 600, color: T.muted, lineHeight: 1.3 }}>
+        références externes
+      </span>
     </div>
   );
 };
 
-const NODE_TYPES = { legacyNode: LegacyNode, zoneNode: ZoneNode };
+const NODE_TYPES = { legacyNode: LegacyNode, extBadgeNode: ExtBadgeNode };
 
 // ── Menu contextuel nœud (style Neo4j) — affiché au clic, ancré au curseur ────
 const NodeContextMenu = ({ x, y, onRecenter, onRecenterLayout, onRemove, onClose }) => {
@@ -380,7 +334,7 @@ const NodeDetailPanel = ({ nodeId, apiFetch, onNavigate, onClose }) => {
     let cancelled = false;
     setLoading(true);
     setError(null);
-    apiFetch(`${API_BASE}/legacykb/nodes/${encodeURIComponent(nodeId)}`)
+    apiFetch(`${LEGACYKB_API_BASE}/legacykb/nodes/${encodeURIComponent(nodeId)}`)
       .then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); })
       .then(data => { if (!cancelled) { setDetail(data); setLoading(false); } })
       .catch(err => { if (!cancelled) { setError(err.message); setLoading(false); } });
@@ -495,434 +449,260 @@ const NodeDetailPanel = ({ nodeId, apiFetch, onNavigate, onClose }) => {
   );
 };
 
-// Choisit les ancrages source/target d'une arête selon les boîtes (position +
-// dimensions) des deux nœuds. Privilégie une liaison en ligne droite (sans
-// coude) quand les plages se recouvrent sur un axe — sinon retombe sur l'axe
-// dominant entre les centres. Réduit le nombre de courbures des smoothstep et
-// facilite la lecture du schéma.
-const _pickHandles = (a, b) => {
-  const centerA = { x: a.x + a.w / 2, y: a.y + a.h / 2 };
-  const centerB = { x: b.x + b.w / 2, y: b.y + b.h / 2 };
-  const dx = centerB.x - centerA.x;
-  const dy = centerB.y - centerA.y;
-
-  const yOverlap = Math.min(a.y + a.h, b.y + b.h) - Math.max(a.y, b.y);
-  const xOverlap = Math.min(a.x + a.w, b.x + b.w) - Math.max(a.x, b.x);
-  const xSeparated = a.x + a.w <= b.x || b.x + b.w <= a.x;
-  const ySeparated = a.y + a.h <= b.y || b.y + b.h <= a.y;
-
-  // Plages verticales superposées et boîtes séparées horizontalement →
-  // liaison droite gauche/droite.
-  if (yOverlap > 0 && xSeparated) {
-    return dx >= 0
-      ? { sourceHandle: 'right-source', targetHandle: 'left-target' }
-      : { sourceHandle: 'left-source', targetHandle: 'right-target' };
-  }
-  // Plages horizontales superposées et boîtes séparées verticalement →
-  // liaison droite haut/bas.
-  if (xOverlap > 0 && ySeparated) {
-    return dy >= 0
-      ? { sourceHandle: 'bottom-source', targetHandle: 'top-target' }
-      : { sourceHandle: 'top-source', targetHandle: 'bottom-target' };
-  }
-
-  // Sinon, axe dominant entre les centres (cas diagonal).
-  if (Math.abs(dx) >= Math.abs(dy)) {
-    return dx >= 0
-      ? { sourceHandle: 'right-source', targetHandle: 'left-target' }
-      : { sourceHandle: 'left-source', targetHandle: 'right-target' };
-  }
-  return dy >= 0
-    ? { sourceHandle: 'bottom-source', targetHandle: 'top-target' }
-    : { sourceHandle: 'top-source', targetHandle: 'bottom-target' };
+// ── Connexions flottantes (style Neo4j Bloom/Browser) ─────────────────────────
+// Point d'intersection entre le segment reliant les deux centres et le pourtour
+// d'un carré `size`×`size` centré sur `from` et regardant vers `to` — c'est ce qui
+// donne l'impression qu'une arête peut toucher n'importe quel point du contour
+// d'un nœud (pas seulement 4 points fixes), comme dans Neo4j Bloom/Browser.
+// Géométrie standard : on raisonne dans le repère du carré (demi-côté `h`), on
+// clippe le point à l'intersection avec le bord le plus proche selon le rapport
+// entre la composante dominante du vecteur direction et `h`.
+const _squareBorderPoint = (from, to, size) => {
+  const h = size / 2;
+  const dx = to.x - from.x;
+  const dy = to.y - from.y;
+  if (dx === 0 && dy === 0) return { x: from.x, y: from.y };
+  // Facteur d'échelle pour ramener le point le plus loin du carré exactement sur
+  // son bord (la plus petite des deux échelles qui touchent un bord vertical ou
+  // horizontal — équivalent à l'intersection rayon/carré depuis le centre).
+  const scale = h / Math.max(Math.abs(dx), Math.abs(dy));
+  return { x: from.x + dx * scale, y: from.y + dy * scale };
 };
 
-// Boîte (position + dimensions) d'un nœud React Flow courant — utilisée pour
-// recalculer dynamiquement les ancrages des arêtes qui s'y connectent.
-const _nodeBox = (node) => ({
-  x: node.position.x,
-  y: node.position.y,
-  w: node.type === 'zoneNode' ? node.data.width : NODE_W,
-  h: node.type === 'zoneNode' ? node.data.height : NODE_H,
-});
+// Composant d'arête custom — calcule ses points de départ/arrivée par géométrie
+// (intersection avec le carré de chaque nœud) plutôt que par un handle fixe.
+// `useInternalNode` lit la position/dimension à jour de chaque nœud à chaque
+// rendu (y compris pendant un tick de simulation ou un drag), donc le tracé suit
+// fluidement le pourtour entier sans logique d'ancrage par côté.
+const FloatingEdge = ({ id, source, target, label, style, markerEnd, labelStyle, labelBgStyle }) => {
+  const sourceNode = useInternalNode(source);
+  const targetNode = useInternalNode(target);
+  if (!sourceNode || !targetNode) return null;
 
-// Recalcule les ancrages (sourceHandle/targetHandle) de chaque arête à partir
-// des positions courantes des nœuds — appelé à chaque rendu (y compris pendant
-// un drag), pour que l'arête se réancre toujours sur le côté le plus adapté,
-// même si un nœud a été déplacé manuellement après le layout initial.
-const _withHandles = (edges, nodes) => {
-  const boxes = new Map();
-  nodes.forEach(n => boxes.set(n.id, _nodeBox(n)));
-  return edges.map(e => {
-    const a = boxes.get(e.source);
-    const b = boxes.get(e.target);
-    if (!a || !b) return e;
-    return { ...e, ..._pickHandles(a, b) };
+  const sourceCenter = {
+    x: sourceNode.internals.positionAbsolute.x + NODE_W / 2,
+    y: sourceNode.internals.positionAbsolute.y + NODE_H / 2,
+  };
+  const targetCenter = {
+    x: targetNode.internals.positionAbsolute.x + NODE_W / 2,
+    y: targetNode.internals.positionAbsolute.y + NODE_H / 2,
+  };
+  const sourcePoint = _squareBorderPoint(sourceCenter, targetCenter, NODE_W);
+  const targetPoint = _squareBorderPoint(targetCenter, sourceCenter, NODE_W);
+
+  const [path, labelX, labelY] = getStraightPath({
+    sourceX: sourcePoint.x, sourceY: sourcePoint.y,
+    targetX: targetPoint.x, targetY: targetPoint.y,
   });
+
+  return (
+    <BaseEdge
+      id={id} path={path} markerEnd={markerEnd} style={style}
+      label={label} labelX={labelX} labelY={labelY}
+      labelStyle={labelStyle} labelBgStyle={labelBgStyle}
+    />
+  );
 };
 
-// ── Calcule un layout dagre (gauche → droite) pour le bundle courant ──────────
+const EDGE_TYPES = { floating: FloatingEdge };
+
+// ── Prépare la topologie + l'amorçage du layout force-directed (d3-force) pour le
+//    bundle courant — ne calcule aucune position finale ici (cf. simulation dans le
+//    composant) : seulement les nœuds/liens de simulation et un point de départ par
+//    entité, pour que `forceManyBody`/`forceLink` convergent vite et proprement.
 // `positions` (Map id → {x,y} coin haut-gauche) permet de conserver les positions
-// déplacées manuellement par l'utilisateur lors d'un re-layout (nouveaux voisins).
+// déplacées manuellement par l'utilisateur lors d'un re-layout (nouveaux voisins) —
+// appliquées ici comme `fx`/`fy` (position figée) sur le nœud de simulation.
 // `visibleKinds` (Set de clés `_nodeKindKey`) filtre les types/niveaux affichés
 // (menu "Affichage") — un nœud absent de cet ensemble est entièrement exclu du
-// schéma (lui et ses arêtes), et n'est pas compté comme membre de zone.
-const _layout = (bundle, centerId, positions, visibleKinds, highlightedIds) => {
-  if (!bundle) return { nodes: [], edges: [], clusters: new Map() };
+// schéma (lui et ses arêtes).
+// ── Repli des références externes en badge "+N" ──────────────────────────────
+// Les nœuds `External/Doc` n'ont presque toujours qu'un seul voisin (le
+// programme/job qui les référence) et n'apportent individuellement que peu
+// d'information visuelle — c'est le "mur gris" qui sature le schéma quand un
+// nœud central en référence des dizaines. À partir de `EXT_BADGE_MIN` enfants
+// EXT partageant le même voisin unique, on les fusionne en un seul nœud de
+// synthèse `extBadge` (sauf si l'utilisateur a explicitement déplié ce groupe
+// — `expandedBadges`, clé = id du voisin/parent).
+const EXT_BADGE_MIN = 2;
+
+const _prepareSimulation = (bundle, centerId, positions, visibleKinds, expandedBadges) => {
+  if (!bundle) return null;
 
   const filteredNodeMap = new Map(
     [...bundle.nodeMap].filter(([, n]) => !visibleKinds || visibleKinds.has(_nodeKindKey(n)))
   );
-
   const allEdges = bundle.edgeList.filter(e => filteredNodeMap.has(e.from) && filteredNodeMap.has(e.to));
 
-  // ── Regroupement par communauté (zones) ───────────────────────────────────
-  // Chaque entité est rattachée à au plus une communauté (`n.community`) et
-  // reste dans sa zone même si une relation structurelle la relie à une
-  // entité d'une AUTRE communauté — ces arêtes traversent alors simplement
-  // les rectangles de zone (dessinés en arrière-plan, zIndex -1).
-  const clusters = new Map(); // zoneId -> { nom, level, members: [] }
-  filteredNodeMap.forEach(n => {
-    if (n.kind !== 'entity' || !n.community) return;
-    if (visibleKinds && !visibleKinds.has(`community:${n.community.level}`)) return;
-    const zoneId = `zone:${n.community.id}`;
-    if (!clusters.has(zoneId)) {
-      clusters.set(zoneId, { nom: n.community.nom, level: n.community.level, members: [] });
-    }
-    clusters.get(zoneId).members.push(n.id);
+  // Voisinage (ids distincts, pas un compte d'arêtes — une paire peut avoir
+  // plusieurs arêtes parallèles de types différents) pour repérer les EXT à
+  // exactement un voisin.
+  const neighborsOf = new Map();
+  const addNeighbor = (a, b) => {
+    if (a === b) return;
+    if (!neighborsOf.has(a)) neighborsOf.set(a, new Set());
+    neighborsOf.get(a).add(b);
+  };
+  allEdges.forEach(e => { addNeighbor(e.from, e.to); addNeighbor(e.to, e.from); });
+
+  const extGroups = new Map(); // parentId -> [extNodeId, ...]
+  filteredNodeMap.forEach((n, id) => {
+    if (n.kind !== 'entity' || n.type !== 'External/Doc' || id === centerId) return;
+    const neighbors = neighborsOf.get(id);
+    if (!neighbors || neighbors.size !== 1) return;
+    const [parentId] = neighbors;
+    if (!extGroups.has(parentId)) extGroups.set(parentId, []);
+    extGroups.get(parentId).push(id);
   });
 
-  // ── Simplification du schéma ──────────────────────────────────────────────
-  // 1. Un nœud :Community déjà représenté par une zone (≥2 membres) est masqué
-  //    — ainsi que ses arêtes IN_COMMUNITY/SUBCOMMUNITY_OF, qui deviennent
-  //    redondantes avec le regroupement visuel.
-  const zoneCommunityIds = new Set(
-    [...clusters.entries()]
-      .filter(([, c]) => c.members.length >= 2)
-      .map(([zoneId]) => zoneId.slice('zone:'.length))
-  );
-  const visibleIds = new Set(
-    [...filteredNodeMap.values()]
-      .filter(n => !(n.kind === 'community' && zoneCommunityIds.has(n.id)))
-      .map(n => n.id)
-  );
-
-  // Une arête dont une extrémité est un nœud :Community masqué est redirigée
-  // vers la zone qui le représente (`zone:<id>`) plutôt que supprimée — ainsi
-  // une relation SUBCOMMUNITY_OF entre un sous-domaine (masqué, devenu zone) et
-  // son domaine parent reste visible comme un lien zone -> nœud. Les arêtes
-  // qui deviendraient des boucles (ex. IN_COMMUNITY d'une entité vers sa propre
-  // zone) sont supprimées.
-  const remapEndpoint = (id) => zoneCommunityIds.has(id) ? `zone:${id}` : id;
-  const drawableIds = new Set([
-    ...visibleIds,
-    ...[...zoneCommunityIds].map(cid => `zone:${cid}`),
-  ]);
-
-  // Zone parente (≥2 membres) de chaque entité — une arête entre une entité et
-  // sa propre zone (ex. IN_COMMUNITY redirigée vers `zone:<sa communauté>`)
-  // formerait un cycle parent/enfant dans le graphe compound de dagre
-  // (`Cannot set properties of undefined (setting 'rank')`) : à exclure.
-  const entityZone = new Map(); // entity id -> zoneId
-  clusters.forEach((cluster, zoneId) => {
-    if (cluster.members.length < 2) return;
-    cluster.members.forEach(id => entityZone.set(id, zoneId));
+  const collapsedExtId = new Map(); // extNodeId -> badgeId (membres repliés uniquement)
+  const badgeInfo = new Map(); // badgeId -> { parentId, memberIds }
+  extGroups.forEach((memberIds, parentId) => {
+    if (memberIds.length < EXT_BADGE_MIN || expandedBadges?.has(parentId)) return;
+    const badgeId = `__extbadge__${parentId}`;
+    badgeInfo.set(badgeId, { parentId, memberIds });
+    memberIds.forEach(id => collapsedExtId.set(id, badgeId));
   });
 
-  // 2. Les arêtes parallèles entre une même paire de nœuds (plusieurs types de
-  //    relation) sont fusionnées en une seule, pour réduire le nombre de flux
-  //    affichés à l'écran. Map imbriquée (from -> to -> types) pour éviter de
-  //    construire une clé composite à partir d'identifiants contenant `|`.
+  // ── Carte logique des nœuds affichés : nœuds réels non repliés + badges ──────
+  const logicalNodeMap = new Map();
+  filteredNodeMap.forEach((n, id) => { if (!collapsedExtId.has(id)) logicalNodeMap.set(id, n); });
+  badgeInfo.forEach(({ parentId, memberIds }, badgeId) => {
+    logicalNodeMap.set(badgeId, {
+      id: badgeId, kind: 'extBadge', parentId, memberIds, count: memberIds.length,
+    });
+  });
+  const visibleIds = new Set(logicalNodeMap.keys());
+
+  const remap = (id) => collapsedExtId.get(id) ?? id;
+
+  // Les arêtes parallèles entre une même paire de nœuds (plusieurs types de
+  // relation, ou plusieurs EXT repliés dans le même badge) sont fusionnées en
+  // une seule, pour réduire le nombre de flux affichés à l'écran. Map imbriquée
+  // (from -> to -> types) pour éviter de construire une clé composite à partir
+  // d'identifiants contenant `|`.
   const edgeGroups = new Map(); // from -> Map(to -> Set<type>)
   allEdges.forEach(e => {
-    const from = remapEndpoint(e.from);
-    const to = remapEndpoint(e.to);
+    const from = remap(e.from), to = remap(e.to);
     if (from === to) return;
-    if (entityZone.get(e.from) === to || entityZone.get(e.to) === from) return;
-    if (!drawableIds.has(from) || !drawableIds.has(to)) return;
     if (!edgeGroups.has(from)) edgeGroups.set(from, new Map());
     const byTarget = edgeGroups.get(from);
     if (!byTarget.has(to)) byTarget.set(to, new Set());
     byTarget.get(to).add(e.type);
   });
 
-  // Dimensions estimées de chaque zone (grille carrée/rectangle de ses membres,
-  // cf. étape 3) — communiquées à dagre via `g.setNode` pour qu'il réserve
-  // l'espace réellement occupé par la zone et évite les chevauchements avec les
-  // autres nœuds/zones lors du calcul des rangs.
-  const clusterGrid = new Map(); // zoneId -> { cols, rows, width, height }
-  clusters.forEach((cluster, zoneId) => {
-    if (cluster.members.length < 2) return;
-    const cols = Math.ceil(Math.sqrt(cluster.members.length));
-    const rows = Math.ceil(cluster.members.length / cols);
-    clusterGrid.set(zoneId, {
-      cols, rows,
-      width: cols * ZONE_GRID_GAP_X + ZONE_PADDING_X * 2,
-      height: rows * ZONE_GRID_GAP_Y + ZONE_PADDING_TOP + ZONE_PADDING_BOTTOM,
-    });
-  });
-
-  const g = new dagre.graphlib.Graph({ compound: true });
-  // `nodesep`/`ranksep` généreux — avec des zones désormais dimensionnées
-  // (cf. `clusterGrid`), un espacement trop faible laissait les rectangles de
-  // zone chevaucher leurs voisins.
-  // TB (top→bottom) : la hiérarchie se lit de haut en bas — BatchJob en haut,
-  // Programmes en dessous, Fichiers/Copybooks au bas. Rang = distance de dépendance.
-  // ranksep généreux pour respirer entre niveaux ; nodesep laisse de l'air entre voisins.
-  g.setGraph({ rankdir: 'TB', nodesep: 60, ranksep: 120 });
-  g.setDefaultEdgeLabel(() => ({}));
-  // Filet de sécurité : un nœud créé implicitement par setEdge/setParent (id
-  // référencé par une arête ou un parent mais jamais explicitement ajouté via
-  // setNode) reçoit un label `undefined` par défaut côté graphlib — dagre plante
-  // alors avec « Cannot set properties of undefined (setting 'rank') » lors du
-  // ranking. `{}` évite le crash quel que soit l'id concerné.
-  g.setDefaultNodeLabel(() => ({}));
-
-  clusters.forEach((cluster, zoneId) => {
-    const dims = clusterGrid.get(zoneId);
-    if (dims) g.setNode(zoneId, { width: dims.width, height: dims.height });
-  });
-  bundle.nodeMap.forEach(n => {
-    if (!visibleIds.has(n.id)) return;
-    g.setNode(n.id, { width: NODE_W, height: NODE_H });
-    if (n.kind === 'entity' && n.community) {
-      const zoneId = `zone:${n.community.id}`;
-      if ((clusters.get(zoneId)?.members.length ?? 0) >= 2) g.setParent(n.id, zoneId);
-    }
-  });
-  // Pour le ranking dagre, une arête ne doit jamais toucher directement un nœud
-  // de cluster (`zone:...`) — dagre ne gère pas ce cas en mode compound et plante
-  // (`Cannot set properties of undefined (setting 'rank')`). On substitue donc
-  // l'extrémité "zone" par un de ses membres (même rang visé) pour le calcul des
-  // rangs ; le rendu (edgeGroups) continue lui de pointer vers la zone.
-  const rankProxy = (id) => {
-    if (!id.startsWith('zone:')) return id;
-    const members = clusters.get(id)?.members;
-    return members?.length ? members[0] : id;
-  };
-
-  // ── Hiérarchie centrée sur `centerId` (option "recentrer la disposition") ──
-  // Si un centre est défini, les rangs dagre (position sur l'axe LR) suivent
-  // la distance (BFS, arêtes non dirigées) depuis ce nœud le long d'un arbre
-  // couvrant du graphe affiché — le nœud sélectionné se retrouve à l'extrémité
-  // gauche, ses voisins juste après, etc. Les composantes non atteintes depuis
-  // le centre (ou en l'absence de centre) retombent sur le ranking par
-  // direction d'arête d'origine.
-  const adjacency = new Map();
-  const addAdj = (a, b) => {
-    if (a === b) return;
-    if (!adjacency.has(a)) adjacency.set(a, new Set());
-    adjacency.get(a).add(b);
-  };
+  // ── Liens de simulation ────────────────────────────────────────────────────
+  // Toutes les arêtes du schéma servent de ressort d'attraction (entités comme
+  // communautés, traitées uniformément — pas de regroupement par zone).
+  const simLinkKeys = new Set();
+  const simLinks = [];
   edgeGroups.forEach((byTarget, from) => {
     byTarget.forEach((_types, to) => {
-      addAdj(rankProxy(from), rankProxy(to));
-      addAdj(rankProxy(to), rankProxy(from));
+      const key = from < to ? `${from}|${to}` : `${to}|${from}`;
+      if (simLinkKeys.has(key)) return;
+      simLinkKeys.add(key);
+      simLinks.push({ source: from, target: to });
     });
   });
 
-  const bfsParent = new Map(); // id -> id parent dans l'arbre couvrant depuis le centre
-  const rootProxy = centerId ? rankProxy(remapEndpoint(centerId)) : null;
-  if (rootProxy && adjacency.has(rootProxy)) {
-    bfsParent.set(rootProxy, null);
-    const queue = [rootProxy];
-    while (queue.length) {
-      const cur = queue.shift();
-      adjacency.get(cur)?.forEach(nb => {
-        if (!bfsParent.has(nb)) {
-          bfsParent.set(nb, cur);
-          queue.push(nb);
-        }
-      });
+  // ── Amorçage concentrique par distance BFS depuis `centerId` ─────────────────
+  // Place chaque nœud sur un cercle dont le rayon dépend de sa distance de hop au
+  // centre — angle reparti par incrément d'angle d'or (évite les alignements
+  // radiaux). Ce n'est qu'un point de départ : la simulation relaxe ensuite
+  // librement cet amorçage selon les forces (liens/répulsion).
+  const bfsDepth = new Map();
+  if (centerId) {
+    const adjacency = new Map();
+    const addAdj = (a, b) => {
+      if (a === b) return;
+      if (!adjacency.has(a)) adjacency.set(a, new Set());
+      adjacency.get(a).add(b);
+    };
+    simLinks.forEach(({ source, target }) => { addAdj(source, target); addAdj(target, source); });
+    if (adjacency.has(centerId) || visibleIds.has(centerId)) {
+      bfsDepth.set(centerId, 0);
+      const queue = [centerId];
+      while (queue.length) {
+        const cur = queue.shift();
+        adjacency.get(cur)?.forEach(nb => {
+          if (!bfsDepth.has(nb)) {
+            bfsDepth.set(nb, bfsDepth.get(cur) + 1);
+            queue.push(nb);
+          }
+        });
+      }
     }
   }
 
-  edgeGroups.forEach((byTarget, from) => {
-    byTarget.forEach((_types, to) => {
-      const rf = rankProxy(from);
-      const rt = rankProxy(to);
-      if (rf === rt) return;
-      if (bfsParent.size > 0) {
-        // Seules les arêtes de l'arbre couvrant (parent -> enfant) contraignent
-        // le rang, pour que celui-ci reflète la distance au centre — les autres
-        // (ex. liens entre nœuds de même rang) sont ignorées.
-        if (bfsParent.get(rt) === rf) { g.setEdge(rf, rt); return; }
-        if (bfsParent.get(rf) === rt) { g.setEdge(rt, rf); return; }
-        if (!bfsParent.has(rf) || !bfsParent.has(rt)) g.setEdge(rf, rt);
-        return;
+  // ── Nœuds de simulation (un par nœud visible, entité ou communauté) ──────────
+  // Priorité de l'amorçage : position sauvegardée (figée via fx/fy) > centre épinglé
+  // (fx/fy à l'origine) > cercle concentrique par distance BFS > dispersion aléatoire
+  // légère (composantes non atteintes depuis le centre, ou pas de centre actif —
+  // évite que tous les nœuds démarrent superposés en (0,0), ce qui empêcherait
+  // `forceManyBody` de les séparer efficacement).
+  const GOLDEN_ANGLE = 2.399963229728653; // ~137.5° — répartition régulière sans alignement
+  const RING_SPACING = NODE_W * 2.4;
+  let ringIdx = 0;
+  const simNodes = [...logicalNodeMap.values()]
+    .map(n => {
+      const node = { id: n.id };
+      const saved = positions?.get(n.id); // {x,y} coin haut-gauche sauvegardé
+      if (saved) {
+        node.x = saved.x + NODE_W / 2;
+        node.y = saved.y + NODE_H / 2;
+        node.fx = node.x;
+        node.fy = node.y;
+      } else if (n.id === centerId) {
+        node.x = 0; node.y = 0;
+        node.fx = 0; node.fy = 0;
+      } else if (bfsDepth.has(n.id)) {
+        const depth = bfsDepth.get(n.id);
+        const angle = ringIdx * GOLDEN_ANGLE;
+        ringIdx += 1;
+        node.x = Math.cos(angle) * depth * RING_SPACING;
+        node.y = Math.sin(angle) * depth * RING_SPACING;
+      } else {
+        node.x = (Math.random() - 0.5) * NODE_W * 4;
+        node.y = (Math.random() - 0.5) * NODE_H * 4;
       }
-      g.setEdge(rf, rt);
+      return node;
     });
-  });
 
-  dagre.layout(g);
+  return { simNodes, simLinks, edgeGroups, visibleIds, logicalNodeMap };
+};
 
+// ── Position (coin haut-gauche) de chaque nœud à partir de l'état courant de la
+//    simulation — appelé à chaque tick pour dériver le rendu React Flow.
+const _topLeftFromSimNodes = (simNodes) => {
   const topLeft = new Map();
-  bundle.nodeMap.forEach(n => {
-    if (!visibleIds.has(n.id)) return;
-    const saved = positions?.get(n.id);
-    if (saved) {
-      topLeft.set(n.id, saved);
-    } else {
-      const pos = g.node(n.id);
-      topLeft.set(n.id, { x: pos.x - NODE_W / 2, y: pos.y - NODE_H / 2 });
-    }
-  });
+  simNodes.forEach(n => topLeft.set(n.id, { x: n.x - NODE_W / 2, y: n.y - NODE_H / 2 }));
+  return topLeft;
+};
 
-  // 3. Disposition en grille des membres de chaque zone — un rectangle
-  //    compact (plusieurs colonnes) plutôt qu'une longue colonne verticale,
-  //    centré sur le barycentre calculé par dagre pour le cluster. Les
-  //    positions sauvegardées (déplacées manuellement) sont préservées.
-  clusters.forEach((cluster, zoneId) => {
-    if (cluster.members.length < 2) return;
-    const c = g.node(zoneId);
-    const { cols, rows } = clusterGrid.get(zoneId);
-    const gridW = cols * ZONE_GRID_GAP_X;
-    const gridH = rows * ZONE_GRID_GAP_Y;
-    cluster.members.forEach((id, i) => {
-      if (positions?.get(id)) return;
-      const col = i % cols;
-      const row = Math.floor(i / cols);
-      const cx = c.x - gridW / 2 + col * ZONE_GRID_GAP_X + ZONE_GRID_GAP_X / 2;
-      const cy = c.y - gridH / 2 + row * ZONE_GRID_GAP_Y + ZONE_GRID_GAP_Y / 2;
-      topLeft.set(id, { x: cx - NODE_W / 2, y: cy - NODE_H / 2 });
-    });
-  });
+// Un badge "+N" hérite du surlignage si l'une des références qu'il contient
+// est ciblée par le chat (impact_paths/legacykb_highlight) — sinon le
+// surlignage disparaîtrait silencieusement derrière le repli.
+const _isHighlighted = (n, highlightedIds) =>
+  !highlightedIds ? false
+    : highlightedIds.has(n.id) || (n.memberIds?.some(id => highlightedIds.has(id)) ?? false);
 
-  // ── Résolution des chevauchements ─────────────────────────────────────────
-  // dagre ne garantit la non-superposition qu'entre nœuds de rangs adjacents ;
-  // deux zones (qui occupent un rectangle bien plus grand qu'un nœud, et dont
-  // dagre ne connaît que le placement de leur centre) — ou une zone et un nœud
-  // isolé — peuvent malgré tout se recouvrir. On traite les zones comme des
-  // "nœuds" de premier niveau au même titre que les nœuds isolés, et on écarte
-  // par itérations toute paire de boîtes qui se chevauchent encore, en
-  // préservant les positions sauvegardées par l'utilisateur (`positions`).
-  const zoneMemberIds = new Set();
-  const overlapItems = [];
-  clusters.forEach((cluster, zoneId) => {
-    if (cluster.members.length < 2) return;
-    cluster.members.forEach(id => zoneMemberIds.add(id));
-    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-    let movable = true;
-    cluster.members.forEach(id => {
-      if (positions?.get(id)) movable = false;
-      const tl = topLeft.get(id);
-      minX = Math.min(minX, tl.x);
-      minY = Math.min(minY, tl.y);
-      maxX = Math.max(maxX, tl.x + NODE_W);
-      maxY = Math.max(maxY, tl.y + NODE_H);
-    });
-    overlapItems.push({
-      kind: 'zone',
-      members: cluster.members,
-      movable,
-      box: {
-        x: minX - ZONE_PADDING_X, y: minY - ZONE_PADDING_TOP,
-        w: (maxX - minX) + ZONE_PADDING_X * 2,
-        h: (maxY - minY) + ZONE_PADDING_TOP + ZONE_PADDING_BOTTOM,
-      },
-    });
-  });
-  bundle.nodeMap.forEach(n => {
-    if (!visibleIds.has(n.id) || zoneMemberIds.has(n.id)) return;
-    const tl = topLeft.get(n.id);
-    overlapItems.push({
-      kind: 'node',
-      id: n.id,
-      movable: !positions?.get(n.id),
-      box: { x: tl.x, y: tl.y, w: NODE_W, h: NODE_H },
-    });
-  });
-  overlapItems.forEach(item => { item.origX = item.box.x; item.origY = item.box.y; });
-
-  const OVERLAP_GAP = 24;
-  for (let iter = 0; iter < 6; iter++) {
-    for (let i = 0; i < overlapItems.length; i++) {
-      for (let j = i + 1; j < overlapItems.length; j++) {
-        const a = overlapItems[i], b = overlapItems[j];
-        if (!a.movable && !b.movable) continue;
-        const dx = Math.min(a.box.x + a.box.w, b.box.x + b.box.w) - Math.max(a.box.x, b.box.x);
-        const dy = Math.min(a.box.y + a.box.h, b.box.y + b.box.h) - Math.max(a.box.y, b.box.y);
-        if (dx <= 0 || dy <= 0) continue; // pas de recouvrement
-        const both = a.movable && b.movable;
-        if (dx < dy) {
-          const sign = Math.sign((b.box.x + b.box.w / 2) - (a.box.x + a.box.w / 2)) || 1;
-          const push = dx + OVERLAP_GAP;
-          if (a.movable) a.box.x -= sign * (both ? push / 2 : push);
-          if (b.movable) b.box.x += sign * (both ? push / 2 : push);
-        } else {
-          const sign = Math.sign((b.box.y + b.box.h / 2) - (a.box.y + a.box.h / 2)) || 1;
-          const push = dy + OVERLAP_GAP;
-          if (a.movable) a.box.y -= sign * (both ? push / 2 : push);
-          if (b.movable) b.box.y += sign * (both ? push / 2 : push);
-        }
-      }
-    }
-  }
-
-  overlapItems.forEach(item => {
-    if (!item.movable) return;
-    const dx = item.box.x - item.origX;
-    const dy = item.box.y - item.origY;
-    if (!dx && !dy) return;
-    if (item.kind === 'node') {
-      topLeft.set(item.id, { x: item.box.x, y: item.box.y });
-    } else {
-      item.members.forEach(id => {
-        const tl = topLeft.get(id);
-        topLeft.set(id, { x: tl.x + dx, y: tl.y + dy });
-      });
-    }
-  });
-
-  // Rectangles de zone — englobent la position effective (sauvegardée ou
-  // calculée) de leurs membres ; pas de zone pour un groupe à un seul membre.
-  // `clusters` (zoneId -> ids des membres) est renvoyé pour permettre au
-  // déplacement d'une zone de translater ses membres (drag-and-drop).
-  const zoneMembers = new Map();
-  const zoneNodes = [...clusters.entries()]
-    .filter(([, cluster]) => cluster.members.length >= 2)
-    .map(([zoneId, cluster]) => {
-      let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-      cluster.members.forEach(id => {
-        const tl = topLeft.get(id);
-        minX = Math.min(minX, tl.x);
-        minY = Math.min(minY, tl.y);
-        maxX = Math.max(maxX, tl.x + NODE_W);
-        maxY = Math.max(maxY, tl.y + NODE_H);
-      });
-      zoneMembers.set(zoneId, cluster.members);
-      return {
-        id: zoneId,
-        type: 'zoneNode',
-        position: { x: minX - ZONE_PADDING_X, y: minY - ZONE_PADDING_TOP },
-        data: {
-          nom: cluster.nom,
-          level: cluster.level,
-          rawId: zoneId.slice('zone:c|'.length),
-          width: (maxX - minX) + ZONE_PADDING_X * 2,
-          height: (maxY - minY) + ZONE_PADDING_TOP + ZONE_PADDING_BOTTOM,
-        },
-        draggable: true,
-        selectable: false,
-        zIndex: -1,
-      };
-    });
-
-  const entityNodes = [...bundle.nodeMap.values()]
-    .filter(n => visibleIds.has(n.id))
+// `onFreeze` injecté directement ici (plutôt qu'en repassant sur le tableau après
+// coup) — appelé à chaque tick de la simulation, une deuxième passe sur tous les
+// nœuds juste pour ajouter un callback alourdissait inutilement le rendu le plus
+// chaud de la page (cf. limitation du débit de rendu dans l'effet de simulation).
+const _buildGraphNodes = (topLeft, logicalNodeMap, centerId, highlightedIds, onFreeze) =>
+  [...logicalNodeMap.values()]
     .map(n => ({
       id: n.id,
-      type: 'legacyNode',
-      position: topLeft.get(n.id),
-      data: { ...n, isCenter: n.id === centerId, highlighted: highlightedIds?.has(n.id) ?? false },
+      type: n.kind === 'extBadge' ? 'extBadgeNode' : 'legacyNode',
+      position: topLeft.get(n.id) ?? { x: 0, y: 0 },
+      data: { ...n, isCenter: n.id === centerId, highlighted: _isHighlighted(n, highlightedIds), onFreeze },
     }));
 
-  const nodes = [...zoneNodes, ...entityNodes];
-
-  // Les ancrages (sourceHandle/targetHandle) ne sont pas figés ici : ils sont
-  // recalculés dynamiquement (cf. `_withHandles`) à partir des positions
-  // courantes des nœuds, y compris pendant/après un déplacement manuel.
+// Le point de connexion sur le pourtour de chaque nœud n'est pas figé ici : il est
+// recalculé géométriquement à chaque rendu par `FloatingEdge` (cf. ci-dessus). Les
+// arêtes elles-mêmes ne dépendent d'aucune position — calculées une seule fois.
+const _buildEdges = (edgeGroups) => {
   const edges = [];
   edgeGroups.forEach((byTarget, from) => {
     byTarget.forEach((types, to) => {
@@ -935,7 +715,7 @@ const _layout = (bundle, centerId, positions, visibleKinds, highlightedIds) => {
         source: from,
         target: to,
         label,
-        type: 'straight',
+        type: 'floating',
         markerEnd: { type: MarkerType.ArrowClosed, color: edgeColor },
         style: { stroke: edgeColor, strokeOpacity: 0.75 },
         labelStyle: { fontSize: 10, fill: T.muted },
@@ -943,13 +723,13 @@ const _layout = (bundle, centerId, positions, visibleKinds, highlightedIds) => {
       });
     });
   });
-
-  return { nodes, edges, clusters: zoneMembers };
+  return edges;
 };
 
 // Couleur des nœuds dans la mini-carte — reflète la sémantique entité/communauté
 const _miniMapNodeColor = (node) => {
   const data = node.data ?? {};
+  if (data.kind === 'extBadge') return ENTITY_COLORS['External/Doc'];
   return data.kind === 'entity'
     ? (ENTITY_COLORS[data.type] ?? '#9e9e9e')
     : (COMMUNITY_COLORS[data.level] ?? '#bdbdbd');
@@ -957,7 +737,10 @@ const _miniMapNodeColor = (node) => {
 
 // ── Canvas React Flow — recadre la vue quand le graphe sous-jacent change ─────
 // `fitKey` ne change qu'au re-layout (nouveau bundle/centre), pas pendant un drag.
-const LegacyKbCanvas = ({ nodes, edges, fitKey, onNodesChange, onNodeClick, onNodeDoubleClick, onPaneClick }) => {
+const LegacyKbCanvas = ({
+  nodes, edges, fitKey, onNodesChange, onNodeClick, onNodeDoubleClick, onPaneClick,
+  onNodeDragStart, onNodeDrag, onNodeDragStop,
+}) => {
   const { fitView } = useReactFlow();
 
   React.useEffect(() => {
@@ -971,10 +754,14 @@ const LegacyKbCanvas = ({ nodes, edges, fitKey, onNodesChange, onNodeClick, onNo
       nodes={nodes}
       edges={edges}
       nodeTypes={NODE_TYPES}
+      edgeTypes={EDGE_TYPES}
       onNodesChange={onNodesChange}
       onNodeClick={onNodeClick}
       onNodeDoubleClick={onNodeDoubleClick}
       onPaneClick={onPaneClick}
+      onNodeDragStart={onNodeDragStart}
+      onNodeDrag={onNodeDrag}
+      onNodeDragStop={onNodeDragStop}
       nodesDraggable={true}
       nodesConnectable={false}
       fitView
@@ -1199,6 +986,11 @@ const LegacyKbPage = ({ apiFetch }) => {
   const [visibleKinds, setVisibleKinds] = React.useState(() => new Set(VISIBILITY_OPTIONS.map(o => o.key)));
   const [showDisplayMenu, setShowDisplayMenu] = React.useState(false);
 
+  // ── Références externes dépliées manuellement (cf. EXT_BADGE_MIN) — clé =
+  //    id du nœud parent dont les enfants EXT sont actuellement repliés en
+  //    badge "+N" ; une fois déplié, reste déplié pour le reste de la session.
+  const [expandedBadges, setExpandedBadges] = React.useState(() => new Set());
+
   const toggleVisibleKind = React.useCallback((key) => {
     setVisibleKinds(prev => {
       const next = new Set(prev);
@@ -1209,7 +1001,7 @@ const LegacyKbPage = ({ apiFetch }) => {
 
   // ── Stats (chargées une fois au montage) ─────────────────────────────────
   React.useEffect(() => {
-    apiFetch(`${API_BASE}/legacykb/stats`)
+    apiFetch(`${LEGACYKB_API_BASE}/legacykb/stats`)
       .then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); })
       .then(setStats)
       .catch(err => setStatsError(err.message));
@@ -1226,7 +1018,7 @@ const LegacyKbPage = ({ apiFetch }) => {
       const params = new URLSearchParams({ q, limit: '30' });
       if (selectedTypes.size > 0) params.set('types', [...selectedTypes].join(','));
       if (searchDescriptions) params.set('descriptions', 'true');
-      const res = await apiFetch(`${API_BASE}/legacykb/search?${params.toString()}`);
+      const res = await apiFetch(`${LEGACYKB_API_BASE}/legacykb/search?${params.toString()}`);
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = await res.json();
       setSearchResults(data.items ?? []);
@@ -1257,7 +1049,7 @@ const LegacyKbPage = ({ apiFetch }) => {
     setDomainsError(null);
     if (hierarchy.length > 0) { setShowingDomains(true); setSearchResults([]); return; }
     try {
-      const res = await apiFetch(`${API_BASE}/legacykb/hierarchy`);
+      const res = await apiFetch(`${LEGACYKB_API_BASE}/legacykb/hierarchy`);
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = await res.json();
       setHierarchy(data.items ?? []);
@@ -1272,7 +1064,7 @@ const LegacyKbPage = ({ apiFetch }) => {
   const exploreNode = React.useCallback(async (nodeId) => {
     try {
       const res = await apiFetchRef.current(
-        `${API_BASE}/legacykb/nodes/${encodeURIComponent(nodeId)}/neighbors`
+        `${LEGACYKB_API_BASE}/legacykb/nodes/${encodeURIComponent(nodeId)}/neighbors`
       );
       if (!res.ok) return;
       const data = await res.json(); // { center, neighbors, edges }
@@ -1299,7 +1091,7 @@ const LegacyKbPage = ({ apiFetch }) => {
   const loadCommunitySubgraph = React.useCallback(async (nodeId) => {
     try {
       const res = await apiFetchRef.current(
-        `${API_BASE}/legacykb/nodes/${encodeURIComponent(nodeId)}/subgraph`
+        `${LEGACYKB_API_BASE}/legacykb/nodes/${encodeURIComponent(nodeId)}/subgraph`
       );
       if (!res.ok) return;
       const data = await res.json();
@@ -1330,7 +1122,7 @@ const LegacyKbPage = ({ apiFetch }) => {
   const recenterOnNode = React.useCallback(async (nodeId) => {
     try {
       const res = await apiFetchRef.current(
-        `${API_BASE}/legacykb/nodes/${encodeURIComponent(nodeId)}/neighbors`
+        `${LEGACYKB_API_BASE}/legacykb/nodes/${encodeURIComponent(nodeId)}/neighbors`
       );
       if (!res.ok) return;
       const data = await res.json(); // { center, neighbors, edges }
@@ -1435,53 +1227,152 @@ const LegacyKbPage = ({ apiFetch }) => {
     }
   }, [bundle]);
 
-  // ── Nœuds/arêtes React Flow dérivés du bundle (layout dagre) ──────────────
-  // Les positions déplacées manuellement (positionsRef) sont conservées entre
-  // les re-layouts déclenchés par l'exploration de nouveaux voisins.
+  // ── Nœuds/arêtes React Flow dérivés du bundle (layout force-directed) ────────
+  // Les positions déplacées manuellement (positionsRef) sont conservées entre les
+  // re-layouts déclenchés par l'exploration de nouveaux voisins (appliquées comme
+  // positions figées — fx/fy — sur le nœud de simulation correspondant).
   const positionsRef = React.useRef(new Map());
-  const clustersRef = React.useRef(new Map()); // zoneId -> ids des membres (pour le drag de zone)
+  // Instance d3-force courante — exposée hors de l'effet pour que les callbacks de
+  // drag (`onNodeDrag*`, définis plus bas) puissent relancer la simulation et fixer
+  // fx/fy du nœud déplacé (physique live, cf. piste B).
+  const simulationRef = React.useRef(null);
   const [flowNodes, setFlowNodes] = React.useState([]);
   const [flowEdges, setFlowEdges] = React.useState([]);
   const [layoutVersion, setLayoutVersion] = React.useState(0);
 
-  React.useEffect(() => {
-    const { nodes, edges, clusters } = _layout(bundle, centerId, positionsRef.current, visibleKinds, highlightedIds);
-    clustersRef.current = clusters;
-    // Inject onSelect into zone nodes — allows clicking the zone label to open the detail panel.
-    // Done here (not inside _layout) so _layout stays pure and doesn't capture setState.
-    const nodesWithCb = nodes.map(n =>
-      n.type !== 'zoneNode' ? n
-        : { ...n, data: { ...n.data, onSelect: () => setSelectedId(n.id.slice('zone:'.length)) } }
-    );
-    setFlowNodes(nodesWithCb);
-    setFlowEdges(edges);
-    setLayoutVersion(v => v + 1);
-  }, [bundle, centerId, visibleKinds, highlightedIds]);
+  // Toujours à jour pour les callbacks de simulation (tick/end), sans figer
+  // `highlightedIds` au moment de la création de l'effet ci-dessous.
+  const highlightedIdsRef = React.useRef(highlightedIds);
+  highlightedIdsRef.current = highlightedIds;
 
-  // Déplacer une zone translate tous ses membres de la même quantité —
-  // permet de réorganiser le schéma sans perdre le regroupement visuel.
+  // Fige un nœud à sa position courante dans la simulation — appelé dès l'appui du
+  // pointeur (`onMouseDown` natif dans `LegacyNode`, injecté via `data.onFreeze`
+  // ci-dessous), *avant même* que React Flow ne détermine si l'interaction est un
+  // simple clic ou un drag. Sans ça, tant que la simulation tourne, le nœud continue
+  // de bouger sous le curseur pendant tout l'intervalle appui→relâchement d'un clic
+  // (`onNodeDragStart` de React Flow ne suffit pas : il ne se déclenche qu'une fois
+  // un mouvement réel détecté, pas sur un appui immobile) — le clic "rate" alors
+  // (relâché sur le fond du canvas une fois le nœud déjà parti). `handleNodeClick`
+  // libère ce gel dès qu'un simple clic est confirmé ; sinon il devient la position
+  // figée du drag (comportement déjà existant).
+  const freezeNode = React.useCallback((id) => {
+    const simNode = simulationRef.current?.nodes().find(n => n.id === id);
+    if (simNode) { simNode.fx = simNode.x; simNode.fy = simNode.y; }
+  }, []);
+
+  // (Re)lance une simulation de forces à chaque changement de topologie affichée
+  // (nouveau bundle, recentrage, filtres affichage) — *pas* sur `highlightedIds` seul
+  // (cf. effet séparé plus bas), pour qu'un simple surlignage depuis le mini-chat ou
+  // le bouton "Effacer" ne fasse pas repartir l'animation physique depuis zéro.
+  React.useEffect(() => {
+    const prep = _prepareSimulation(bundle, centerId, positionsRef.current, visibleKinds, expandedBadges);
+    if (!prep) {
+      setFlowNodes([]);
+      setFlowEdges([]);
+      return;
+    }
+
+    // Les arêtes ne dépendent d'aucune position — calculées une seule fois, pas à
+    // chaque tick (cf. `_buildEdges`).
+    setFlowEdges(_buildEdges(prep.edgeGroups));
+
+    const renderFromTopLeft = (topLeft) => {
+      setFlowNodes(_buildGraphNodes(topLeft, prep.logicalNodeMap, centerId, highlightedIdsRef.current, freezeNode));
+    };
+
+    // Rayon de collision = demi-diagonale du carré 90×90 (~63.6px) + petite marge,
+    // sinon les coins peuvent se chevaucher (`NODE_W*0.62` ≈ 56px sous-dimensionnait
+    // le rayon réel) ; charge plus forte pour écarter franchement les nœuds denses
+    // au lieu de laisser un agglomérat se former autour des hubs.
+    // `alphaDecay`/`velocityDecay` relevés (défauts ~0.0228/0.4) : moins de ticks
+    // nécessaires pour atteindre `alphaMin`, plus de friction pour amortir
+    // l'oscillation induite par la charge plus forte — la vue se stabilise
+    // nettement plus vite sans paraître saccadée.
+    const simulation = forceSimulation(prep.simNodes)
+      .alphaDecay(0.05)
+      .velocityDecay(0.45)
+      .force('link', forceLink(prep.simLinks).id(d => d.id).distance(NODE_W * 2).strength(0.3))
+      .force('charge', forceManyBody().strength(-420).distanceMax(NODE_W * 12))
+      .force('collide', forceCollide(NODE_W * 0.75))
+      .force('x', forceX(0).strength(0.02))
+      .force('y', forceY(0).strength(0.02));
+    simulationRef.current = simulation;
+
+    renderFromTopLeft(_topLeftFromSimNodes(prep.simNodes)); // amorçage immédiat, avant le 1er tick
+    setLayoutVersion(v => v + 1); // fitView sur la dispersion initiale
+
+    // Le rendu React (reconstruction de tous les nœuds + commit) est largement
+    // plus coûteux que le tick physique lui-même (calcul de forces via quadtree) —
+    // sans limite, il s'exécutait à chaque tick (jusqu'à ~300) et le rendu devenait
+    // le facteur limitant la cadence des frames, ralentissant d'autant la
+    // convergence en temps réel et rendant les clics peu réactifs pendant
+    // l'animation (thread principal saturé). On plafonne le rendu à ~24 fps —
+    // largement assez fluide visuellement — tout en laissant le tick physique
+    // (et donc la décroissance d'alpha) tourner à la cadence native de la boucle
+    // d'animation.
+    let lastRenderAt = 0;
+    const RENDER_INTERVAL_MS = 42;
+    simulation.on('tick', () => {
+      const now = performance.now();
+      if (now - lastRenderAt < RENDER_INTERVAL_MS) return;
+      lastRenderAt = now;
+      renderFromTopLeft(_topLeftFromSimNodes(prep.simNodes));
+    });
+
+    simulation.on('end', () => {
+      renderFromTopLeft(_topLeftFromSimNodes(prep.simNodes)); // position finale exacte (pas tronquée par le throttle)
+      setLayoutVersion(v => v + 1); // fitView final, une fois la disposition stabilisée
+    });
+
+    return () => {
+      simulationRef.current = null;
+      simulation.stop();
+    };
+  }, [bundle, centerId, visibleKinds, expandedBadges]);
+
+  // ── Physique live pendant le drag (style Neo4j Bloom) ─────────────────────────
+  // Sans ça, déplacer un nœud à la main le réécrit instantanément sans relancer la
+  // simulation — les voisins ne réagissent pas. Pattern standard d3-force-drag,
+  // adapté aux callbacks de drag de React Flow (on ne pilote pas le drag lui-même,
+  // juste fx/fy du nœud de simulation correspondant à la position courante).
+  //
+  // `onNodeDragStart` fige aussi le nœud dès l'appui du pointeur (pas seulement
+  // pendant un déplacement réel) : tant que la simulation tourne, un nœud continue
+  // de bouger sous le curseur pendant tout l'intervalle appui→relâchement d'un
+  // simple clic, ce qui fait fréquemment "rater" le clic (relâché sur le fond du
+  // canvas plutôt que sur le nœud, une fois celui-ci déjà parti). `handleNodeClick`
+  // libère ce gel dès qu'il est confirmé qu'il s'agissait bien d'un simple clic
+  // (pas d'un drag) — sinon le gel devient la position figée du drag, comportement
+  // déjà existant.
+  const onNodeDragStart = React.useCallback((_evt, node) => {
+    const simNode = simulationRef.current?.nodes().find(n => n.id === node.id);
+    if (simNode) {
+      simNode.fx = node.position.x + NODE_W / 2;
+      simNode.fy = node.position.y + NODE_H / 2;
+    }
+    simulationRef.current?.alphaTarget(0.3).restart();
+  }, []);
+  const onNodeDrag = React.useCallback((_evt, node) => {
+    const simNode = simulationRef.current?.nodes().find(n => n.id === node.id);
+    if (!simNode) return;
+    simNode.fx = node.position.x + NODE_W / 2;
+    simNode.fy = node.position.y + NODE_H / 2;
+  }, []);
+  const onNodeDragStop = React.useCallback(() => {
+    simulationRef.current?.alphaTarget(0);
+  }, []);
+
+  // Patch léger du surlignage (anneau doré) sans relancer la simulation physique —
+  // ne touche que `data.highlighted` sur les nœuds déjà affichés.
+  React.useEffect(() => {
+    setFlowNodes(prev => prev.map(n => ({ ...n, data: { ...n.data, highlighted: _isHighlighted(n.data, highlightedIds) } })));
+  }, [highlightedIds]);
+
   const onNodesChange = React.useCallback((changes) => {
     setFlowNodes(prev => {
-      let next = applyNodeChanges(changes, prev);
+      const next = applyNodeChanges(changes, prev);
       changes.forEach(c => {
-        if (c.type !== 'position' || !c.position) return;
-        const members = clustersRef.current.get(c.id);
-        if (!members) {
-          positionsRef.current.set(c.id, c.position);
-          return;
-        }
-        const before = prev.find(n => n.id === c.id);
-        if (!before) return;
-        const dx = c.position.x - before.position.x;
-        const dy = c.position.y - before.position.y;
-        if (!dx && !dy) return;
-        const memberSet = new Set(members);
-        next = next.map(n => {
-          if (!memberSet.has(n.id)) return n;
-          const np = { x: n.position.x + dx, y: n.position.y + dy };
-          positionsRef.current.set(n.id, np);
-          return { ...n, position: np };
-        });
+        if (c.type === 'position' && c.position) positionsRef.current.set(c.id, c.position);
       });
       return next;
     });
@@ -1490,18 +1381,6 @@ const LegacyKbPage = ({ apiFetch }) => {
   const nodeCount = flowNodes.length;
   const arcCount = flowEdges.length;
 
-  // Ancrages recalculés à chaque rendu (positions courantes, y compris pendant
-  // un drag) — cf. `_withHandles`.
-  const flowEdgesAnchored = React.useMemo(
-    () => _withHandles(flowEdges, flowNodes),
-    [flowEdges, flowNodes]
-  );
-
-  // Une zone représente le nœud :Community sous-jacent (`zone:c|123` -> `c|123`)
-  // — clic/double-clic s'y comportent comme sur ce nœud (panneau de détail,
-  // menu contextuel, exploration).
-  const _targetId = (node) => node.type === 'zoneNode' ? node.id.slice('zone:'.length) : node.id;
-
   // Le menu contextuel (et son overlay plein écran) ne s'ouvre qu'après un
   // court délai — si un double-clic survient avant, il est annulé et
   // remplacé par l'extension de la vue (sinon l'overlay du premier clic
@@ -1509,11 +1388,23 @@ const LegacyKbPage = ({ apiFetch }) => {
   const clickTimerRef = React.useRef(null);
 
   const handleNodeClick = React.useCallback((evt, node) => {
-    const id = _targetId(node);
+    const id = node.id;
     const { clientX, clientY } = evt;
+    // Simple clic confirmé (pas un drag, sinon onNodeClick n'aurait pas été
+    // appelé) — libère le gel posé par `onNodeDragStart` pour que le nœud
+    // reprenne sa participation normale à la simulation.
+    const simNode = simulationRef.current?.nodes().find(n => n.id === id);
+    if (simNode) { simNode.fx = null; simNode.fy = null; }
     if (clickTimerRef.current) clearTimeout(clickTimerRef.current);
     clickTimerRef.current = setTimeout(() => {
       clickTimerRef.current = null;
+      // Badge "+N" références externes : un clic le déplie au lieu d'ouvrir le
+      // menu contextuel (pas de détail/recentrage qui aient du sens pour un
+      // nœud de synthèse).
+      if (node.data?.kind === 'extBadge') {
+        setExpandedBadges(prev => new Set(prev).add(node.data.parentId));
+        return;
+      }
       setSelectedId(id);
       setContextMenu({ nodeId: id, x: clientX, y: clientY });
     }, 250);
@@ -1524,7 +1415,12 @@ const LegacyKbPage = ({ apiFetch }) => {
       clickTimerRef.current = null;
     }
     setContextMenu(null);
-    exploreNode(_targetId(node));
+    // Badge "+N" : pas d'id réel à explorer côté backend — le double-clic déplie.
+    if (node.data?.kind === 'extBadge') {
+      setExpandedBadges(prev => new Set(prev).add(node.data.parentId));
+      return;
+    }
+    exploreNode(node.id);
   }, [exploreNode]);
   const handlePaneClick = React.useCallback(() => {
     setSelectedId(null);
@@ -1866,12 +1762,15 @@ const LegacyKbPage = ({ apiFetch }) => {
             <ReactFlowProvider>
               <LegacyKbCanvas
                 nodes={flowNodes}
-                edges={flowEdgesAnchored}
+                edges={flowEdges}
                 fitKey={layoutVersion}
                 onNodesChange={onNodesChange}
                 onNodeClick={handleNodeClick}
                 onNodeDoubleClick={handleNodeDoubleClick}
                 onPaneClick={handlePaneClick}
+                onNodeDragStart={onNodeDragStart}
+                onNodeDrag={onNodeDrag}
+                onNodeDragStop={onNodeDragStop}
               />
             </ReactFlowProvider>
           ) : (

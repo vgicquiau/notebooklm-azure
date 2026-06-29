@@ -10,7 +10,16 @@ COPY api/requirements.txt ./requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY api/ ./api/
-COPY frontend/ ./frontend/
+# Le frontend n'est jamais copié dans l'image déployée : il ne tourne qu'en
+# local (start-dev.ps1). api/main.py ne monte la racine "/" que si frontend/
+# existe sur disque -- absent ici, le conteneur ne sert donc que l'API JSON
+# (pas de page web publique, pas de fuite de l'API Key via une page HTML).
+
+# Utilisé uniquement par api/scripts/import_legacykb.py (Container Apps Job,
+# AUDIT-2026-06) -- même image que ca-api, réutilisée pour l'import legacykb
+# désormais exécuté depuis l'intérieur du VNet plutôt que depuis le poste de
+# l'opérateur (cf. import-neo4j-legacykb.ps1).
+COPY fix_utf8.cypher ./fix_utf8.cypher
 
 RUN useradd -m -u 1000 appuser && chown -R appuser:appuser /app
 USER appuser

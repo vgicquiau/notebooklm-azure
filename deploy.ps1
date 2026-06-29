@@ -1,4 +1,4 @@
-#Requires -Version 5.1
+﻿#Requires -Version 5.1
 <#
 .SYNOPSIS
     Déploiement complet de NotebookLM Azure — build image Docker + infrastructure + environnement local.
@@ -10,6 +10,8 @@
       2. Authentification Azure + sélection subscription
       3. Build & push image Docker vers ACR
       4. Déploiement infrastructure Bicep (~12 min)
+         4b. TLS Neo4j — certificat auto-signé (si deployLegacyKb=true)
+         4c. Import du dump GraphML dans neo4j-legacykb (si deployLegacyKb=true)
       5. Génération du fichier .env depuis les outputs Bicep
       6. Assignation des rôles IAM — parallel
       7. Création du virtualenv Python + installation des dépendances
@@ -129,6 +131,32 @@ function ConvertFrom-SecureStringPlain([SecureString]$sec) {
     $ptr = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($sec)
     try { return [System.Runtime.InteropServices.Marshal]::PtrToStringAuto($ptr) }
     finally { [System.Runtime.InteropServices.Marshal]::ZeroFreeBSTR($ptr) }
+}
+
+# Helper : écrire un fichier de paramètres ARM (JSON) pour az deployment group create.
+# Évite de passer des secrets en key=value bruts sur la ligne de commande, où des
+# caractères spéciaux (#, &, %...) peuvent casser le relais PowerShell -> cmd.exe -> az.cmd.
+function New-BicepParametersFile([hashtable]$Values) {
+    $paramsObj = [ordered]@{
+        '$schema'      = 'https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#'
+        contentVersion = '1.0.0.0'
+        parameters     = [ordered]@{}
+    }
+    foreach ($key in $Values.Keys) {
+        $paramsObj.parameters[$key] = @{ value = $Values[$key] }
+    }
+    $tempFile = Join-Path $env:TEMP "bicep-params-$([guid]::NewGuid()).json"
+    ($paramsObj | ConvertTo-Json -Depth 5) | Set-Content -Path $tempFile -Encoding UTF8
+    return $tempFile
+}
+
+# Helper : supprimer un fichier temporaire en évitant un bug du provider FileSystem de
+# PowerShell — sur les comptes Windows dont le nom contient un point (ex: "v.gicquiau"),
+# %TEMP% est résolu en 8.3 short-name (ex: "V5C98~1.GIC") et Remove-Item échoue avec
+# "PSArgumentException : objet introuvable" même si le fichier existe (-ErrorAction et
+# -LiteralPath n'y changent rien). [System.IO.File]::Delete() contourne le provider.
+function Remove-FileSafe([string]$Path) {
+    try { [System.IO.File]::Delete($Path) } catch {}
 }
 
 # ── PHASE 0 : Prérequis ────────────────────────────────────────────────────────
@@ -410,26 +438,29 @@ $bicepImageTag = if ($buildImageAfterBicep) { "mcr.microsoft.com/azuredocs/conta
 Write-Info "Deploiement Bicep en cours — environ 12 minutes..."
 Write-Info "(OpenAI et Document Intelligence sont les plus lents a provisionner)"
 
-# Valeur deployLegacyKb en string pour le CLI (az ne gère pas les bool PS directement)
-$deployLegacyKbStr = if ($deployLegacyKb) { "true" } else { "false" }
-
-az deployment group create `
-    --resource-group $rg `
-    --template-file "$ProjectRoot\infra\main.bicep" `
-    --name $deployName `
-    --output none `
-    --only-show-errors `
-    --parameters `
-        projectName=$ProjectName `
-        environment=$environment `
-        location=$Location `
-        deployerObjectId=$deployerObjectId `
-        apiImageTag=$bicepImageTag `
-        deployLegacyKb=$deployLegacyKbStr `
-        neo4jLegacyKbPassword=$neo4jPlainPwd `
-        neo4jLegacyKbUri=$neo4jUriParam `
-        apiKey=$apiKey `
-        alertEmail=$AlertEmail 2>&1
+$paramsFile = New-BicepParametersFile @{
+    projectName           = $ProjectName
+    environment           = $environment
+    location              = $Location
+    deployerObjectId      = $deployerObjectId
+    apiImageTag           = $bicepImageTag
+    deployLegacyKb        = $deployLegacyKb
+    neo4jLegacyKbPassword = $neo4jPlainPwd
+    neo4jLegacyKbUri      = $neo4jUriParam
+    apiKey                = $apiKey
+    alertEmail            = $AlertEmail
+}
+try {
+    az deployment group create `
+        --resource-group $rg `
+        --template-file "$ProjectRoot\infra\main.bicep" `
+        --name $deployName `
+        --output none `
+        --only-show-errors `
+        --parameters "@$paramsFile" 2>&1
+} finally {
+    Remove-FileSafe $paramsFile
+}
 
 Write-OK "Deploiement Bicep termine"
 
@@ -446,7 +477,9 @@ if ($deployLegacyKb) {
     Write-Host ""
     Write-Host "  [4b/8] TLS Neo4j — génération et upload du certificat auto-signé" -ForegroundColor Cyan
 
-    $neo4jFqdn    = $outputs.neo4jLegacyKbFqdn.value
+    # AUDIT-2026-06 : plus de FQDN public (ACI déployé dans snet-aci-legacykb, IP privée
+    # uniquement) — le certificat porte désormais l'IP privée en SAN plutôt qu'un DNS name.
+    $neo4jHost    = $outputs.neo4jLegacyKbPrivateIp.value
     $sslStorage   = $outputs.neo4jLegacyKbStorageAccount.value
     $aciGroupName = "aci-neo4j-legacykb-$ProjectName-$environment"
     $tmpKey       = "$env:TEMP\neo4j.key"
@@ -467,16 +500,22 @@ from cryptography.x509.oid import NameOID
 from cryptography.hazmat.primitives import hashes, serialization
 import datetime
 
-fqdn, key_out, cert_out = sys.argv[1], sys.argv[2], sys.argv[3]
+import ipaddress
+
+host, key_out, cert_out = sys.argv[1], sys.argv[2], sys.argv[3]
 key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
-subject = issuer = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, fqdn)])
+subject = issuer = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, host)])
+# AUDIT-2026-06 : host est désormais une IP privée (snet-aci-legacykb), plus un FQDN
+# public -- SAN IPAddress plutôt que DNSName (le client ignore cette validation de
+# toute façon, cf. legacykb_client.py _session.verify=False, mais on garde un SAN cohérent).
+san = x509.IPAddress(ipaddress.ip_address(host))
 cert = (x509.CertificateBuilder()
     .subject_name(subject).issuer_name(issuer)
     .public_key(key.public_key())
     .serial_number(x509.random_serial_number())
     .not_valid_before(datetime.datetime.utcnow())
     .not_valid_after(datetime.datetime.utcnow() + datetime.timedelta(days=365))
-    .add_extension(x509.SubjectAlternativeName([x509.DNSName(fqdn)]), critical=False)
+    .add_extension(x509.SubjectAlternativeName([san]), critical=False)
     .sign(key, hashes.SHA256()))
 open(key_out,  'wb').write(key.private_bytes(
     serialization.Encoding.PEM,
@@ -485,25 +524,44 @@ open(key_out,  'wb').write(key.private_bytes(
 open(cert_out, 'wb').write(cert.public_bytes(serialization.Encoding.PEM))
 '@ | Set-Content -Path $tmpScript -Encoding UTF8
 
-    python $tmpScript $neo4jFqdn $tmpKey $tmpCert
-    Write-OK "Certificat auto-signé généré pour $neo4jFqdn"
+    python $tmpScript $neo4jHost $tmpKey $tmpCert
+    Write-OK "Certificat auto-signé généré pour $neo4jHost"
 
     # Upload via clé de compte (première fois — le rôle RBAC File n'est pas encore propagé).
     $sslKey = az storage account keys list -g $rg -n $sslStorage --query '[0].value' -o tsv 2>&1
-    az storage file upload --share-name neo4j-ssl --account-name $sslStorage --account-key $sslKey `
-        --source $tmpKey --path neo4j.key --output none --only-show-errors 2>&1 | Out-Null
-    az storage file upload --share-name neo4j-ssl --account-name $sslStorage --account-key $sslKey `
-        --source $tmpCert --path neo4j.crt --output none --only-show-errors 2>&1 | Out-Null
+
+    # az storage file upload utilise le SDK data-plane (pas azure-cli-core) — il ignore
+    # "core.verify_ssl=false" et a besoin de REQUESTS_CA_BUNDLE explicitement dans ce process
+    # (même bundle Zscaler que celui injecté pour le job az acr build en Phase 3).
+    $prevCaBundle = $env:REQUESTS_CA_BUNDLE
+    if ($tempBundle) { $env:REQUESTS_CA_BUNDLE = $tempBundle }
+    try {
+        az storage file upload --share-name neo4j-ssl --account-name $sslStorage --account-key $sslKey `
+            --source $tmpKey --path neo4j.key --no-progress --output none --only-show-errors 2>&1 | Out-Null
+        az storage file upload --share-name neo4j-ssl --account-name $sslStorage --account-key $sslKey `
+            --source $tmpCert --path neo4j.crt --no-progress --output none --only-show-errors 2>&1 | Out-Null
+    } finally {
+        $env:REQUESTS_CA_BUNDLE = $prevCaBundle
+    }
     Write-OK "Certificats uploadés dans le partage Azure Files neo4j-ssl"
 
     # Nettoyer les fichiers temporaires
-    Remove-Item $tmpKey, $tmpCert, $tmpScript -Force -ErrorAction SilentlyContinue
+    Remove-FileSafe $tmpKey
+    Remove-FileSafe $tmpCert
+    Remove-FileSafe $tmpScript
 
     # Redémarrer l'ACI pour que Neo4j monte /ssl et démarre avec TLS
     Write-Info "Redémarrage de l'ACI neo4j-legacykb pour activer TLS..."
     az container restart --resource-group $rg --name $aciGroupName --output none --only-show-errors 2>&1 | Out-Null
     Write-OK "ACI $aciGroupName redémarré — Neo4j démarrera avec bolt+s:// et HTTPS"
-    Write-Info "(l'import GraphML reste disponible via import-neo4j-legacykb.ps1 dès que Neo4j est prêt)"
+
+    # ── PHASE 4c : Import du dump GraphML ────────────────────────────────────────
+    # AUDIT-2026-06 : le mot de passe n'est plus passé ici -- le Job d'import le
+    # charge lui-même depuis Key Vault (cf. import-neo4j-legacykb.ps1, api/scripts/import_legacykb.py).
+    Write-Host ""
+    Write-Host "  [4c/8] Import GraphML — peuplement de neo4j-legacykb" -ForegroundColor Cyan
+    & "$ProjectRoot\import-neo4j-legacykb.ps1" -ResourceGroup $rg -ProjectName $ProjectName -Environment $environment `
+        -SkipSSL:$SkipSSL
 }
 
 # Si l'ACR vient d'être créé par Bicep, builder l'image maintenant
@@ -542,26 +600,32 @@ if ($buildImageAfterBicep) {
     }
     Write-OK "Image buildee et pushee : $imageTag"
 
-    # Mettre à jour l'App Service avec la vraie image (second déploiement Bicep, rapide)
-    Write-Info "Mise a jour de l'App Service avec la vraie image..."
-    az deployment group create `
-        --resource-group $rg `
-        --template-file "$ProjectRoot\infra\main.bicep" `
-        --name "deploy-$(Get-Date -Format 'yyyyMMddHHmm')-img" `
-        --output none `
-        --only-show-errors `
-        --parameters `
-            projectName=$ProjectName `
-            environment=$environment `
-            location=$Location `
-            deployerObjectId=$deployerObjectId `
-            apiImageTag=$imageTag `
-            deployLegacyKb=$deployLegacyKbStr `
-            neo4jLegacyKbPassword=$neo4jPlainPwd `
-            neo4jLegacyKbUri=$neo4jUriParam `
-            apiKey=$apiKey `
-            alertEmail=$AlertEmail 2>&1
-    Write-OK "App Service mis a jour avec l'image $imageTag"
+    # Mettre à jour le Container App avec la vraie image (second déploiement Bicep, rapide)
+    Write-Info "Mise a jour du Container App avec la vraie image..."
+    $paramsFileImg = New-BicepParametersFile @{
+        projectName           = $ProjectName
+        environment           = $environment
+        location              = $Location
+        deployerObjectId      = $deployerObjectId
+        apiImageTag           = $imageTag
+        deployLegacyKb        = $deployLegacyKb
+        neo4jLegacyKbPassword = $neo4jPlainPwd
+        neo4jLegacyKbUri      = $neo4jUriParam
+        apiKey                = $apiKey
+        alertEmail            = $AlertEmail
+    }
+    try {
+        az deployment group create `
+            --resource-group $rg `
+            --template-file "$ProjectRoot\infra\main.bicep" `
+            --name "deploy-$(Get-Date -Format 'yyyyMMddHHmm')-img" `
+            --output none `
+            --only-show-errors `
+            --parameters "@$paramsFileImg" 2>&1
+    } finally {
+        Remove-FileSafe $paramsFileImg
+    }
+    Write-OK "Container App mis a jour avec l'image $imageTag"
 }
 
 # ── PHASE 5 : Génération .env ─────────────────────────────────────────────────
@@ -602,7 +666,7 @@ AZURE_DOCINT_ENDPOINT=$($outputs.docIntEndpoint.value)
 # Azure Blob Storage
 AZURE_STORAGE_ACCOUNT_NAME=$($outputs.storageAccountName.value)
 
-# Azure Key Vault (pour la production -- App Service lit la config via appSettings)
+# Azure Key Vault (pour la production -- le Container App lit la config via ses variables d'env)
 # AZURE_KEYVAULT_URI=https://$($outputs.keyVaultName.value).vault.azure.net/
 
 # Neo4j Legacy KB (golden source GraphRAG)
@@ -611,6 +675,11 @@ NEO4J_LEGACYKB_PASSWORD=***
 
 # Authentification API (genere aleatoirement -- utilise aussi bien en local qu'en prod)
 API_KEY=$apiKey
+
+# URL de l'API deployee (utilisee par mcp-legacykb pour passer par l'API HTTPS
+# plutot que par une connexion Bolt directe -- Zscaler casse l'inspection SSL
+# sur le port Bolt 7687, non-HTTP, alors que les appels HTTPS standard passent)
+NOTEBOOKLM_API_URL=$($outputs.apiUrl.value)
 "@
 
 [System.IO.File]::WriteAllText($envFile, $envContent, [System.Text.Encoding]::UTF8)
@@ -631,7 +700,7 @@ $devRoles = @(
     "Storage Blob Data Contributor"
 )
 
-# Rôle pour l'UAMI de l'App Service (Key Vault Secrets User)
+# Rôle pour l'UAMI du Container App (Key Vault Secrets User)
 $uamiName = "id-api-$ProjectName-$environment"
 
 Write-Info "Assignation des roles pour le deployer ($deployerObjectId)..."
@@ -646,7 +715,7 @@ $roleJobs = foreach ($role in $devRoles) {
 }
 
 # Récupérer l'ID de l'UAMI pour Key Vault Secrets User
-Write-Info "Assignation Key Vault Secrets User pour l'UAMI de l'App Service..."
+Write-Info "Assignation Key Vault Secrets User pour l'UAMI du Container App..."
 $uamiJob = Start-Job -ScriptBlock {
     $uamiId = az identity show -n $using:uamiName -g $using:rg --query principalId -o tsv 2>$null
     if ($uamiId) {
@@ -663,7 +732,7 @@ $uamiJob = Start-Job -ScriptBlock {
 
 Write-OK "Roles IAM assignes :"
 foreach ($role in $devRoles) { Write-Info "  - $role (deployer)" }
-Write-Info "  - Key Vault Secrets User (UAMI App Service)"
+Write-Info "  - Key Vault Secrets User (UAMI Container App)"
 Write-Warn "Propagation IAM : attendez 3-5 min avant d'indexer des documents"
 
 # ── PHASE 7 : Virtualenv Python ───────────────────────────────────────────────
@@ -729,8 +798,8 @@ if (-not $apiUrl.StartsWith("http")) {
     $apiUrl = "https://$apiUrl"
 }
 
-Write-Info "URL App Service : $apiUrl"
-Write-Info "Attente de disponibilite de l'App Service (5 tentatives x 20s)..."
+Write-Info "URL Container App : $apiUrl"
+Write-Info "Attente de disponibilite du Container App (5 tentatives x 20s)..."
 
 $ready   = $false
 $attempt = 0
@@ -747,7 +816,7 @@ do {
             Write-Info "  HTTP $($resp.StatusCode) — pas encore pret"
         }
     } catch {
-        Write-Info "  Pas de reponse — l'App Service demarre peut-etre encore"
+        Write-Info "  Pas de reponse — le Container App demarre peut-etre encore"
     }
 } while (-not $ready -and $attempt -lt 5)
 
@@ -767,7 +836,7 @@ if ($ready) {
         Write-Warn "Legacy KB health check inaccessible -- neo4j-legacykb est peut-etre encore en demarrage"
     }
 } else {
-    Write-Warn "L'App Service n'a pas repondu apres 5 tentatives."
+    Write-Warn "Le Container App n'a pas repondu apres 5 tentatives."
     Write-Info "Il peut encore demarrer -- attendez 2-3 min et testez $apiUrl/health manuellement."
 }
 
@@ -781,7 +850,8 @@ Write-Host "  Ressources Azure crees :" -ForegroundColor White
 Write-Host "  Resource Group   : $rg" -ForegroundColor DarkGray
 Write-Host "  ACR              : $acrName" -ForegroundColor DarkGray
 Write-Host "  Image            : $imageTag" -ForegroundColor DarkGray
-Write-Host "  URL production   : $apiUrl" -ForegroundColor DarkGray
+Write-Host "  URL API (backend): $apiUrl" -ForegroundColor DarkGray
+Write-Host "                     API JSON uniquement -- pas de page web (le frontend ne tourne qu'en local)" -ForegroundColor DarkGray
 if ($neo4jUriEnv) {
     Write-Host "  Neo4j Legacy KB  : $neo4jUriEnv" -ForegroundColor DarkGray
 }

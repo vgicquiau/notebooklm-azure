@@ -129,31 +129,40 @@ flowchart LR
         SRCH[Azure AI Search S1\nsrch-nlmazure-prod\nHNSW + BM25 + Semantic Ranker]
         KV[Azure Key Vault\nkv-nlmazure-prod]
         ACR[Azure Container Registry\nnlmazureprod]
-        APP[App Service\napp-api-nlmazure-prod\nDocker · Linux]
+        APP[Azure Container Apps\nca-api-nlmazure-prod\nAPI JSON uniquement — pas de frontend dans l'image]
         APPI[Application Insights\nappi-nlmazure-prod]
         ST[Blob Storage\nstnlmazureprod]
         MI[Managed Identity\nid-api-nlmazure-prod]
     end
 
-    subgraph frontend["🌐 Frontend (servi par App Service)"]
+    subgraph frontend["🌐 Frontend (local uniquement — jamais déployé sur Azure)"]
         UI[index.html · React 18 · Babel\nmarked.js · mermaid.js · xyflow · dagre]
         SRC[src/tokens.jsx · Header.jsx · SourcesRail.jsx\nNotesRail.jsx · ChatPanel.jsx · LegacyKbPage.jsx · App.jsx]
     end
 
-    subgraph legacy["🗄️ neo4j-legacykb (golden source, lecture seule)"]
-        NEO[(Neo4j AuraDB\n:Entity · :Community\nGraphRAG CardDemo)]
+    subgraph vnet["🔒 VNet vnet-&lt;suffix&gt; (10.20.0.0/16)"]
+        subgraph snetcae["snet-cae (10.20.2.0/23)\nintégration Container Apps"]
+            APP
+        end
+        subgraph snetaci["snet-aci-legacykb (10.20.1.0/27)\nNSG : entrée 7473/7687 depuis snet-cae uniquement"]
+            NEO[(neo4j-legacykb — ACI auto-hébergé\nIP privée, pas de FQDN public\n:Entity · :Community\nGraphRAG CardDemo)]
+        end
     end
+
+    JOB[Container Apps Job\ncaj-import-legacykb-&lt;suffix&gt;\npython -m api.scripts.import_legacykb]
 
     I --> DI
     I --> OAI
     I --> SRCH
 
-    UI -->|HTTP/S| APP
+    UI -->|HTTP localhost:8000\nstart-dev.ps1| APP
     APP --> OAI
     APP --> SRCH
     APP --> KV
     APP --> APPI
-    APP -->|driver neo4j| NEO
+    APP -->|driver neo4j, bolt+ssc://IP privée:7687\ndepuis snet-cae| NEO
+    JOB -->|driver neo4j, depuis snet-cae| NEO
+    JOB -.->|charge le mot de passe via UAMI| KV
     MI -.->|authentifie| APP
     MI -.->|authentifie| OAI
     MI -.->|authentifie| SRCH
@@ -183,11 +192,11 @@ flowchart LR
 | **Recherche** | Azure AI Search (SDK Python) | — |
 | **Extraction PDF** | Azure Document Intelligence prebuilt-layout | — |
 | **Tokenisation** | tiktoken cl100k_base | — |
-| **Base de connaissances Legacy KB** | Neo4j AuraDB (`neo4j-legacykb`, driver Python `neo4j`) | golden source, lecture seule |
+| **Base de connaissances Legacy KB** | Neo4j auto-hébergé sur Azure Container Instances (`neo4j-legacykb`, driver Python `neo4j`), réseau privé (VNet) | golden source, lecture seule |
 | **Persistance des sessions** | SQLite (`api/data/chat_history.db`) | historique conversationnel durable |
 | **Rate limiting** | Fenêtre glissante 60 s, 20 req/IP en mémoire | `api/services/rate_limiter.py` |
 | **Infrastructure** | Bicep (IaC) | — |
-| **Conteneur** | Docker / App Service for Containers | — |
+| **Conteneur** | Docker / Azure Container Apps | — |
 | **Monitoring** | Application Insights | — |
 
 ---
@@ -352,7 +361,7 @@ L'historique complet d'une session peut être ré-hydraté par le frontend aprè
 
 ### Structure de l'application web
 
-L'UI est une **Single Page Application React 18** servie statiquement par le même App Service que l'API. Elle utilise React via CDN avec Babel Standalone pour transpiler le JSX à la volée — **aucune étape de build** (`npm`, `webpack`, `vite`) n'est nécessaire.
+L'UI est une **Single Page Application React 18** servie statiquement par le même Container App que l'API. Elle utilise React via CDN avec Babel Standalone pour transpiler le JSX à la volée — **aucune étape de build** (`npm`, `webpack`, `vite`) n'est nécessaire.
 
 ```
 frontend/
@@ -401,7 +410,7 @@ App
 │       └── NoteModal (portal → document.body, conditionnel)
 └── (vue "legacykb")
     └── LegacyKbPage
-        ├── LegacyKbCanvas (React Flow — nœuds :Entity/:Community, zones par communauté)
+        ├── LegacyKbCanvas (React Flow — nœuds :Entity/:Community, layout force-directed d3-force)
         ├── NodeContextMenu (recentrer la vue, recentrer la disposition, retirer)
         ├── NodeDetailPanel (résumé, relations, tags techniques)
         └── DomainBreadcrumb (navigation par domaine fonctionnel)
@@ -445,7 +454,7 @@ App
 ```mermaid
 flowchart TD
     subgraph identites["Identités"]
-        MI[User-Assigned Managed Identity\nid-api-<suffix>\nApp Service → Azure services]
+        MI[User-Assigned Managed Identity\nid-api-<suffix>\nContainer App → Azure services]
         DEV[Identité développeur\nEntra ID / az login]
     end
 
@@ -481,7 +490,7 @@ En local, le SDK Azure utilise `DefaultAzureCredential` qui essaie les providers
 1. `EnvironmentCredential` — variables d'env (non configurées → skip)
 2. `ManagedIdentityCredential` — IMDS endpoint (non disponible en local → skip)
 3. `AzureCliCredential` ✅ — token `az login` — **utilisé en local**
-4. En production (App Service) : `ManagedIdentityCredential` ✅ via `AZURE_CLIENT_ID`
+4. En production (Container Apps) : `ManagedIdentityCredential` ✅ via `AZURE_CLIENT_ID`
 
 ### Chargement des secrets depuis Key Vault (lifespan)
 
@@ -496,7 +505,7 @@ Au démarrage de l'API (lifespan FastAPI), `_load_secrets_from_keyvault()` charg
 | `neo4j-legacykb-password` | `NEO4J_LEGACYKB_PASSWORD` |
 | `api-key` | `API_KEY` |
 
-Ce chargement ne se déclenche que si `AZURE_KEYVAULT_URI` est défini (injecté par Bicep dans les `appSettings` de l'App Service). En local, les variables sont lues directement depuis `.env`.
+Ce chargement ne se déclenche que si `AZURE_KEYVAULT_URI` est défini (injecté par Bicep dans les variables d'environnement du Container App). En local, les variables sont lues directement depuis `.env`.
 
 ### Authentification client → API (`APIKeyMiddleware`)
 
@@ -506,7 +515,7 @@ Tous les endpoints `/api/*` sont protégés par une clé partagée. Le middlewar
 - Si `API_KEY` est vide : accès libre (mode développement local non configuré)
 - Routes exclues : `/health` (probe de liveness)
 
-**Livraison de l'API Key au frontend** : la clé est injectée dynamiquement à la volée dans `index.html` sous forme d'une balise `<meta name="nlaz-api-key" content="…">` (endpoint `GET /`). Elle n'est donc pas accessible à un `curl` anonyme sans avoir d'abord chargé la page.
+**Livraison de l'API Key au frontend** : en local, la clé est injectée dynamiquement à la volée dans `index.html` sous forme d'une balise `<meta name="nlaz-api-key" content="…">` (endpoint `GET /`). Cette route et le mount `StaticFiles` ne sont actifs qu'en local — l'image Docker déployée sur Azure ne contient pas `frontend/` (cf. `api/Dockerfile`), donc en production le Container App ne sert que l'API JSON, sans page web ni injection de clé dans du HTML public (cf. [docs/specs/SECURITY_AUDIT.md](docs/specs/SECURITY_AUDIT.md)).
 
 ### Headers de sécurité HTTP (`SecurityHeadersMiddleware`)
 
@@ -521,13 +530,36 @@ Ajouté sur toutes les réponses de l'API :
 | `Content-Security-Policy` | `default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval'…` | Bloquer les injections XSS ; `unsafe-eval`/`unsafe-inline` requis par Babel Standalone |
 | `Strict-Transport-Security` | `max-age=31536000; includeSubDomains` | Forcer HTTPS (ignoré silencieusement sur HTTP local) |
 
+### CORS — accès cross-origin du frontend local à `ca-api`
+
+Depuis que `neo4j-legacykb` n'a plus d'IP publique (réseau privé, voir section 8), le backend local
+(`start-dev.ps1`) ne peut plus l'atteindre — seul `ca-api` (intégré au VNet) le peut. Le frontend
+local appelle donc `ca-api` **directement, en cross-origin**, pour les routes `/api/legacykb/*`
+(c'est aussi le seul moyen de parcourir visuellement le graphe : l'image Docker déployée ne contient
+jamais le frontend). Ce contournement nécessite trois ajustements :
+
+- **`CORSMiddleware`** activé sur `ca-api` uniquement si le paramètre Bicep `corsAllowedOrigins`
+  (défaut `http://127.0.0.1:8000`) est non vide — `os.environ["CORS_ALLOWED_ORIGINS"]`, liste
+  d'origines séparées par des virgules
+- **Requêtes `OPTIONS` (préflight CORS) laissées passer sans authentification** dans
+  `APIKeyMiddleware` — sans ce contournement, Starlette retourne 401 au préflight et le navigateur
+  bloque la vraie requête avant même qu'elle ne parte
+- **CSP `connect-src`** ajustée pour inclure l'origine `NOTEBOOKLM_API_URL` (FQDN de `ca-api`)
+  quand cette variable est définie — sinon le navigateur bloque l'appel cross-origin même avec
+  CORS correct (politique distincte). N'a d'effet qu'en local — cette route ne s'exécute jamais en
+  production
+- **Balise `<meta name="nlaz-legacykb-api-url">`** injectée par `api/main.py` (route locale
+  uniquement, depuis `NOTEBOOKLM_API_URL`) et lue par `Header.jsx`/`LegacyKbPage.jsx` pour
+  construire l'URL de base des appels `/api/legacykb/*` — fallback sur l'origine locale (same-origin)
+  si la variable n'est pas définie
+
 ### Contrôle d'accès Azure OpenAI
 
 `disableLocalAuth: true` est configuré sur le compte Azure OpenAI — les clés d'API Azure sont désactivées au niveau du service. Seule l'authentification Entra ID (tokens Bearer) est acceptée.
 
 ### Isolation des secrets dans l'image Docker
 
-Le fichier `.dockerignore` exclut `**/.env` du contexte de build. L'image ne contient donc aucun secret. En production, les variables d'environnement proviennent exclusivement de l'`appSettings` de l'App Service (injecté par Bicep) et de Key Vault (chargé au startup).
+Le fichier `.dockerignore` exclut `**/.env` du contexte de build. L'image ne contient donc aucun secret. En production, les variables d'environnement proviennent exclusivement de la configuration du Container App (injectée par Bicep) et de Key Vault (chargé au startup).
 
 ---
 
@@ -544,12 +576,15 @@ Convention de nommage : `{type}-{projectName}-{env}`. Région par défaut : `swe
 | Azure Document Intelligence | `di-nlmavgi-prod` | S0 | Extraction et analyse structurelle des PDF |
 | Azure Key Vault | `kv-nlmavgi-prod` | Standard | Secrets (endpoints, api-key, neo4j-password) |
 | Azure Container Registry | `acrnlmavgiprod` | Basic | Images Docker de l'API |
-| App Service Plan | `asp-nlmavgi-prod` | B2 Linux | Plan hébergement App Service |
-| App Service | `app-api-nlmavgi-prod` | (B2) | API FastAPI + frontend servi en conteneur Docker |
+| VNet | `vnet-nlmavgi-prod` | 10.20.0.0/16 | Réseau privé — sous-réseaux `snet-aci-legacykb` (10.20.1.0/27) et `snet-cae` (10.20.2.0/23) |
+| NSG | `nsg-aci-legacykb-nlmavgi-prod` | — | Sur `snet-aci-legacykb` — autorise uniquement `snet-cae` en entrée (7473/7687), deny-all sinon |
+| Container Apps Environment | `cae-nlmavgi-prod` | — | Environnement managé hébergeant le Container App, intégré au VNet (`snet-cae`) |
+| Azure Container App | `ca-api-nlmavgi-prod` | 0.5 vCPU / 1Gi | API FastAPI uniquement (JSON) — pas de frontend, pas de page web publique. Ingress externe public inchangé (FQDN) |
+| Container Apps Job | `caj-import-legacykb-nlmavgi-prod` | 0.5 vCPU / 1Gi | Exécution ponctuelle de l'import GraphML (`python -m api.scripts.import_legacykb`), déclenchée par `import-neo4j-legacykb.ps1` — seul process autorisé (avec `ca-api`) à atteindre `neo4j-legacykb` |
 | Blob Storage | `stnlmavgiprod` | Standard LRS | Documents sources |
 | Application Insights | `appi-nlmavgi-prod` | — | Monitoring, traces, logs |
-| Managed Identity | `id-api-nlmavgi-prod` | User-Assigned | Identité de l'App Service pour les appels Azure |
-| ACI neo4j-legacykb | `neo4j-legacykb-nlmavgi` | (ACI) | Base graphe GraphRAG CardDemo (golden source) |
+| Managed Identity | `id-api-nlmavgi-prod` | User-Assigned | Identité du Container App (et du Job) pour les appels Azure |
+| ACI neo4j-legacykb | `aci-neo4j-legacykb-nlmavgi-prod` | (ACI) | Base graphe GraphRAG CardDemo (golden source), déployée dans `snet-aci-legacykb` — IP privée uniquement, aucune IP publique ni FQDN |
 
 > L'ACI neo4j-legacykb est déployé conditionnellement (`deployLegacyKb=true`). Si une instance externe est fournie via `-Neo4jUri`, l'ACI n'est pas créé.
 
@@ -564,14 +599,17 @@ Convention de nommage : `{type}-{projectName}-{env}`. Région par défaut : `swe
 
 ```
 infra/
-├── main.bicep                  — orchestration, params, rôles IAM, secrets KV
+├── main.bicep                  — orchestration, params, rôles IAM, secrets KV, tags obligatoires
 ├── main.parameters.json        — valeurs par défaut (non commité en prod)
 └── modules/
-    ├── containerapp.bicep      — App Service + UAMI + appSettings (KV URI, neo4j URI…)
+    ├── network.bicep           — VNet + sous-réseaux snet-aci-legacykb/snet-cae + NSG
+    ├── containerapp.bicep      — Container Apps (env managé, intégré VNet) + UAMI + Container App
+    │                             ca-api + Container Apps Job caj-import-legacykb + variables d'env
+    │                             (KV URI, neo4j URI, CORS…)
     ├── openai.bicep            — Azure OpenAI + déploiements GPT-4o + Embeddings
     ├── search.bicep            — Azure AI Search S1 + semantic search
     ├── keyvault.bicep          — Key Vault RBAC + accès déployeur
-    ├── neo4j-legacykb.bicep    — ACI neo4j (déploiement conditionnel)
+    ├── neo4j-legacykb.bicep    — ACI neo4j (déploiement conditionnel), réseau privé (snet-aci-legacykb)
     ├── docint.bicep            — Document Intelligence
     ├── storage.bicep           — Blob Storage
     ├── registry.bicep          — Container Registry
@@ -586,11 +624,12 @@ infra/
 | `environment` | `prod` | Suffixe d'environnement |
 | `location` | région du RG | Région Azure |
 | `deployerObjectId` | *(requis)* | Object ID AAD du déployeur — droits Key Vault |
-| `apiImageTag` | placeholder | Image Docker de l'App Service |
+| `apiImageTag` | placeholder | Image Docker du Container App |
 | `deployLegacyKb` | `true` | Crée l'ACI neo4j-legacykb |
 | `neo4jLegacyKbPassword` | `''` | Mot de passe neo4j (→ KV secret) |
-| `neo4jLegacyKbUri` | `''` | URI bolt:// externe si `deployLegacyKb=false` |
+| `neo4jLegacyKbUri` | `''` | URI `bolt+ssc://` externe si `deployLegacyKb=false`, ou IP privée de l'ACI sinon (sortie du module `neo4j-legacykb.bicep`) |
 | `apiKey` | `''` | Clé API (→ KV secret `api-key`) |
+| `corsAllowedOrigins` | `http://127.0.0.1:8000` | Origines CORS autorisées sur `ca-api`, séparées par des virgules — permet au frontend local d'appeler `/api/legacykb/*` en cross-origin (voir section 7, CORS) |
 
 **Déploiement via `deploy.ps1` (recommandé) :**
 ```powershell
@@ -631,9 +670,9 @@ Contrepartie : les vecteurs sont 2× plus lourds en stockage et la recherche HNS
 - **Vectoriel seul** : échoue sur les termes exacts rares (codes, acronymes, noms de modules)
 - **Hybride RRF** : combine les deux — les termes exacts sont trouvés par BM25, les intentions par les vecteurs
 
-### Pourquoi App Service et non Container Apps ?
+### Pourquoi Azure Container Apps et non App Service ?
 
-La souscription Azure sandbox utilisée ne dispose pas des droits nécessaires pour enregistrer le fournisseur de ressources `Microsoft.App` (requis par Container Apps). App Service for Containers offre les mêmes capacités (Docker, Managed Identity, HTTPS) sur `Microsoft.Web`, qui est déjà enregistré.
+Le projet a d'abord utilisé App Service for Containers (`Microsoft.Web/serverFarms` + `sites`) car la souscription sandbox initiale ne pouvait pas enregistrer le fournisseur `Microsoft.App`. Sur la souscription lab actuelle, `Microsoft.App` est enregistré et la policy locations l'autorise — mais l'App Service Plan (B-series puis S-series) a rencontré une pénurie de capacité persistante (`Conflict — No available instances`) spécifique à ce resource group/région, indépendante du SKU. Container Apps repose sur un pool de capacité serverless/Consumption distinct de la flotte App Service, ce qui contourne le problème.
 
 ### Pourquoi un system prompt en 3 variantes (modes) ?
 
@@ -699,7 +738,7 @@ Permet à tout membre de l'équipe d'interroger en langage naturel l'ensemble du
 
 **Indicateurs de succès**
 - Taux de réponses avec au moins une citation (`sources.length > 0`)
-- Absence de réponse "Aucun document pertinent trouvé" (signe d'un corpus mal indexé)
+- Taux de réponses s'appuyant sur la base de connaissances legacy quand l'index vectoriel ne renvoie rien de pertinent
 - Temps de réponse < 8s en mode Standard (P95)
 
 ---
@@ -729,9 +768,11 @@ When il pose une question de suivi implicite ("Et pour le module B ?")
 Then la requête inclut l'historique non compacté de la session (SQLite)
 And la réponse tient compte du contexte conversationnel
 
-Given aucun chunk pertinent n'est trouvé
+Given aucun chunk pertinent n'est trouvé dans l'index vectoriel
 When l'utilisateur pose une question
-Then l'API retourne "Aucun document pertinent trouvé pour cette question."
+Then le Generator est appelé malgré tout, avec un contexte documentaire vide
+And il peut répondre via les tools legacykb_* (base de connaissances legacy CardDemo)
+And s'il n'a ni chunk ni résultat legacykb pertinent, il le signale en texte libre
 ```
 
 **Règles de Gestion**
@@ -1415,7 +1456,9 @@ sequenceDiagram
 
 #### I. Vue d'ensemble
 
-La **Legacy KB** ajoute une deuxième vue à l'interface (`LegacyKbPage.jsx`, bascule depuis le `Header`). Elle donne un accès en lecture, sous forme de graphe interactif, à l'intégralité du dump GraphRAG `repartition_cleaned_export.graphml` importé dans une instance Neo4j AuraDB séparée (`neo4j-legacykb`) : 5 812 nœuds `:Entity`/`:Community` et 19 368 relations décrivant l'application mainframe **CardDemo** (programmes COBOL, copybooks, batch jobs, fichiers, domaines fonctionnels).
+La **Legacy KB** ajoute une deuxième vue à l'interface (`LegacyKbPage.jsx`, bascule depuis le `Header`). Elle donne un accès en lecture, sous forme de graphe interactif, à l'intégralité du dump GraphRAG `repartition_cleaned_export.graphml` importé dans une instance Neo4j auto-hébergée séparée (`neo4j-legacykb`, conteneur Azure Container Instances — jamais AuraDB) : 5 812 nœuds `:Entity`/`:Community` et 19 368 relations décrivant l'application mainframe **CardDemo** (programmes COBOL, copybooks, batch jobs, fichiers, domaines fonctionnels).
+
+Depuis une migration réseau (audit sécurité, finding CVSS 8.3 : la base était joignable directement depuis Internet), `neo4j-legacykb` n'a plus d'IP publique ni de FQDN — elle est déployée dans un VNet privé, joignable uniquement depuis le sous-réseau de l'environnement Container Apps (`ca-api`). En conséquence, **le backend local (`start-dev.ps1`) ne peut plus atteindre `neo4j-legacykb` directement** (pas de VPN/Bastion mis en place) : seuls `ca-api` (intégré au VNet) et le Container Apps Job d'import peuvent l'atteindre. C'est pourquoi l'exploration visuelle du graphe en local appelle `ca-api` en cross-origin pour les routes `/api/legacykb/*` (voir section 7, CORS) — c'est aussi le seul moyen de parcourir visuellement le graphe, car l'image Docker déployée ne contient jamais le frontend.
 
 Cette base est la **golden source** de référence pour le legacy CardDemo. Elle est consultée de deux façons :
 - **Exploration visuelle** — l'onglet "Legacy KB" (`LegacyKbPage.jsx`), graphe React Flow/dagre
@@ -1427,35 +1470,37 @@ L'instance ADG-M (Function App `fn-adgm-graph`, Cytoscape) qui exploitait aupara
 
 ```mermaid
 flowchart TB
-    subgraph browser["🌐 Navigateur"]
+    subgraph browser["🌐 Navigateur (local uniquement)"]
         LKB[LegacyKbPage.jsx\nReact Flow + dagre canvas]
         CHAT[ChatPanel.jsx]
     end
 
-    subgraph api["⚙️ FastAPI notebooklm-azure"]
+    subgraph api["⚙️ FastAPI notebooklm-azure (ca-api, intégré au VNet)"]
         ROUTER[legacykb.py\nGET /api/legacykb/*]
         GEN[generator.py\ntools legacykb_*]
         CLIENT[legacykb_client.py\ndriver neo4j]
     end
 
-    subgraph store["🗄️ neo4j-legacykb (AuraDB, golden source, lecture seule)"]
-        NEO[(:Entity · :Community\nCALLS · INCLUDES · IN_COMMUNITY\nREADS/INSERTS/UPDATES/DELETES · EXECUTES)]
+    subgraph vnet["🔒 VNet — snet-aci-legacykb (NSG : entrée 7473/7687 depuis snet-cae uniquement)"]
+        NEO[(neo4j-legacykb — ACI auto-hébergé\nIP privée, golden source, lecture seule\n:Entity · :Community\nCALLS · INCLUDES · IN_COMMUNITY\nREADS/INSERTS/UPDATES/DELETES · EXECUTES)]
     end
 
-    LKB -->|GET /api/legacykb/*| ROUTER
+    LKB -->|GET /api/legacykb/*\ncross-origin via NOTEBOOKLM_API_URL| ROUTER
     CHAT -->|POST /api/chat| GEN
     ROUTER --> CLIENT
     GEN -->|tool-calling auto| CLIENT
-    CLIENT -->|driver neo4j| NEO
+    CLIENT -->|driver neo4j, depuis snet-cae| NEO
 ```
+
+> **Pourquoi cross-origin en local** : `neo4j-legacykb` n'a plus d'IP publique et l'image Docker déployée ne contient jamais le frontend (aucune UI en production) — le seul moyen de parcourir visuellement le graphe est donc le frontend local appelant `ca-api` directement pour `/api/legacykb/*` (CORS + CSP `connect-src` ajustés en conséquence, cf. section 7).
 
 #### III. Composants et responsabilités
 
 **`frontend/src/LegacyKbPage.jsx`**
 
-Composant React (Babel standalone, React Flow + dagre vendorisés en UMD) gérant la vue complète :
-- `LegacyKbCanvas` — canvas React Flow (`Background`, `Controls`, `MiniMap`), nœuds custom `LegacyNode` (entités : pastille ronde colorée par `type` ; communautés : pastille carrée) et `ZoneNode` (regroupement visuel par communauté)
-- `_layout` — calcul d'un layout `dagre` (gauche → droite) sur le "bundle" courant (nœuds + arêtes chargés), avec simplification du schéma et résolution des chevauchements
+Composant React (Babel standalone, React Flow + d3-force vendorisés en UMD) gérant la vue complète :
+- `LegacyKbCanvas` — canvas React Flow (`Background`, `Controls`, `MiniMap`), nœud custom unique `LegacyNode` (carré 90×90, entités et communautés confondues — couleur par `type`/niveau de domaine)
+- `_prepareSimulation` — prépare la topologie (nœuds/liens, amorçage concentrique par distance BFS depuis le centre) ; la disposition finale est calculée en continu par une simulation `d3-force` (liens, répulsion, anti-collision) lancée dans le composant, pas par un layout statique
 - Recherche (`legacykb_search`), navigation par domaine fonctionnel (`DomainBreadcrumb`, communautés niveau 2)
 - Exploration progressive : double-clic sur un nœud → charge son voisinage (`/legacykb/nodes/{id}/neighbors`) et le fusionne dans le bundle
 - `NodeDetailPanel` — résumé exécutif dépliable (`ExpandableText`), compteurs de relations par type (`RelationBars`), tags techniques détectés (`TechTagList`)
@@ -1513,7 +1558,45 @@ Tools function-calling pour GPT-4o (`LEGACYKB_TOOL_DEFINITIONS`, exécutés par 
 (:Entity)     -[:EXECUTES]->         (:Entity)        -- exécution par un batch job
 ```
 
-#### V. Recentrage et redisposition de la vue
+#### V. Pipeline d'alimentation de la base Neo4j
+
+La base `neo4j-legacykb` est peuplée à partir d'un dump GraphML généré par le pipeline GraphRAG (extraction des entités et relations depuis le corpus CardDemo). Ce pipeline est **externe** à NotebookLM Azure — il produit le fichier `repartition_cleaned_export.graphml`.
+
+```mermaid
+flowchart LR
+    A[🗂️ Corpus CardDemo\nCOBOL · JCL · copybooks] --> B[Pipeline GraphRAG\nextraction entités + relations]
+    B --> C[repartition_cleaned_export.graphml\ningest/extract/]
+    C --> D[import-neo4j-legacykb.ps1\nautomatique via deploy.ps1]
+    D --> E[az storage file upload\nAzure Files neo4j-import\ncontrol-plane, fonctionne malgré le VNet]
+    E --> F[Container Apps Job\ncaj-import-legacykb-&lt;suffix&gt;\ndepuis snet-cae]
+    F --> G2[apoc.import.graphml\nvia driver neo4j, réseau privé]
+    G2 --> G[(neo4j-legacykb\n5 812 nœuds\n19 368 relations)]
+    G -->|automatique| H[fix_utf8.cypher\ncorrection double-encodage\ndes nœuds :Community]
+    F -->|dépose le résultat JSON| E
+```
+
+> **Pourquoi un Job intermédiaire** : `neo4j-legacykb` n'a plus d'IP publique — le poste de l'opérateur ne peut plus s'y connecter en HTTPS/Bolt directement. `import-neo4j-legacykb.ps1` se limite donc à de l'upload control-plane (Azure Files par clé de compte, toujours accessible) puis déclenche le Container Apps Job `caj-import-legacykb-<suffix>` (`python -m api.scripts.import_legacykb`), qui s'exécute lui-même dans `snet-cae` — seul sous-réseau autorisé par le NSG de `neo4j-legacykb` — pour effectuer l'import. Le mot de passe Neo4j n'est plus manipulé par l'opérateur : le Job le charge depuis Key Vault via sa Managed Identity.
+
+**Étapes du script `import-neo4j-legacykb.ps1` :**
+
+| Étape | Description |
+|-------|-------------|
+| **1. Upload** | Upload de `repartition_cleaned_export.graphml` dans le partage Azure Files monté en `/var/lib/neo4j/import/` via `az storage file upload` (clé de compte — control-plane Azure Storage, fonctionne même si `neo4j-legacykb` est en réseau privé) |
+| **2. Déclenchement du Job** | `az containerapp job update --set-env-vars DUMP_FILENAME=... PURGE_BEFORE_IMPORT=...` puis `az containerapp job start` sur `caj-import-legacykb-<suffix>` |
+| **3. Exécution du Job (dans le VNet)** | Le Job attend que Neo4j soit joignable, exécute `CALL apoc.import.graphml('file:///var/lib/neo4j/import/...', {readLabels: true})` puis le correctif UTF-8, et dépose un résultat JSON dans le partage Azure Files |
+| **4. Lecture du résultat** | `import-neo4j-legacykb.ps1` attend la fin de l'exécution (`az containerapp job execution show`, jusqu'à 10 min) puis relit le résultat via `az storage file download` |
+
+**Relancer l'import sans redéploiement :**
+
+```powershell
+.\import-neo4j-legacykb.ps1 -ResourceGroup rg-<ProjectName>-prod
+```
+
+`-StorageAccountName` et `-JobName` sont découverts automatiquement depuis `-ResourceGroup` ; le mot de passe Neo4j n'est plus demandé (chargé par le Job depuis Key Vault).
+
+Voir **[GUIDE-DEPLOIEMENT.md § Mettre à jour le dump GraphML](GUIDE-DEPLOIEMENT.md#mettre-à-jour-le-dump-graphml-dans-neo4j-sans-redéploiement-complet)** pour le détail.
+
+#### VI. Recentrage et redisposition de la vue
 
 | Action | Déclencheur | Effet |
 |---|---|---|
@@ -1530,7 +1613,12 @@ Les deux actions mettent à jour `centerId`/`selectedId` ; `_layout` reconstruit
 
 | Symptôme | Cause | Action |
 |---|---|---|
-| `GET /api/legacykb/*` → 502 | `neo4j-legacykb` injoignable ou `NEO4J_LEGACYKB_PASSWORD` absent | Vérifier la configuration Neo4j AuraDB / Key Vault |
+| `GET /api/legacykb/*` → 502 (depuis `ca-api`) | `neo4j-legacykb` injoignable ou `NEO4J_LEGACYKB_PASSWORD` absent | Vérifier que l'ACI est démarré et joignable depuis `snet-cae` (NSG), et la configuration Key Vault |
+| `GET /api/legacykb/*` → erreur réseau (depuis le backend local, `start-dev.ps1`) | `neo4j-legacykb` n'a plus d'IP publique — le poste local ne peut pas l'atteindre directement (pas de VPN/Bastion) | Comportement attendu ; vérifier que `NOTEBOOKLM_API_URL` est défini dans `.env` (le frontend local doit appeler `ca-api` en cross-origin, pas le backend local) |
+| Page Legacy KB locale bloquée par CORS/CSP | `CORS_ALLOWED_ORIGINS` non configuré sur `ca-api`, ou CSP `connect-src` n'autorise pas `NOTEBOOKLM_API_URL` | Vérifier le paramètre Bicep `corsAllowedOrigins` sur `ca-api` et que `.env` local définit `NOTEBOOKLM_API_URL` |
+| Graphe vide — aucun nœud affiché | Import GraphML non exécuté ou échoué | Relancer `import-neo4j-legacykb.ps1` ; vérifier que `repartition_cleaned_export.graphml` est dans `ingest/extract/` (pas `docs/extract/`, exclu de Git en entier) |
+| Import échoue avec `ManagedEnvironmentCannotAddVnetToExistingEnv` ou `SubnetIdCannotChange` | Tentative d'appliquer cette architecture réseau à un déploiement Container Apps/ACI préexistant | Voir GUIDE-DEPLOIEMENT.md § Réseau privé — recréation forcée nécessaire (RG vierge non affecté) |
+| Titres Community illisibles (`Ã©` au lieu de `é`) | Double-encodage UTF-8/Latin-1 lors de l'import APOC | Le correctif `fix_utf8.cypher` est appliqué automatiquement par le Job d'import (`caj-import-legacykb-<suffix>`) |
 | `GET /api/legacykb/nodes/{id}` → 404 | Identifiant mal formé ou nœud absent du dump | Vérifier le format `e|{type}|{name}` ou `c|{id}` (cf. `legacykb_client.parse_node_id`) |
 | Réponses du Chat sans `graph_references` sur une question CardDemo | GPT-4o n'a pas invoqué les tools `legacykb_*` | Vérifier le system prompt (`_LEGACYKB_TOOLS_BLOCK` dans `generator.py`) et le mode (Rapide a un prompt tools réduit) |
 | `window.ReactFlow` / `window.dagre` undefined | Script vendor non chargé ou ordre incorrect dans `index.html` | Vérifier `jsx-runtime-shim.js` → `xyflow-react.umd.js` → `dagre.min.js` avant `LegacyKbPage.jsx` |

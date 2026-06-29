@@ -28,15 +28,9 @@ async def chat(request_data: ChatRequest, request: Request):
         logger.exception("Erreur lors de la récupération des chunks : %s", e)
         raise HTTPException(status_code=503, detail="Service de recherche temporairement indisponible.")
 
-    if not chunks:
-        return ChatResponse(
-            answer="Aucun document pertinent trouvé pour cette question. Vérifiez que l'ingestion a bien été effectuée.",
-            session_id=session_id,
-            sources=[],
-            tokens_used=0,
-            graph_references=[],
-        )
-
+    # Pas de court-circuit si `chunks` est vide : le Generator est appelé quand même,
+    # car il peut répondre via les tools legacykb_* (base de connaissances legacy
+    # CardDemo) même en l'absence de documents pertinents dans l'index vectoriel.
     try:
         answer, tokens_used, graph_refs, graph_action = generator.generate(
             query=request_data.message,

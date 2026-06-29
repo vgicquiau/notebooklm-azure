@@ -1,4 +1,4 @@
-# start-dev.ps1 — Lance le serveur NotebookLM Azure en local
+﻿# start-dev.ps1 — Lance le serveur NotebookLM Azure en local
 # Usage : depuis VS Code (Ctrl+Shift+B) ou directement dans un terminal PowerShell
 #
 # -SkipSSL : sur poste avec proxy d'entreprise (Zscaler, Forcepoint...) qui intercepte le TLS,

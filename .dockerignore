@@ -20,6 +20,7 @@ infra/
 docs/
 azure-functions/
 doc-archimind/
+Generation/
 *.ps1
 
 # Git

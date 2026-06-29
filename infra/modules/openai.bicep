@@ -54,3 +54,5 @@ resource embeddingDeployment 'Microsoft.CognitiveServices/accounts/deployments@2
 
 output endpoint string = openai.properties.endpoint
 output name string = openai.name
+output gpt4oDeploymentName string = gpt4oDeployment.name
+output embeddingDeploymentName string = embeddingDeployment.name

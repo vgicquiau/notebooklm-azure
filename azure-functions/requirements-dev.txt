@@ -1,7 +1,0 @@
-# Dépendances de développement/test pour les Azure Functions ADG-M.
-# Installer en complément de requirements.txt : pip install -r requirements-dev.txt
-#
-# Utilisé par fn-adgm-graph/tests/ (T0-T-01 et suivants, cf.
-# notebooklm-azure/docs/specs/PLAN_EXPLORATION_v1.md).
-
-pytest==8.3.2

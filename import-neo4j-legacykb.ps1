@@ -1,131 +1,297 @@
-#Requires -Version 5.1
+﻿#Requires -Version 5.1
 <#
 .SYNOPSIS
-    Upload du dump GraphML vers le conteneur neo4j-legacykb et import via APOC.
+    Upload du dump (GraphML ou JSONL) vers le conteneur neo4j-legacykb et import via le Job dédié.
 
 .DESCRIPTION
-    Appelé automatiquement par deploy.ps1 après le déploiement Bicep. Peut aussi être
-    relancé seul (ex. après mise à jour du dump GraphML) sans redéployer toute
-    l'infrastructure :
+    Appelé automatiquement par deploy.ps1 après le déploiement Bicep (quand
+    deployLegacyKb=true). Peut aussi être relancé seul à tout moment — après mise à
+    jour du dump, ou pour repeupler une nouvelle instance neo4j-legacykb
+    (nouveau -ProjectName, nouveau Resource Group...) — sans rien redéployer :
 
-    1. Upload le fichier GraphML dans le partage Azure Files monté sur le conteneur.
-    2. Attend que l'API HTTP de Neo4j (port 7474) réponde (jusqu'à 3 minutes — le temps
-       que le conteneur démarre et installe le plugin APOC).
-    3. Exécute `CALL apoc.import.graphml(...)` via l'API transactionnelle HTTP de Neo4j.
+    1. Upload le fichier (GraphML ou JSONL, cf. -DumpPath) dans le partage Azure Files
+       monté sur le conteneur (control-plane Azure Storage — clé de compte, pas
+       d'accès réseau à neo4j-legacykb).
+    2. Déclenche le Container Apps Job `caj-import-legacykb-*` (AUDIT-2026-06), qui
+       détecte le format par l'extension du fichier et exécute le reste de la logique
+       (attente démarrage, purge optionnelle, import -- `apoc.import.graphml` pour
+       `.graphml`, création par lots via APOC pour `.jsonl`, cf. api/scripts/import_legacykb.py)
+       depuis l'intérieur du VNet — seul point d'accès autorisé à neo4j-legacykb
+       depuis que celui-ci a perdu son IP publique (cf. infra/modules/network.bicep).
+    3. Attend la fin de l'exécution du Job et affiche son résultat (déposé par le Job
+       lui-même dans le partage Azure Files, relu ici via control-plane).
+
+    -StorageAccountName et -JobName sont optionnels : si omis, ils sont découverts
+    automatiquement depuis -ResourceGroup. Seul -ResourceGroup est donc nécessaire
+    dans le cas courant — le mot de passe neo4j n'est plus demandé ici : le Job le
+    charge lui-même depuis Key Vault (AUDIT-2026-06).
 
 .PARAMETER ResourceGroup
-    Resource Group contenant le storage account et le conteneur ACI.
+    Resource Group contenant le storage account, le conteneur ACI et le Job neo4j-legacykb.
 
 .PARAMETER StorageAccountName
-    Nom du storage account dédié (output Bicep `neo4jLegacyKbStorageAccount`).
+    Nom du storage account dédié. Découvert automatiquement depuis -ResourceGroup si omis.
 
 .PARAMETER ShareName
-    Nom du partage Azure Files (output Bicep `neo4jLegacyKbShareName`, défaut "neo4j-import").
+    Nom du partage Azure Files (défaut "neo4j-import").
 
-.PARAMETER Fqdn
-    FQDN du conteneur ACI (ex. neo4j-legacykb-nlmavgi-prod.swedencentral.azurecontainer.io).
-
-.PARAMETER Neo4jPassword
-    Mot de passe du compte neo4j (utilisateur fixe "neo4j").
+.PARAMETER JobName
+    Nom du Container Apps Job d'import (ex. caj-import-legacykb-nlmrep-prod).
+    Découvert automatiquement depuis -ResourceGroup si omis.
 
 .PARAMETER DumpPath
-    Chemin du fichier GraphML à importer. Défaut : docs/extract/repartition_cleaned_export.graphml.
+    Chemin du fichier à importer -- .graphml ou .jsonl (format détecté par l'extension
+    côté Job, cf. api/scripts/import_legacykb.py). Défaut :
+    ingest/extract/repartition_cleaned_export.graphml -- ce dossier (contrairement à
+    docs/extract/, utilisé avant et totalement exclu de Git) est suivi par Git : il existe
+    donc déjà après un `git clone`, à charge de l'utilisateur d'y déposer son propre fichier
+    (voir ingest/extract/README.md, lui aussi suivi par Git).
+
+.PARAMETER ProjectName
+    Préfixe du projet (suffixe des ressources "*-legacykb-<ProjectName>-<Environment>").
+    Nécessaire seulement si -ResourceGroup contient plusieurs instances neo4j-legacykb
+    (ex. plusieurs déploiements successifs sous des noms de projet différents) — sinon
+    l'instance unique trouvée est utilisée automatiquement.
+
+.PARAMETER Environment
+    Suffixe d'environnement (défaut "prod"). Utilisé avec -ProjectName pour désambiguïser.
+
+.PARAMETER SkipSSL
+    Bypass SSL pour proxy d'entreprise (Zscaler, Forcepoint, etc.) — même mécanisme que deploy.ps1.
+
+.PARAMETER PurgeBeforeImport
+    Supprime tous les nœuds et relations existants (`MATCH (n) DETACH DELETE n`) avant
+    l'import. Pour un dump GraphML, sans ce flag l'import est additif (upsert par
+    propriété `id` — voir DESCRIPTION) : les nœuds absents du nouveau dump mais déjà
+    présents en base restent en place. Pour un dump JSONL, l'import crée TOUJOURS de
+    nouveaux nœuds (pas d'upsert) — réimporter sans -PurgeBeforeImport duplique tout.
+    Destructif et irréversible — flag explicite opt-in, aucune confirmation
+    interactive n'est redemandée.
 
 .EXAMPLE
-    .\import-neo4j-legacykb.ps1 -ResourceGroup rg-nlmavgi-prod `
-        -StorageAccountName stneo4jkbnlmavgiprod -ShareName neo4j-import `
-        -Fqdn neo4j-legacykb-nlmavgi-prod.swedencentral.azurecontainer.io `
-        -Neo4jPassword (Get-Content secret.txt)
+    # Cas courant : une seule instance neo4j-legacykb dans le RG — tout est découvert
+    # automatiquement
+    .\import-neo4j-legacykb.ps1 -ResourceGroup rg-sp5-d-vgi-azu-repart-nlm-txt -SkipSSL
+
+.EXAMPLE
+    # Repartir d'une base vide (nouveau dump ayant retiré des nœuds depuis le dernier
+    # import) plutôt que de purger manuellement via le browser Neo4j
+    .\import-neo4j-legacykb.ps1 -ResourceGroup rg-sp5-d-vgi-azu-repart-nlm-txt -PurgeBeforeImport -SkipSSL
+
+.EXAMPLE
+    # Plusieurs instances neo4j-legacykb dans le meme RG (deploiements successifs) —
+    # -ProjectName desambiguise laquelle cibler
+    .\import-neo4j-legacykb.ps1 -ResourceGroup rg-sp5-d-vgi-azu-repart-nlm-txt -ProjectName nlmrep -SkipSSL
+
+.EXAMPLE
+    # Import d'un export au format JSONL (ex. généré par un autre outil que le pipeline
+    # GraphRAG habituel) -- format détecté automatiquement par l'extension du fichier
+    .\import-neo4j-legacykb.ps1 -ResourceGroup rg-sp5-d-vgi-azu-repart-nlm-txt `
+        -DumpPath ingest\extract\mon_export.jsonl -PurgeBeforeImport -SkipSSL
 #>
 param(
     [Parameter(Mandatory)] [string]$ResourceGroup,
-    [Parameter(Mandatory)] [string]$StorageAccountName,
+    [string]$StorageAccountName = "",
     [string]$ShareName = "neo4j-import",
-    [Parameter(Mandatory)] [string]$Fqdn,
-    [Parameter(Mandatory)] [SecureString]$Neo4jPassword,
-    [string]$DumpPath = ""
+    [string]$JobName = "",
+    [string]$ProjectName = "",
+    [string]$Environment = "prod",
+    [string]$DumpPath = "",
+    [switch]$SkipSSL,
+    [switch]$PurgeBeforeImport
 )
 
 $ErrorActionPreference = "Stop"
 $ProjectRoot = $PSScriptRoot
 
+function Remove-FileSafe([string]$Path) {
+    # Remove-Item échoue sur les comptes Windows dont le nom contient un point (ex.
+    # "v.gicquiau" -> %TEMP% en 8.3 short-name "V5C98~1.GIC") avec une PSArgumentException
+    # qui bypass -ErrorAction. [System.IO.File]::Delete() contourne le provider PowerShell.
+    try { [System.IO.File]::Delete($Path) } catch {}
+}
+
+# Trouve, parmi une liste de ressources nommées "<prefix>-legacykb-*", celle qui
+# correspond à -ProjectName/-Environment (ou l'unique candidate si pas d'ambiguïté).
+# Factorisé : utilisé à la fois pour le conteneur ACI et pour le Container Apps Job.
+function Select-LegacyKbResource([array]$Candidates, [string]$Prefix, [string]$Kind) {
+    if ($Candidates.Count -eq 0) {
+        Write-Host "  ERREUR : aucune ressource '$Prefix-legacykb-*' ($Kind) trouvee dans '$ResourceGroup'." -ForegroundColor Red
+        exit 1
+    } elseif ($Candidates.Count -eq 1) {
+        return $Candidates[0]
+    } elseif ($ProjectName) {
+        $expectedName = "$Prefix-legacykb-$ProjectName-$Environment"
+        $found = $Candidates | Where-Object { $_.name -eq $expectedName } | Select-Object -First 1
+        if (-not $found) {
+            Write-Host "  ERREUR : aucune ressource nommee '$expectedName' ($Kind) parmi les $($Candidates.Count) trouvees :" -ForegroundColor Red
+            foreach ($c in $Candidates) { Write-Host "           - $($c.name)" -ForegroundColor DarkGray }
+            exit 1
+        }
+        return $found
+    } else {
+        Write-Host "  ERREUR : $($Candidates.Count) ressources '$Prefix-legacykb-*' ($Kind) trouvees dans '$ResourceGroup' — ambigu :" -ForegroundColor Red
+        foreach ($c in $Candidates) { Write-Host "           - $($c.name)" -ForegroundColor DarkGray }
+        Write-Host "           Precisez -ProjectName (et -Environment si different de 'prod')." -ForegroundColor DarkGray
+        exit 1
+    }
+}
+
+# ── SSL proxy d'entreprise (même mécanisme que deploy.ps1 Phase 1) ─────────────
+if ($SkipSSL) {
+    az config set core.verify_ssl=false --only-show-errors 2>&1 | Out-Null
+    $certifiBundle = "C:\Program Files\Microsoft SDKs\Azure\CLI2\Lib\site-packages\certifi\cacert.pem"
+    if (Test-Path $certifiBundle) {
+        $tempBundle = "$env:TEMP\import_neo4j_cacert_zscaler.pem"
+        Copy-Item $certifiBundle $tempBundle -Force
+        $zscalerCerts = @(Get-ChildItem Cert:\LocalMachine\Root, Cert:\CurrentUser\Root -ErrorAction SilentlyContinue |
+            Where-Object { $_.Subject -match "Zscaler" })
+        foreach ($cert in $zscalerCerts) {
+            $pem = "-----BEGIN CERTIFICATE-----`n" +
+                   [Convert]::ToBase64String($cert.Export('Cert'), 'InsertLineBreaks') +
+                   "`n-----END CERTIFICATE-----`n"
+            Add-Content -Path $tempBundle -Value $pem -Encoding ascii
+        }
+        $env:REQUESTS_CA_BUNDLE = $tempBundle
+        Write-Host "        OK   $($zscalerCerts.Count) certificat(s) Zscaler injecte(s)" -ForegroundColor Green
+    }
+}
+
+# ── Découverte automatique du storage account et du Job d'import ───────────────
+if (-not $StorageAccountName) {
+    Write-Host "       Decouverte automatique de neo4j-legacykb dans '$ResourceGroup'..." -ForegroundColor DarkGray
+    # Filtrage cote PowerShell (Where-Object) plutot que via --query JMESPath : une
+    # chaine --query se terminant par "]" juste avant le guillemet fermant casse le
+    # relais az.cmd -> python.exe sur ce poste (les guillemets entourant l'argument
+    # disparaissent silencieusement, CMD.EXE choppe alors sur le "]" nu : "] etait inattendu").
+    $allAci = az container list -g $ResourceGroup -o json 2>&1 | ConvertFrom-Json
+    $aciCandidates = @($allAci | Where-Object { $_.name -like 'aci-neo4j-legacykb*' })
+    $aci = Select-LegacyKbResource $aciCandidates 'aci' 'conteneur ACI'
+
+    $aciDetail = az container show -g $ResourceGroup --name $aci.name -o json 2>&1 | ConvertFrom-Json
+    $StorageAccountName = ($aciDetail.volumes |
+        Where-Object { $_.azureFile.shareName -eq $ShareName } |
+        Select-Object -First 1).azureFile.storageAccountName
+    Write-Host "  OK   Conteneur : $($aci.name)  |  Storage : $StorageAccountName" -ForegroundColor Green
+}
+
+if (-not $JobName) {
+    $allJobs = az containerapp job list -g $ResourceGroup -o json 2>&1 | ConvertFrom-Json
+    $jobCandidates = @($allJobs | Where-Object { $_.name -like 'caj-import-legacykb*' })
+    $job = Select-LegacyKbResource $jobCandidates 'caj-import' 'Container Apps Job'
+    $JobName = $job.name
+    Write-Host "  OK   Job d'import : $JobName" -ForegroundColor Green
+}
+
+if (-not $StorageAccountName -or -not $JobName) {
+    Write-Host "  ERREUR : impossible de determiner StorageAccountName/JobName automatiquement." -ForegroundColor Red
+    Write-Host "           Precisez-les explicitement via -StorageAccountName et -JobName." -ForegroundColor DarkGray
+    exit 1
+}
+
 if (-not $DumpPath) {
-    $DumpPath = Join-Path $ProjectRoot "docs\extract\repartition_cleaned_export.graphml"
+    # ingest/extract/ (et pas docs/extract/, utilisé avant) -- docs/ est entierement exclu de
+    # Git (.gitignore), ce dossier n'existe donc pas du tout apres un `git clone` et un nouvel
+    # utilisateur ne pouvait pas savoir qu'il fallait le creer lui-meme. ingest/ est suivi par
+    # Git : ce dossier (et son README expliquant quoi y deposer) existent deja apres le clone.
+    $DumpPath = Join-Path $ProjectRoot "ingest\extract\repartition_cleaned_export.graphml"
 }
 
 if (-not (Test-Path $DumpPath)) {
-    Write-Host "  !!   Dump GraphML introuvable ($DumpPath) — import ignoré" -ForegroundColor Yellow
-    Write-Host "       Placez votre export dans docs/extract/ et relancez ce script." -ForegroundColor DarkGray
+    Write-Host "  !!   Dump introuvable ($DumpPath) — import ignoré" -ForegroundColor Yellow
+    Write-Host "       Deposez votre export (.graphml ou .jsonl) dans ingest\extract\ -- voir ingest\extract\README.md -- et relancez ce script." -ForegroundColor DarkGray
     exit 0
 }
 
 $dumpFileName = Split-Path $DumpPath -Leaf
 
-# ── 1. Upload du dump dans le partage Azure Files ───────────────────────────────
-# SEC-011 : --auth-mode login — identité Azure CLI / Managed Identity.
-# Aucune clé de compte n'est récupérée ni transmise en clair.
-# Prérequis : rôle "Storage File Data SMB Share Contributor" sur le compte de stockage.
-az storage file upload --share-name $ShareName --account-name $StorageAccountName --auth-mode login `
+# ── 1. Upload du dump dans le partage Azure Files (control-plane, clé de compte) ──
+# --auth-mode login nécessite soit le rôle "Storage File Data SMB Share Contributor"
+# (insuffisant pour les gros fichiers sans --enable-file-backup-request-intent), soit
+# "Storage File Data Privileged Contributor" (bypass ACL, rôle plus large). La clé de
+# compte évite cette dépendance RBAC supplémentaire pour cette opération ponctuelle —
+# rôle Contributor (déjà nécessaire pour le reste du déploiement) suffit pour la lire.
+$storageKey = az storage account keys list -g $ResourceGroup -n $StorageAccountName --query '[0].value' -o tsv 2>&1
+az storage file upload --share-name $ShareName --account-name $StorageAccountName --account-key $storageKey `
+    --no-progress `
     --source $DumpPath --path $dumpFileName --output none --only-show-errors 2>&1 | Out-Null
 Write-Host "  OK   Dump GraphML uploadé : $StorageAccountName/$ShareName/$dumpFileName" -ForegroundColor Green
 
-# ── 2. Attente disponibilité Neo4j (démarrage conteneur + installation APOC) ────
-# HTTP (7474) désactivé — health check sur HTTPS (7473) avec cert auto-signé accepté.
-Write-Host "       Attente démarrage de neo4j-legacykb (jusqu'à 3 min)…" -ForegroundColor DarkGray
-$ready = $false
-[System.Net.ServicePointManager]::ServerCertificateValidationCallback = { $true }
-for ($i = 0; $i -lt 36; $i++) {
-    try {
-        Invoke-WebRequest -Uri "https://${Fqdn}:7473" -TimeoutSec 5 -UseBasicParsing -ErrorAction Stop | Out-Null
-        $ready = $true
-        break
-    } catch {
-        Start-Sleep -Seconds 5
-    }
-}
-[System.Net.ServicePointManager]::ServerCertificateValidationCallback = $null
+# ── 2. Déclenchement du Job d'import (AUDIT-2026-06) ────────────────────────────
+# Le mot de passe neo4j n'est plus manipulé ici : le Job le charge lui-même depuis
+# Key Vault via sa Managed Identity (cf. api/scripts/import_legacykb.py).
+$purgeValue = if ($PurgeBeforeImport) { "true" } else { "false" }
+Write-Host "       Mise a jour des parametres du Job ($JobName)..." -ForegroundColor DarkGray
+# L'extension CLI "containerapp" écrit un spinner de progression sur stderr même en cas
+# de succès. Sous Windows PowerShell, tout texte stderr d'un exécutable natif devient un
+# ErrorRecord -- avec $ErrorActionPreference="Stop" (positionné en tête de script), ce
+# spinner suffit à déclencher un NativeCommandError fatal malgré un exit code 0, que le
+# flux soit redirigé (2>&1) ou non. On neutralise donc $ErrorActionPreference juste pour
+# ces appels (commandes "containerapp", pas "container"/"storage" -- celles-ci n'ont pas
+# ce spinner et ont fonctionné sans ce contournement plus haut dans le script).
+$prevEAP = $ErrorActionPreference
+$ErrorActionPreference = "Continue"
 
-if (-not $ready) {
-    Write-Host "  !!   neo4j-legacykb non joignable après 3 min — relancez ce script plus tard" -ForegroundColor Yellow
+az containerapp job update -g $ResourceGroup -n $JobName --only-show-errors --output none `
+    --set-env-vars "DUMP_FILENAME=$dumpFileName" "PURGE_BEFORE_IMPORT=$purgeValue" | Out-Null
+
+Write-Host "       Declenchement du Job d'import..." -ForegroundColor DarkGray
+$startResult = az containerapp job start -g $ResourceGroup -n $JobName -o json --only-show-errors | ConvertFrom-Json
+$ErrorActionPreference = $prevEAP
+
+$executionName = $startResult.name
+if (-not $executionName) {
+    Write-Host "  ERREUR : declenchement du Job echoue (pas de nom d'execution renvoye)." -ForegroundColor Red
+    exit 1
+}
+Write-Host "  OK   Execution declenchee : $executionName" -ForegroundColor Green
+
+# ── 3. Attente de la fin d'exécution (jusqu'à 10 min — replicaTimeout du Job) ────
+Write-Host "       Attente de la fin de l'import (jusqu'à 10 min)…" -ForegroundColor DarkGray
+$status = $null
+$ErrorActionPreference = "Continue"
+for ($i = 0; $i -lt 60; $i++) {
+    $execution = az containerapp job execution show -g $ResourceGroup -n $JobName --job-execution-name $executionName `
+        -o json --only-show-errors | ConvertFrom-Json
+    $status = $execution.properties.status
+    if ($status -in @('Succeeded', 'Failed')) { break }
+    Start-Sleep -Seconds 10
+}
+$ErrorActionPreference = $prevEAP
+
+if ($status -notin @('Succeeded', 'Failed')) {
+    Write-Host "  !!   Import toujours en cours après 10 min (statut : $status) — verifiez plus tard :" -ForegroundColor Yellow
+    Write-Host "       az containerapp job execution show -g $ResourceGroup -n $JobName --job-execution-name $executionName" -ForegroundColor DarkGray
     exit 0
 }
 
-# ── 3. Import GraphML via apoc.import.graphml (API transactionnelle HTTP) ───────
-# SecureString → texte brut uniquement le temps de construire le header Basic Auth,
-# immédiatement zéroïsé en mémoire après usage (SEC-002).
-$bstr      = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($Neo4jPassword)
-$plainPass = [System.Runtime.InteropServices.Marshal]::PtrToStringAuto($bstr)
-[System.Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr)
+# ── 4. Lecture du résultat (déposé par le Job dans le partage Azure Files) ──────
+$tmpResult = "$env:TEMP\$executionName-result.json"
+Remove-FileSafe $tmpResult
+az storage file download --share-name $ShareName --account-name $StorageAccountName --account-key $storageKey `
+    --path "$executionName-result.json" --dest $tmpResult --no-progress --output none --only-show-errors | Out-Null
 
-$authPair = [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes("neo4j:$plainPass"))
-$plainPass = $null  # Libère la référence dès que possible
-
-$cypher = "CALL apoc.import.graphml('file:///var/lib/neo4j/import/$dumpFileName', {readLabels: true}) YIELD nodes, relationships RETURN nodes, relationships"
-$body = @{ statements = @(@{ statement = $cypher }) } | ConvertTo-Json -Depth 5
-
-# Le certificat Bolt/HTTPS est auto-signé (généré par deploy.ps1) — on désactive
-# temporairement la validation TLS pour cet appel, puis on restaure avant de quitter.
-$_origCallback = [System.Net.ServicePointManager]::ServerCertificateValidationCallback
-[System.Net.ServicePointManager]::ServerCertificateValidationCallback = { $true }
-$resp = $null
-$_importError = $null
-try {
-    $resp = Invoke-RestMethod -Uri "https://${Fqdn}:7473/db/neo4j/tx/commit" -Method Post `
-        -Headers @{ Authorization = "Basic $authPair"; "Content-Type" = "application/json" } `
-        -Body $body -TimeoutSec 180
-} catch {
-    $_importError = $_.Exception.Message
-}
-[System.Net.ServicePointManager]::ServerCertificateValidationCallback = $_origCallback
-
-if ($_importError) {
-    Write-Host "  !!   Import GraphML échoué : $_importError" -ForegroundColor Yellow
+if (-not (Test-Path $tmpResult)) {
+    Write-Host "  !!   Job termine (statut $status) mais fichier de resultat introuvable." -ForegroundColor Yellow
+    Write-Host "       Pas de sous-commande 'logs' pour les Container Apps Jobs (CLI) -- consultez" -ForegroundColor DarkGray
+    Write-Host "       Log Analytics/Application Insights dans le portail Azure pour ce Job." -ForegroundColor DarkGray
     exit 0
 }
 
-if ($resp.errors.Count -gt 0) {
-    Write-Host "  !!   Import GraphML : $($resp.errors[0].message)" -ForegroundColor Yellow
-} else {
-    $row = $resp.results[0].data[0].row
-    Write-Host "  OK   Import GraphML terminé : $($row[0]) nœuds, $($row[1]) relations" -ForegroundColor Green
+$result = Get-Content $tmpResult -Raw | ConvertFrom-Json
+Remove-FileSafe $tmpResult
+
+if ($result.error) {
+    Write-Host "  !!   Import échoué : $($result.error)" -ForegroundColor Yellow
+    exit 0
 }
+
+if ($result.purge) {
+    Write-Host "  OK   Base purgée : $($result.purge.committed)/$($result.purge.total) nœud(s)/relation(s) supprimé(s)" -ForegroundColor Green
+}
+Write-Host "  OK   Import terminé : $($result.import.nodes) nœuds, $($result.import.relationships) relations" -ForegroundColor Green
+if ($result.fix_utf8 -and -not $result.fix_utf8.skipped) {
+    Write-Host "  OK   Correctif UTF-8 appliqué : $($result.fix_utf8.fixed_count) nœud(s) Community corrigé(s)" -ForegroundColor Green
+}
+
+if ($tempBundle) { Remove-FileSafe $tempBundle }

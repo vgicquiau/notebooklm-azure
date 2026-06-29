@@ -4,6 +4,7 @@ import mimetypes
 import os
 import secrets
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 # Enregistrement explicite des MIME types — nécessaire sur Windows où le registre
 # ne les déclare pas toujours (sans cela, X-Content-Type-Options: nosniff bloque les scripts)
@@ -15,9 +16,9 @@ mimetypes.add_type("text/plain", ".md")
 from azure.identity import DefaultAzureCredential, ManagedIdentityCredential
 from azure.keyvault.secrets import SecretClient
 from dotenv import load_dotenv
-from fastapi import FastAPI, Request, HTTPException
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import Response
+from fastapi.responses import JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.base import BaseHTTPMiddleware
 
@@ -29,7 +30,10 @@ from api.services.retriever import Retriever
 from api.services.generator import Generator
 from api.services import session_store
 
-load_dotenv()
+# Chemin explicite -- sans argument, find_dotenv() remonte depuis le dossier de CE
+# fichier (api/), pas depuis le cwd : il trouve api/.env (legacy, désynchronisé) avant
+# d'atteindre le .env racine généré par deploy.ps1, qui ne serait alors jamais chargé.
+load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -44,6 +48,13 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
         response.headers["X-Frame-Options"] = "DENY"
         response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
         response.headers["Permissions-Policy"] = "geolocation=(), microphone=(), camera=()"
+        # AUDIT-2026-06 : neo4j-legacykb n'a plus d'IP publique -- le frontend local appelle
+        # ca-api (NOTEBOOKLM_API_URL) en direct pour /api/legacykb/* (cf. Header.jsx,
+        # LegacyKbPage.jsx). Sans cet ajout à connect-src, le navigateur bloque ces appels
+        # même une fois le JS à jour chargé (CSP, pas juste CORS). N'a d'effet qu'en local :
+        # cette route/middleware ne s'exécute jamais en production (pas de frontend déployé).
+        legacykb_api_url = os.environ.get("NOTEBOOKLM_API_URL", "")
+        connect_src = "connect-src 'self'" + (f" {legacykb_api_url}" if legacykb_api_url else "") + "; "
         response.headers["Content-Security-Policy"] = (
             "default-src 'self'; "
             # 'unsafe-inline' requis par Babel standalone (transpilation dans le navigateur).
@@ -53,7 +64,7 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
             "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
             "font-src 'self' https://fonts.gstatic.com; "
             "img-src 'self' data:; "
-            "connect-src 'self'; "
+            + connect_src +
             "frame-ancestors 'none';"
         )
         # HSTS : force HTTPS pour les navigateurs qui ont déjà chargé la page en HTTPS.
@@ -68,9 +79,22 @@ _UNPROTECTED_PREFIXES = ("/health",)
 _STATIC_PREFIX = "/api/"
 
 
+def _running_in_azure() -> bool:
+    return bool(os.environ.get("WEBSITE_INSTANCE_ID") or os.environ.get("CONTAINER_APP_NAME"))
+
+
 class APIKeyMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
         path = request.url.path
+
+        # Préflight CORS : toujours laissé passer sans auth (ne transporte aucune donnée,
+        # le navigateur l'envoie avant la vraie requête). APIKeyMiddleware s'exécute avant
+        # CORSMiddleware (Starlette empile les middlewares dans l'ordre inverse de
+        # add_middleware -- le dernier ajouté est le plus interne) : sans ce contournement,
+        # le navigateur reçoit un 401 au lieu des en-têtes CORS et bloque la vraie requête
+        # (AUDIT-2026-06, découvert en activant CORS pour la première fois).
+        if request.method == "OPTIONS":
+            return await call_next(request)
 
         # Liveness probe et assets statiques ne nécessitent pas d'auth
         if not path.startswith(_STATIC_PREFIX) or any(
@@ -81,6 +105,11 @@ class APIKeyMiddleware(BaseHTTPMiddleware):
         # Lecture lazily à chaque requête — permet que Key Vault ait chargé la clé au startup
         api_key = os.environ.get("API_KEY", "")
         if not api_key:
+            # Fail-closed en production (AUDIT-2026-06 finding critique : un échec silencieux
+            # du chargement Key Vault ouvrait auparavant l'API sans authentification). En local,
+            # on garde le fail-open pour le confort de développement (cf. avertissement au démarrage).
+            if _running_in_azure():
+                return JSONResponse(status_code=503, content={"detail": "Service indisponible (clé API non chargée)."})
             return await call_next(request)
 
         # Accepte Authorization: Bearer <key> ou X-API-Key: <key>
@@ -93,7 +122,10 @@ class APIKeyMiddleware(BaseHTTPMiddleware):
             provided = x_api_key
 
         if not provided or not secrets.compare_digest(provided, api_key):
-            raise HTTPException(status_code=401, detail="Non autorisé.")
+            # Lever HTTPException ici ne serait pas converti en réponse JSON propre :
+            # BaseHTTPMiddleware.dispatch() est en dehors du middleware de gestion
+            # d'exceptions de Starlette, donc l'exception remonterait en 500 brut.
+            return JSONResponse(status_code=401, content={"detail": "Non autorisé."})
 
         return await call_next(request)
 
@@ -108,7 +140,7 @@ def _load_secrets_from_keyvault():
 
     try:
         client_id = os.environ.get("AZURE_CLIENT_ID")
-        if client_id and (os.environ.get("WEBSITE_INSTANCE_ID") or os.environ.get("CONTAINER_APP_NAME")):
+        if client_id and _running_in_azure():
             credential = ManagedIdentityCredential(client_id=client_id)
         else:
             credential = DefaultAzureCredential()
@@ -141,11 +173,14 @@ def _load_secrets_from_keyvault():
 async def lifespan(app: FastAPI):
     _load_secrets_from_keyvault()
     if not os.environ.get("API_KEY"):
-        logger.warning("API_KEY non défini — authentification désactivée. Définir API_KEY en production.")
+        if _running_in_azure():
+            logger.warning("API_KEY non chargée — l'API refusera toutes les requêtes /api/* (fail-closed) jusqu'à résolution.")
+        else:
+            logger.warning("API_KEY non défini — authentification désactivée (mode développement local).")
     session_store.init_db()
 
     client_id = os.environ.get("AZURE_CLIENT_ID")
-    if client_id and (os.environ.get("WEBSITE_INSTANCE_ID") or os.environ.get("CONTAINER_APP_NAME")):
+    if client_id and _running_in_azure():
         credential = ManagedIdentityCredential(client_id=client_id)
     else:
         credential = DefaultAzureCredential()
@@ -197,15 +232,22 @@ frontend_dir = os.path.join(os.path.dirname(__file__), "..", "frontend")
 if os.path.exists(frontend_dir):
     @app.get("/", response_class=Response, include_in_schema=False)
     async def index():
-        """Sert index.html avec l'API key injectée comme <meta> (SEC-001).
-        L'endpoint /api/config a été supprimé — la clé n'est plus accessible
-        sans avoir d'abord chargé la page (elle n'est plus accessible à un
-        curl anonyme)."""
+        """Sert index.html avec l'API key injectée comme <meta>.
+        N'existe qu'en local : l'image Docker déployée sur Azure ne contient
+        pas frontend/ (cf. api/Dockerfile), donc cette route et le mount
+        StaticFiles ci-dessous ne sont jamais actifs en production — le
+        Container App ne sert que l'API JSON, jamais de page web publique."""
         index_path = os.path.join(frontend_dir, "index.html")
         with open(index_path, encoding="utf-8") as f:
             content = f.read()
         api_key = os.environ.get("API_KEY", "")
         meta = f'  <meta name="nlaz-api-key" content="{_html.escape(api_key, quote=True)}">\n'
+        # AUDIT-2026-06 : neo4j-legacykb n'a plus d'IP publique -- ce backend local ne peut
+        # plus l'atteindre directement. Le frontend appelle ca-api (intégré au VNet) en
+        # direct pour les routes /api/legacykb/* (cf. Header.jsx, LegacyKbPage.jsx).
+        legacykb_api_url = os.environ.get("NOTEBOOKLM_API_URL", "")
+        if legacykb_api_url:
+            meta += f'  <meta name="nlaz-legacykb-api-url" content="{_html.escape(legacykb_api_url, quote=True)}">\n'
         content = content.replace("</head>", meta + "</head>", 1)
         return Response(content=content, media_type="text/html")
 
