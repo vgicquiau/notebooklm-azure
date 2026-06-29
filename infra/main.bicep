@@ -35,11 +35,30 @@ param apiKey string = ''
 @description('Email pour les alertes Azure Monitor (redémarrages ACI neo4j-legacykb). Laisser vide pour désactiver les alertes.')
 param alertEmail string = ''
 
+@description('Origines CORS autorisées sur ca-api, séparées par des virgules. Défaut : origine de start-dev.ps1 (AUDIT-2026-06, frontend local appelant /api/legacykb/* directement puisque neo4j-legacykb n\'a plus d\'IP publique). Vide = CORS désactivé.')
+param corsAllowedOrigins string = 'http://127.0.0.1:8000'
+
 var suffix = '${projectName}-${environment}'
+// Tags obligatoires (policy abonnement "Agentic Studio — Baseline Security", découverte
+// lors de la migration réseau AUDIT-2026-06 -- absente lors des déploiements précédents,
+// donc jamais déclenchée avant la création de nouvelles ressources réseau type VNet/NSG).
+// Squad/CostCenter : valeurs génériques en attendant les vraies valeurs organisationnelles.
 var tags = {
-  project: projectName
-  environment: environment
-  managedBy: 'bicep'
+  Squad: 'notebooklm-azure'
+  Environment: environment
+  CostCenter: 'unknown'
+  ManagedBy: 'bicep'
+  Project: projectName
+}
+
+// ── Réseau privé pour neo4j-legacykb (AUDIT-2026-06, finding haut CVSS 8.3) ─────
+module network 'modules/network.bicep' = {
+  name: 'network'
+  params: {
+    suffix: suffix
+    location: location
+    tags: tags
+  }
 }
 
 // ── Monitoring (déployé en premier pour avoir l'instrumentation key) ──────────
@@ -122,6 +141,7 @@ module neo4jLegacyKb 'modules/neo4j-legacykb.bicep' = if (deployLegacyKb) {
     tags: tags
     neo4jPassword: neo4jLegacyKbPassword
     alertEmail: alertEmail
+    aciSubnetId: network.outputs.aciSubnetId
   }
 }
 
@@ -139,6 +159,10 @@ module containerapp 'modules/containerapp.bicep' = {
     registryLoginServer: registry.outputs.loginServer
     gpt4oDeploymentName: openai.outputs.gpt4oDeploymentName
     embeddingDeploymentName: openai.outputs.embeddingDeploymentName
+    caeSubnetId: network.outputs.caeSubnetId
+    legacyKbImportStorageAccount: deployLegacyKb ? neo4jLegacyKb.?outputs.?storageAccountName ?? '' : ''
+    legacyKbImportShareName: deployLegacyKb ? neo4jLegacyKb.?outputs.?shareName ?? '' : ''
+    corsAllowedOrigins: corsAllowedOrigins
   }
 }
 
@@ -252,7 +276,10 @@ output searchEndpoint string = search.outputs.endpoint
 output storageAccountName string = storage.outputs.accountName
 output docIntEndpoint string = docint.outputs.endpoint
 output neo4jLegacyKbUri string = neo4jLegacyKb.?outputs.?uri ?? ''
-output neo4jLegacyKbFqdn string = neo4jLegacyKb.?outputs.?fqdn ?? ''
+// Remplace neo4jLegacyKbFqdn (AUDIT-2026-06) : plus de FQDN public, seulement une IP
+// privée dans snet-aci-legacykb — consommée par deploy.ps1 pour générer le certificat
+// TLS (SAN IP plutôt que SAN DNS) et par import-neo4j-legacykb.ps1 (cf. ce script).
+output neo4jLegacyKbPrivateIp string = neo4jLegacyKb.?outputs.?privateIp ?? ''
 output neo4jLegacyKbStorageAccount string = neo4jLegacyKb.?outputs.?storageAccountName ?? ''
 output neo4jLegacyKbShareName string = neo4jLegacyKb.?outputs.?shareName ?? ''
 output neo4jLegacyKbSslShareName string = neo4jLegacyKb.?outputs.?sslShareName ?? ''

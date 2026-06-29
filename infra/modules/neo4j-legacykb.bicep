@@ -9,10 +9,12 @@ param neo4jPassword string
 @description('Email destinataire des alertes Azure Monitor (redémarrages ACI). Vide = alertes désactivées.')
 param alertEmail string = ''
 
+@description('ID du sous-réseau délégué à Microsoft.ContainerInstance/containerGroups (AUDIT-2026-06 : déploiement VNet, plus d\'IP publique — cf. infra/modules/network.bicep).')
+param aciSubnetId string
+
 var storageName = take(replace('stneo4jkb${suffix}', '-', ''), 24)
 var shareName = 'neo4j-import'
 var sslShareName = 'neo4j-ssl'
-var dnsLabel = 'neo4j-legacykb-${suffix}'
 
 // Storage account dédié (allowSharedKeyAccess: true, requis pour le montage Azure File
 // par clé sur ACI — le storage account principal a allowSharedKeyAccess: false).
@@ -61,9 +63,17 @@ resource containerGroup 'Microsoft.ContainerInstance/containerGroups@2023-05-01'
   properties: {
     osType: 'Linux'
     restartPolicy: 'OnFailure'
+    // Déploiement dans snet-aci-legacykb (network.bicep) : IP privée uniquement, plus
+    // d'IP publique/DNS label. Le NSG du sous-réseau n'autorise en entrée que snet-cae
+    // (ca-api) sur 7473/7687 (AUDIT-2026-06, finding haut CVSS 8.3).
+    subnetIds: [
+      {
+        id: aciSubnetId
+        name: 'aci-legacykb-nic'
+      }
+    ]
     ipAddress: {
-      type: 'Public'
-      dnsNameLabel: dnsLabel
+      type: 'Private'
       ports: [
         { protocol: 'TCP', port: 7473 }
         { protocol: 'TCP', port: 7687 }
@@ -88,10 +98,20 @@ resource containerGroup 'Microsoft.ContainerInstance/containerGroups@2023-05-01'
             #disable-next-line use-secure-value-for-secure-inputs
             { name: 'NEO4J_AUTH', secureValue: 'neo4j/${neo4jPassword}' }
             { name: 'NEO4J_PLUGINS', value: '["apoc","graph-data-science"]' }
+            // Ré-activé après la migration réseau (AUDIT-2026-06) : nécessaire à
+            // apoc.import.graphml, utilisé par le Job de (ré)import (cf. containerapp.bicep,
+            // api/scripts/import_legacykb.py) -- seul usage légitime de file.enabled ici.
+            // Le risque initial (finding critique) tenait à la combinaison avec l'IP
+            // publique du conteneur, supprimée par ce même audit (cf. network.bicep) :
+            // l'instance n'est plus joignable que depuis snet-cae, donc plus depuis Internet.
             { name: 'NEO4J_apoc_import_file_enabled', value: 'true' }
             { name: 'NEO4J_apoc_import_file_use__neo4j__config', value: 'false' }
             { name: 'NEO4J_server_default__listen__address', value: '0.0.0.0' }
-            { name: 'NEO4J_dbms_security_procedures_unrestricted', value: 'gds.*,apoc.*' }
+            // Restreint au strict nécessaire : seule apoc.path.subgraphAll est appelée par
+            // l'application (cf. legacykb_client.py:get_impact_paths) — gds.*/apoc.* complets
+            // retirés (AUDIT-2026-06). Les procédures GDS restent disponibles pour exploration
+            // manuelle via Neo4j Browser, simplement sans le mode "unrestricted".
+            { name: 'NEO4J_dbms_security_procedures_unrestricted', value: 'apoc.path.subgraphAll' }
             // HTTP désactivé — seul HTTPS (7473) est exposé (SEC-002)
             { name: 'NEO4J_server_http_enabled', value: 'false' }
             // TLS Bolt (port 7687) — bolt+s:// requis (SEC-002)
@@ -192,8 +212,10 @@ resource restartAlert 'Microsoft.Insights/metricAlerts@2018-03-01' = if (!empty(
 }
 
 // bolt+ssc:// = Bolt chiffré avec cert auto-signé (driver Python accepte sans CA publique).
-output uri string = 'bolt+ssc://${containerGroup.properties.ipAddress.fqdn}:7687'
-output fqdn string = containerGroup.properties.ipAddress.fqdn
+// Plus de FQDN public (AUDIT-2026-06) : l'IP privée du sous-réseau snet-aci-legacykb
+// sert d'hôte — stable tant que le container group n'est pas recréé (cf. plan de bascule).
+output uri string = 'bolt+ssc://${containerGroup.properties.ipAddress.ip}:7687'
+output privateIp string = containerGroup.properties.ipAddress.ip
 output storageAccountName string = storage.name
 output shareName string = share.name
 output sslShareName string = sslShare.name

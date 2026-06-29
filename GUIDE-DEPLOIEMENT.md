@@ -124,8 +124,9 @@ Déploie ou met à jour toutes les ressources Azure :
 | Blob Storage | `storage.bicep` | Documents sources |
 | Document Intelligence | `docint.bicep` | OCR PDF |
 | Container Registry | `registry.bicep` | Images Docker |
-| neo4j-legacykb (ACI) | `neo4j-legacykb.bicep` | Conditonnel : si pas de `-Neo4jUri` |
-| Container Apps Environment + Container App | `containerapp.bicep` | API FastAPI + frontend (Azure Container Apps, pas App Service) |
+| Réseau privé (VNet + NSG) | `network.bicep` | Sous-réseaux `snet-aci-legacykb` et `snet-cae` — neo4j-legacykb n'est plus joignable que depuis `snet-cae` |
+| neo4j-legacykb (ACI) | `neo4j-legacykb.bicep` | Conditonnel : si pas de `-Neo4jUri`. Déployé dans `snet-aci-legacykb` — IP privée uniquement, pas de FQDN public |
+| Container Apps Environment + Container App + Job d'import | `containerapp.bicep` | API FastAPI uniquement, pas de frontend (Azure Container Apps, pas App Service). Environnement intégré au VNet (`snet-cae`) ; ingress public de `ca-api` inchangé. Container Apps Job `caj-import-legacykb-<suffix>` pour l'import GraphML |
 
 Après le déploiement Bicep, les secrets sont automatiquement écrits dans Key Vault :
 - `openai-endpoint`, `search-endpoint`, `docint-endpoint`, `storage-account-name`
@@ -154,16 +155,20 @@ Si `deployLegacyKb=true` (pas de `-Neo4jUri` fourni) : génère un certificat au
 validité 1 an), l'uploade dans le partage Azure Files `neo4j-ssl` monté sur le conteneur, puis
 redémarre l'ACI pour que Neo4j démarre avec Bolt + HTTPS chiffrés (`bolt+ssc://`).
 
-### Phase 4c — Import du dump GraphML dans Neo4j
+### Phase 4c — Import du dump (GraphML ou JSONL) dans Neo4j
 
-Toujours si `deployLegacyKb=true`, `deploy.ps1` appelle automatiquement **`import-neo4j-legacykb.ps1`** :
+Toujours si `deployLegacyKb=true`, `deploy.ps1` appelle automatiquement **`import-neo4j-legacykb.ps1`**.
+Depuis la migration réseau de `neo4j-legacykb` vers un VNet privé (voir § Réseau privé ci-dessous),
+ce script ne se connecte plus jamais directement à Neo4j (impossible — plus d'IP publique) :
 
-1. Upload le fichier `docs/extract/repartition_cleaned_export.graphml` dans le partage Azure Files monté dans le conteneur (`/var/lib/neo4j/import/`)
-2. Attend que l'API HTTPS de Neo4j soit disponible (jusqu'à 3 minutes — temps de démarrage du conteneur + installation du plugin APOC)
-3. Exécute `CALL apoc.import.graphml(...)` via l'API transactionnelle HTTPS de Neo4j → résultat attendu : **5 812 nœuds, 19 368 relations**
-4. Applique automatiquement le correctif `fix_utf8.cypher` (double-encodage UTF-8/Latin-1 systématique d'APOC sur ce dump — aucune étape manuelle requise)
+1. Upload le fichier (`-DumpPath`, `.graphml` ou `.jsonl`) dans le partage Azure Files monté dans le conteneur (`/var/lib/neo4j/import/`) — `az storage file upload` par clé de compte, control-plane Azure Storage, fonctionne malgré le réseau privé
+2. Déclenche le Container Apps Job `caj-import-legacykb-<suffix>` (`az containerapp job start`), qui s'exécute dans `snet-cae` — seul sous-réseau autorisé par le NSG de `neo4j-legacykb`
+3. Le Job charge lui-même le mot de passe Neo4j depuis Key Vault (Managed Identity), attend que Neo4j soit joignable, puis importe selon l'extension du fichier (`api/scripts/import_legacykb.py`) :
+   - **`.graphml`** : `CALL apoc.import.graphml(...)` → résultat attendu pour le dump canonique : **5 812 nœuds, 19 368 relations**, puis applique automatiquement le correctif `fix_utf8.cypher` (bug de double-encodage propre à `apoc.import.graphml`)
+   - **`.jsonl`** : une ligne JSON par nœud/relation (`{"_type": "node", "id", "labels", "props"}` / `{"_type": "relationship", "fromId", "toId", "relType", "props"}`) ; création par lots via `apoc.create.node`/`apoc.create.relationship`, sans upsert — toujours additif, utiliser `-PurgeBeforeImport` pour réimporter sans dupliquer
+4. `import-neo4j-legacykb.ps1` attend la fin de l'exécution du Job (jusqu'à 10 min) et relit son résultat (déposé en JSON dans le même partage Azure Files, via `az storage file download`)
 
-> **Si le dump GraphML est absent** (`docs/extract/repartition_cleaned_export.graphml`), l'import est ignoré silencieusement et un avertissement est affiché. L'application démarre mais la vue Legacy KB retournera des erreurs 502 / un graphe vide.
+> **Si le dump est absent** (`docs/extract/repartition_cleaned_export.graphml` par défaut), l'import est ignoré silencieusement et un avertissement est affiché. L'application démarre mais la vue Legacy KB retournera des erreurs 502 / un graphe vide.
 
 > **Si `-Neo4jUri` est fourni** : l'ACI n'est pas créé et cet import est ignoré — vous êtes responsable de peupler votre instance Neo4j externe.
 
@@ -177,18 +182,28 @@ Tente 5 fois (toutes les 20 s) un GET sur `/health`. Si l'API répond, teste aus
 
 ## 4. Post-déploiement — indexer des documents
 
-### Accéder à l'application en production
+### Le frontend ne tourne qu'en local — jamais sur Azure
+
+Le Container App déployé (`ca-api-<suffix>`) n'héberge que l'API JSON (`/api/*`, `/health`) —
+l'image Docker ne contient pas `frontend/` (cf. [api/Dockerfile](api/Dockerfile)), donc il n'y a
+**aucune page web à ouvrir sur l'URL de production**. C'est volontaire : ça évite d'exposer
+publiquement une interface donnant accès à des données sensibles (cf.
+[docs/specs/SECURITY_AUDIT.md](docs/specs/SECURITY_AUDIT.md)).
+
+Le Container App reste nécessaire pour deux usages purement API :
+- `mcp-legacykb` (serveur MCP VS Code/Claude Desktop), qui passe par son URL HTTPS pour
+  contourner l'inspection SSL Zscaler sur le port Bolt direct (cf.
+  [mcp-legacykb/README.md](mcp-legacykb/README.md))
+- Le health check de validation post-déploiement (`/health`, `/api/legacykb/health`)
+
+### Utiliser l'interface (uniquement en local)
 
 ```powershell
-# L'URL de production est affichée à la fin de deploy.ps1 (et écrite dans .env
-# sous NOTEBOOKLM_API_URL). Récupérable aussi via :
-$rg = "rg-<ProjectName>-prod"   # ou votre ResourceGroup personnalisé
-az containerapp list -g $rg --query "[0].properties.configuration.ingress.fqdn" -o tsv
+# L'interface web tourne en local et pointe sur les ressources Azure (.env généré par deploy.ps1)
+.\start-dev.ps1
 ```
 
-### Indexer des documents via l'interface (recommandé)
-
-1. Ouvrir l'URL de production dans un navigateur
+1. Ouvrir `http://127.0.0.1:8000` (ouvert automatiquement par le script)
 2. Cliquer sur **Ajouter un document** dans la barre supérieure
 3. Sélectionner le fichier (PDF, DOCX, PPTX, XLSX, Markdown, TXT, code…)
 4. Un toast de progression s'affiche — attendre le toast de confirmation
@@ -227,28 +242,72 @@ L'interface s'ouvre sur `http://127.0.0.1:8000` et pointe sur vos ressources Azu
 
 ### Connecter une instance neo4j existante
 
-Si vous avez déjà un conteneur neo4j-legacykb tournant ailleurs :
+Si vous avez déjà un conteneur neo4j-legacykb tournant ailleurs (atteignable depuis `ca-api` —
+ex. une IP privée dans le même VNet, ou une instance encore exposée publiquement) :
 
 ```powershell
-.\deploy.ps1 -Neo4jUri "bolt+ssc://neo4j-legacykb-myprod.swedencentral.azurecontainer.io:7687" -SkipSSL
+.\deploy.ps1 -Neo4jUri "bolt+ssc://10.20.1.4:7687" -SkipSSL
 ```
 
 - `deployLegacyKb=false` dans Bicep → pas d'ACI créé
 - L'URI fournie est passée directement au Container App (`NEO4J_LEGACYKB_URI`)
 - Le mot de passe est quand même demandé et stocké dans Key Vault
 
+### ⚠️ Réseau privé neo4j-legacykb — points de vigilance pour reproduire cette architecture
+
+`neo4j-legacykb` est déployé en réseau privé (VNet `vnet-<suffix>`, sous-réseaux
+`snet-aci-legacykb`/`snet-cae`, NSG — voir [ARCHITECTURE.md § 8](ARCHITECTURE.md#8-infrastructure-azure)).
+Sur un **Resource Group vierge** (premier déploiement), tout se crée correctement du premier
+coup. Deux pièges spécifiques se posent uniquement si vous appliquez cette architecture à un
+déploiement **préexistant** (ex. une instance qui tournait encore sans VNet) :
+
+**1. Recréation forcée de l'environnement Container Apps et de l'ACI**
+
+Azure interdit d'ajouter une intégration VNet à un environnement Container Apps déjà existant
+(erreur `ManagedEnvironmentCannotAddVnetToExistingEnv`). Pour appliquer cette architecture à un
+déploiement existant, il faut **supprimer puis recréer** `cae-<suffix>` ET `ca-api-<suffix>` —
+coupure de l'API de quelques minutes. Même chose pour l'ACI : changer son sous-réseau réseau force
+aussi une suppression/recréation (`SubnetIdCannotChange`), ce qui **efface les données Neo4j**
+(pas de disque persistant pour la base elle-même — seuls les partages Azure Files `neo4j-import`
+et `neo4j-ssl` survivent). Un ré-import du dump GraphML (`import-neo4j-legacykb.ps1`) est donc
+nécessaire après la recréation.
+
+```powershell
+# Si vous migrez une instance existante vers cette architecture réseau :
+az containerapp delete -g <rg> -n ca-api-<suffix> --yes
+az containerapp env delete -g <rg> -n cae-<suffix> --yes
+az container delete -g <rg> -n aci-neo4j-legacykb-<suffix> --yes
+# Puis redéployer normalement (.\deploy.ps1) — tout se recrée avec le VNet, et
+# import-neo4j-legacykb.ps1 est rappelé automatiquement pour repeupler la base
+```
+
+**2. Policy de tags obligatoires sur l'abonnement**
+
+Si votre abonnement applique une policy de tags obligatoires similaire à
+*"Agentic Studio — Baseline Security"* (5 tags requis : `Squad`, `Environment`, `CostCenter`,
+`ManagedBy`, `Project` — attention à la casse), le déploiement des **nouvelles ressources
+réseau** (VNet, NSG) échouera avec `RequestDisallowedByPolicy` tant que ces tags ne sont pas
+renseignés avec de vraies valeurs. `infra/main.bicep` (variable `tags`) définit actuellement des
+valeurs génériques placeholder (`Squad=notebooklm-azure`, `CostCenter=unknown`) — à adapter aux
+conventions de votre organisation avant un déploiement dans un nouvel abonnement/RG si une policy
+de ce type existe.
+
 ### Mettre à jour le dump GraphML dans Neo4j (sans redéploiement complet)
 
 Lorsque le fichier `docs/extract/repartition_cleaned_export.graphml` est mis à jour — ou pour
 repeupler une nouvelle instance neo4j-legacykb (nouveau `-ProjectName`, nouveau Resource Group...)
-— relancez l'import seul sans toucher à l'infrastructure. `-StorageAccountName` et `-Fqdn` sont
+— relancez l'import seul sans toucher à l'infrastructure. `-StorageAccountName` et `-JobName` sont
 découverts automatiquement depuis `-ResourceGroup` (cas courant : un seul conteneur
 neo4j-legacykb dans le RG) :
 
 ```powershell
 .\import-neo4j-legacykb.ps1 -ResourceGroup rg-mon-rg -SkipSSL
-# Mot de passe demandé interactivement si non fourni via -Neo4jPassword
 ```
+
+Le mot de passe Neo4j n'est plus demandé : `neo4j-legacykb` n'ayant plus d'IP publique, le script
+ne s'y connecte plus jamais directement — il upload le dump (control-plane Azure Files) puis
+déclenche le Container Apps Job `caj-import-legacykb-<suffix>`, qui charge lui-même le mot de
+passe depuis Key Vault via sa Managed Identity et exécute l'import depuis l'intérieur du VNet.
 
 S'il y a **plusieurs** conteneurs neo4j-legacykb dans le même RG (ex. plusieurs déploiements
 successifs sous des noms de projet différents), précisez `-ProjectName` pour désambiguïser :
@@ -260,7 +319,13 @@ successifs sous des noms de projet différents), précisez `-ProjectName` pour d
 Le correctif `fix_utf8.cypher` (double-encodage UTF-8/Latin-1 systématique d'APOC) est appliqué
 automatiquement après l'import — aucune étape manuelle requise.
 
-> **Remarque** : L'import est additif — si des nœuds existent déjà, APOC les met à jour (upsert par propriété `id`). Pour repartir d'une base vide, purgez d'abord les données via le browser Neo4j (`MATCH (n) DETACH DELETE n`).
+> **Remarque** : L'import est additif — si des nœuds existent déjà, APOC les met à jour (upsert par propriété `id`). Pour repartir d'une base vide (ex. le nouveau dump a retiré des nœuds depuis le dernier import), ajoutez `-PurgeBeforeImport` :
+>
+> ```powershell
+> .\import-neo4j-legacykb.ps1 -ResourceGroup rg-mon-rg -PurgeBeforeImport -SkipSSL
+> ```
+>
+> Supprime tous les nœuds et relations (`MATCH (n) DETACH DELETE n`) avant l'import — destructif et irréversible, flag opt-in explicite.
 
 ### Déployer sur une subscription ou région différente
 
@@ -388,16 +453,22 @@ subscription ou subscription différente, même tenant Entra) **sans tout recons
 La quasi-totalité des ressources Azure supportent le déplacement ARM natif ("resource move") —
 une opération de métadonnées qui **préserve les données et les endpoints** (index Azure AI
 Search, images ACR, secrets Key Vault, blobs). Certaines ressources ne le supportent pas et sont
-donc recréées par le script :
+donc recréées en redéployant **l'intégralité de `infra/main.bicep`** (comme `deploy.ps1`, pas un
+module isolé — depuis la migration réseau, `containerapp.bicep` dépend du sous-réseau créé par
+`network.bicep` et du storage account créé par `neo4j-legacykb.bicep` ; laisser Bicep résoudre
+cette chaîne de dépendances plutôt que l'orchestrer à la main évite de la reproduire — et de la
+rater — manuellement) :
 
 | Ressource | Pourquoi recréée |
 |---|---|
-| Container App + Managed Environment (`ca-api-<suffix>`, `cae-<suffix>`) | Azure Container Apps ne supporte pas le move ARM — recréés en redéployant le module `containerapp.bicep`, qui crée lui-même une UAMI fraîche |
-| Conteneur ACI `neo4j-legacykb` | Les `containerGroups` ACI ne supportent aucun move ; le graphe vit de toute façon en mémoire éphémère (seuls `/import` et `/ssl` sont sur Azure Files) — il est ré-importé depuis `docs/extract/repartition_cleaned_export.graphml` |
+| VNet + NSG (`vnet-<suffix>`, `snet-aci-legacykb`, `snet-cae`) | Ressources réseau neuves, aucune donnée — recréées sans coût par `network.bicep` |
+| Container App + Managed Environment (`ca-api-<suffix>`, `cae-<suffix>`) + Job (`caj-import-legacykb-<suffix>`) | Azure Container Apps ne supporte pas le move ARM — recréés par `containerapp.bicep`, qui crée lui-même une UAMI fraîche |
+| Conteneur ACI `neo4j-legacykb` | Les `containerGroups` ACI ne supportent aucun move ; le graphe vit de toute façon en mémoire éphémère (seuls `/import` et `/ssl` sont sur Azure Files) — il est ré-importé via le Job (cf. §7) |
 
 Conséquence pratique : **pas de ré-indexation Azure AI Search, pas de ré-embedding, pas de copie
-de blobs**. Seuls le Container App (avec sa nouvelle UAMI + rôles IAM) et la stack neo4j sont
-reconstruits.
+de blobs**. Le mot de passe neo4j-legacykb et la clé API sont **réutilisés tels quels** (lus
+depuis les secrets du Key Vault déplacé, jamais régénérés) — aucun client existant
+(`mcp-legacykb`, intégrations) n'a besoin d'être reconfiguré après la migration.
 
 ### Prérequis
 
@@ -431,28 +502,29 @@ reconstruits.
 > `nlmazure` — le script échoue tôt en Phase 1 avec un message explicite si aucun Container
 > Registry nommé `acr<ProjectName><Environment>` n'est trouvé.
 
-### Ce que fait le script (7 phases)
+### Ce que fait le script (6 phases)
 
 0. **Prérequis + authentification** — vérifie l'accès aux deux subscriptions et qu'elles
    partagent le même tenant Entra
 1. **Pré-vol** — enregistre les Resource Providers manquants sur la subscription cible (en
-   parallèle), inventorie les ressources déplaçables, et valide le move à blanc via l'API ARM
+   parallèle, y compris `Microsoft.Network`/`Microsoft.App` pour le VNet et les Container Apps
+   Jobs), inventorie les ressources déplaçables, et valide le move à blanc via l'API ARM
    `validateMoveResources` (aucun effet de bord) avant de demander confirmation
 2. **Déplacement groupé** — un seul appel `az resource move` couvrant Azure OpenAI, Document
    Intelligence, Azure AI Search, Key Vault, Container Registry, Storage principal et
-   Application Insights (le Container App et son Managed Environment ne sont **pas** déplacés —
-   recréés en Phase 3)
-3. **Reconstruction en parallèle** — Branche A (thread principal, rapide) : redéploie le module
-   `containerapp.bicep` (UAMI fraîche, Managed Environment, Container App avec `NEO4J_LEGACYKB_URI`
-   vide pour l'instant), réassigne les rôles IAM (UAMI + développeur courant, perdus par le
-   move). Branche B (job d'arrière-plan, ~5 min) : redéploie le module Bicep
-   `neo4j-legacykb.bicep`, génère et installe le certificat TLS auto-signé, relance
-   `import-neo4j-legacykb.ps1` (import GraphML + correctif UTF-8 automatique), met à jour le
-   secret Key Vault `neo4j-legacykb-password`
-4. **Réconciliation** — met à jour `NEO4J_LEGACYKB_URI` sur le Container App (une fois les deux
-   branches terminées — le Container App doit exister et l'URI doit être connue) et régénère le
-   `.env` local
-5. **Validation** — health checks `/health` et `/api/legacykb/health`
+   Application Insights (VNet/NSG/Container App/Job/ACI ne sont **pas** déplacés — recréés en
+   Phase 3)
+3. **Redéploiement de `infra/main.bicep`** (comme `deploy.ps1`, image Docker déjà à jour donc pas
+   de rebuild) — crée VNet/NSG, Container App + UAMI + rôles IAM, ACI neo4j-legacykb dans le
+   VNet, Job d'import ; réutilise le mot de passe neo4j et la clé API depuis les secrets Key
+   Vault déjà déplacés. En parallèle (ne dépend pas du déploiement Bicep) : réassignation des
+   rôles IAM du développeur courant, perdus par le move (ceux de l'UAMI sont recréés
+   automatiquement par `infra/main.bicep` lui-même)
+4. **Stack neo4j-legacykb** — génère et installe le certificat TLS auto-signé (SAN = IP privée
+   de l'ACI, plus de FQDN public), redémarre l'ACI, déclenche l'import via
+   `import-neo4j-legacykb.ps1` (réutilisé tel quel — upload du dump + Job d'import)
+5. **Régénération du `.env` local + validation** — health checks `/health` et
+   `/api/legacykb/health`
 6. **Résumé** — affiche la commande de suppression de l'ancien Resource Group **sans jamais
    l'exécuter** — c'est une étape manuelle, une fois la migration validée :
 
@@ -460,8 +532,8 @@ reconstruits.
    az group delete --name <ancien-rg> --subscription <ancienne-subscription> --yes
    ```
 
-> **Non testé en conditions réelles** : ce script a été porté d'App Service vers Container Apps
-> par revue de code (différences d'API confirmées une à une), mais une migration cross-RG/
+> **Non testé en conditions réelles** : ce script a été réécrit pour la nouvelle architecture
+> réseau (VNet, ACI privé, Job d'import) par revue de code, mais une migration cross-RG/
 > cross-subscription réelle n'a pas pu être exécutée pour validation (action coûteuse et peu
 > réversible). Faites un essai sur un environnement non critique avant de vous y fier en
 > production.
@@ -502,8 +574,16 @@ reconstruits.
 | Container App ne démarre pas (CrashLoopBackOff) | Variables env manquantes ou image incorrecte | `az containerapp logs show -g <rg> -n ca-api-<suffix> --container api --tail 100 --follow false` (nécessite `$env:REQUESTS_CA_BUNDLE` si proxy Zscaler) |
 | neo4j-legacykb inaccessible | ACI en cours de démarrage (2-3 min) | Attendre et retester `/api/legacykb/health` |
 | Import GraphML ignoré (`dump introuvable`) | Fichier absent de `docs/extract/` | Placer `repartition_cleaned_export.graphml` dans `docs/extract/` et relancer `import-neo4j-legacykb.ps1` |
-| Import GraphML échoué (`APOC not found`) | Plugin APOC non installé dans le conteneur | Vérifier l'image neo4j (`neo4j:5-enterprise` + APOC dans `NEO4J_PLUGINS`) |
-| Nœuds Community avec caractères corrompus | Double-encodage UTF-8/Latin-1 lors de l'import | Appliquer `fix_utf8.cypher` via le browser Neo4j ou via `Invoke-RestMethod` |
+| Import GraphML échoué (`APOC not found`) | Plugin APOC non installé dans le conteneur | Vérifier l'image neo4j (`neo4j:5.22-community` + `apoc`/`graph-data-science` dans `NEO4J_PLUGINS`) |
+| Import JSONL échoué (`Instance Neo4j legacy-kb injoignable`), reproductible (pas un aléa réseau) | Lot de nœuds trop volumineux pour le timeout HTTP de 30s (`legacykb_client._execute`) — typiquement des `:Entity` avec de gros vecteurs d'embedding | Réduire `_JSONL_NODE_BATCH_SIZE` dans `api/scripts/import_legacykb.py`, rebuilder l'image (`az acr build`) et la repousser sur le Job (`az containerapp job update --image ...`) |
+| Nœuds Community avec caractères corrompus | Double-encodage UTF-8/Latin-1 lors de l'import | Appliqué automatiquement par le Job d'import (`fix_utf8.cypher`) — aucune action manuelle requise |
 | `Set-ExecutionPolicy` refusé | Politique d'entreprise | Lancer `python -m ...` directement sans activer le venv |
 | Health check échoue après deploy | Container App encore en cold start | Attendre 2-3 min et tester manuellement `/health` |
-| `.env` a `NEO4J_LEGACYKB_PASSWORD=***` | Masqué intentionnellement | Renseigner manuellement le vrai mot de passe dans `.env` |
+| `.env` a `NEO4J_LEGACYKB_PASSWORD=***` | Masqué intentionnellement | Renseigner manuellement le vrai mot de passe dans `.env` (uniquement utile pour debug manuel — le Job d'import et `ca-api` le chargent eux-mêmes depuis Key Vault) |
+| Déploiement Bicep : `RequestDisallowedByPolicy` sur le VNet/NSG | Policy de tags obligatoires sur l'abonnement (ex. *"Agentic Studio — Baseline Security"*) | Renseigner de vraies valeurs pour les tags requis (`Squad`, `Environment`, `CostCenter`, `ManagedBy`, `Project`) dans `infra/main.bicep` (variable `tags`) |
+| Déploiement Bicep : `ManagedEnvironmentCannotAddVnetToExistingEnv` | Tentative d'ajouter l'intégration VNet à un `cae-<suffix>` déjà existant | Supprimer puis recréer `ca-api-<suffix>` et `cae-<suffix>` (voir § Réseau privé neo4j-legacykb) |
+| Déploiement Bicep : `SubnetIdCannotChange` sur l'ACI | Tentative de changer le sous-réseau d'un ACI existant | Supprimer puis recréer l'ACI `aci-neo4j-legacykb-<suffix>`, puis relancer `import-neo4j-legacykb.ps1` (les données Neo4j sont perdues — pas de disque persistant) |
+| PowerShell : `NativeCommandError` après `az containerapp job update`/`start` ou `az storage file download` malgré un succès (exit 0) | Ces commandes écrivent un spinner de progression sur stderr ; sous PowerShell, `$ErrorActionPreference="Stop"` transforme tout texte stderr d'un exécutable natif en erreur fatale | Ne pas rediriger stderr (`2>&1`) sur ces appels précis, utiliser `--no-progress` quand disponible, ou neutraliser temporairement `$ErrorActionPreference` (pattern déjà appliqué dans `import-neo4j-legacykb.ps1`) |
+| `az acr build` plante la console avec `UnicodeEncodeError` en streamant ses logs | Caractères Unicode dans les logs + codepage Windows cp1252 | Utiliser `--no-logs` et poller via `az acr task list-runs` à la place (pattern déjà appliqué dans `deploy.ps1`) |
+| `az container restart` échoue avec `RegistryErrorResponse` (`index.docker.io`) | Erreur transitoire du registry Docker Hub | Relancer la commande suffit généralement |
+| Script `.ps1` réécrit intégralement : erreurs de parsing déroutantes (ex. "accolade fermante manquante" sur une ligne correcte) | Fichier sauvegardé en UTF-8 **sans BOM** — PowerShell 5.1 mal-interprète alors les caractères accentués | Toujours sauvegarder un `.ps1` réécrit intégralement en UTF-8 **avec BOM** |

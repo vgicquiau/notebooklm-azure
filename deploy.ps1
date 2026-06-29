@@ -477,7 +477,9 @@ if ($deployLegacyKb) {
     Write-Host ""
     Write-Host "  [4b/8] TLS Neo4j — génération et upload du certificat auto-signé" -ForegroundColor Cyan
 
-    $neo4jFqdn    = $outputs.neo4jLegacyKbFqdn.value
+    # AUDIT-2026-06 : plus de FQDN public (ACI déployé dans snet-aci-legacykb, IP privée
+    # uniquement) — le certificat porte désormais l'IP privée en SAN plutôt qu'un DNS name.
+    $neo4jHost    = $outputs.neo4jLegacyKbPrivateIp.value
     $sslStorage   = $outputs.neo4jLegacyKbStorageAccount.value
     $aciGroupName = "aci-neo4j-legacykb-$ProjectName-$environment"
     $tmpKey       = "$env:TEMP\neo4j.key"
@@ -498,16 +500,22 @@ from cryptography.x509.oid import NameOID
 from cryptography.hazmat.primitives import hashes, serialization
 import datetime
 
-fqdn, key_out, cert_out = sys.argv[1], sys.argv[2], sys.argv[3]
+import ipaddress
+
+host, key_out, cert_out = sys.argv[1], sys.argv[2], sys.argv[3]
 key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
-subject = issuer = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, fqdn)])
+subject = issuer = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, host)])
+# AUDIT-2026-06 : host est désormais une IP privée (snet-aci-legacykb), plus un FQDN
+# public -- SAN IPAddress plutôt que DNSName (le client ignore cette validation de
+# toute façon, cf. legacykb_client.py _session.verify=False, mais on garde un SAN cohérent).
+san = x509.IPAddress(ipaddress.ip_address(host))
 cert = (x509.CertificateBuilder()
     .subject_name(subject).issuer_name(issuer)
     .public_key(key.public_key())
     .serial_number(x509.random_serial_number())
     .not_valid_before(datetime.datetime.utcnow())
     .not_valid_after(datetime.datetime.utcnow() + datetime.timedelta(days=365))
-    .add_extension(x509.SubjectAlternativeName([x509.DNSName(fqdn)]), critical=False)
+    .add_extension(x509.SubjectAlternativeName([san]), critical=False)
     .sign(key, hashes.SHA256()))
 open(key_out,  'wb').write(key.private_bytes(
     serialization.Encoding.PEM,
@@ -516,8 +524,8 @@ open(key_out,  'wb').write(key.private_bytes(
 open(cert_out, 'wb').write(cert.public_bytes(serialization.Encoding.PEM))
 '@ | Set-Content -Path $tmpScript -Encoding UTF8
 
-    python $tmpScript $neo4jFqdn $tmpKey $tmpCert
-    Write-OK "Certificat auto-signé généré pour $neo4jFqdn"
+    python $tmpScript $neo4jHost $tmpKey $tmpCert
+    Write-OK "Certificat auto-signé généré pour $neo4jHost"
 
     # Upload via clé de compte (première fois — le rôle RBAC File n'est pas encore propagé).
     $sslKey = az storage account keys list -g $rg -n $sslStorage --query '[0].value' -o tsv 2>&1
@@ -548,11 +556,12 @@ open(cert_out, 'wb').write(cert.public_bytes(serialization.Encoding.PEM))
     Write-OK "ACI $aciGroupName redémarré — Neo4j démarrera avec bolt+s:// et HTTPS"
 
     # ── PHASE 4c : Import du dump GraphML ────────────────────────────────────────
+    # AUDIT-2026-06 : le mot de passe n'est plus passé ici -- le Job d'import le
+    # charge lui-même depuis Key Vault (cf. import-neo4j-legacykb.ps1, api/scripts/import_legacykb.py).
     Write-Host ""
     Write-Host "  [4c/8] Import GraphML — peuplement de neo4j-legacykb" -ForegroundColor Cyan
-    $neo4jSecurePwd = ConvertTo-SecureString $neo4jPlainPwd -AsPlainText -Force
     & "$ProjectRoot\import-neo4j-legacykb.ps1" -ResourceGroup $rg -ProjectName $ProjectName -Environment $environment `
-        -Neo4jPassword $neo4jSecurePwd -SkipSSL:$SkipSSL
+        -SkipSSL:$SkipSSL
 }
 
 # Si l'ACR vient d'être créé par Bicep, builder l'image maintenant
@@ -841,7 +850,8 @@ Write-Host "  Ressources Azure crees :" -ForegroundColor White
 Write-Host "  Resource Group   : $rg" -ForegroundColor DarkGray
 Write-Host "  ACR              : $acrName" -ForegroundColor DarkGray
 Write-Host "  Image            : $imageTag" -ForegroundColor DarkGray
-Write-Host "  URL production   : $apiUrl" -ForegroundColor DarkGray
+Write-Host "  URL API (backend): $apiUrl" -ForegroundColor DarkGray
+Write-Host "                     API JSON uniquement -- pas de page web (le frontend ne tourne qu'en local)" -ForegroundColor DarkGray
 if ($neo4jUriEnv) {
     Write-Host "  Neo4j Legacy KB  : $neo4jUriEnv" -ForegroundColor DarkGray
 }

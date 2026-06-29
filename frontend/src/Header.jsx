@@ -1,6 +1,13 @@
 // src/Header.jsx — Barre supérieure
 // Props: onClearSession(), view, onViewChange(view), apiFetch(url, options)
 
+// AUDIT-2026-06 : neo4j-legacykb n'a plus d'IP publique -- en local, ce backend ne peut
+// plus l'atteindre. <meta name="nlaz-legacykb-api-url"> (injecté par api/main.py depuis
+// NOTEBOOKLM_API_URL) pointe vers ca-api, intégré au VNet, pour les routes /api/legacykb/*
+// uniquement. Absent en production (pas de frontend déployé) -- fallback same-origin.
+const LEGACYKB_API_BASE =
+  (document.querySelector('meta[name="nlaz-legacykb-api-url"]')?.content || window.location.origin) + '/api';
+
 // ── Switch de vue (Chat ⇄ Legacy KB) ────────────────────────────
 const VIEW_OPTIONS = [
   { key: 'chat',     label: 'Chat' },
@@ -44,7 +51,7 @@ const LegacyKbStatus = ({ apiFetch }) => {
   React.useEffect(() => {
     let cancelled = false;
     const check = () => {
-      apiFetch(`${window.location.origin}/api/legacykb/health`)
+      apiFetch(`${LEGACYKB_API_BASE}/legacykb/health`)
         .then(r => { if (!cancelled) setStatus(r.ok ? 'ok' : 'error'); })
         .catch(() => { if (!cancelled) setStatus('error'); });
     };

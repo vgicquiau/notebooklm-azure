@@ -9,6 +9,7 @@ Agent RAG (Retrieval-Augmented Generation) à interface conversationnelle, inspi
 | Document | Contenu |
 |---|---|
 | [README.md](README.md) (ce fichier) | Quick start, installation, utilisation |
+| [GUIDE-UTILISATEUR.md](GUIDE-UTILISATEUR.md) | **Pour les utilisateurs non techniques** — comment démarrer et utiliser l'application au quotidien (Chat, Sources, Notes, Legacy KB), sans jargon |
 | [ARCHITECTURE.md](ARCHITECTURE.md) | Dossier d'architecture complet — fonctionnel, technique, sécurité, spécifications F1-F7 |
 | [GUIDE-DEPLOIEMENT.md](GUIDE-DEPLOIEMENT.md) | Déploiement Azure via `deploy.ps1` — paramètres, phases, post-déploiement, teardown |
 | [docs/specs/](docs/specs/) | Spécifications produit détaillées (SDD) |
@@ -59,33 +60,38 @@ L'interface s'ouvre automatiquement sur `http://127.0.0.1:8000`.
 
 ```
 ┌──────────────────────────────────────────────────────────────────┐
-│  Navigateur                                                       │
+│  Navigateur — local uniquement (start-dev.ps1, 127.0.0.1:8000)    │
 │  React 18 (Babel standalone) — servi statiquement par l'API      │
 │  Vue Chat : SourcesRail │ ChatPanel │ NotesRail                   │
 │  Vue Legacy KB : LegacyKbPage (React Flow + dagre)                │
-└─────────────────────────┬────────────────────────────────────────┘
-                          │ HTTP  (API Key : X-API-Key header)
-┌─────────────────────────▼────────────────────────────────────────┐
-│  FastAPI (Python 3.11) — Azure Container Apps                     │
-│  POST /api/chat (+ tools legacykb_*)  GET/DELETE /api/sources     │
-│  POST /api/ingest         GET /api/ingest/{job_id}                │
-│  GET /api/legacykb/*  (health, stats, domains, search, neighbors) │
-└──────┬─────────────────────┬──────────────────┬──────────────────┘
-       │                     │                  │
-┌──────▼──────┐  ┌──────────▼──────────┐  ┌────▼──────────────────┐
-│ Azure OpenAI│  │ Azure AI Search      │  │ neo4j-legacykb         │
-│ GPT-4o      │  │ Index vectoriel      │  │ Azure Container Inst.  │
-│ Embeddings  │  │ notebooklm-chunks    │  │ Golden source CardDemo  │
-└─────────────┘  └──────────┬──────────┘  └───────────────────────┘
-                             │
-               ┌─────────────┘
-┌──────────────▼──────────────────┐   ┌───────────────────────────┐
-│ Azure Document Intelligence      │   │ Azure Key Vault            │
-│ OCR et extraction layout PDF     │   │ Secrets API + endpoints    │
-└──────────────────────────────────┘   └───────────────────────────┘
+└──────────┬──────────────────────────────────────┬────────────────┘
+           │ HTTP (API Key)        /api/legacykb/* en cross-origin │
+           │ backend local                  (CORS, vers ca-api)    │
+┌──────────▼─────────┐                  ┌─────────────────────────▼┐
+│ FastAPI local       │                  │ ca-api (Azure Container  │
+│ (start-dev.ps1)      │                  │ Apps) — API JSON seule, │
+│                      │                  │ jamais de frontend      │
+└──────────┬───────────┘                  └──────────┬──────────────┘
+           │                                          │ intégré au VNet
+┌──────────▼──────┐  ┌──────────────────┐  ┌──────────▼─────────────┐
+│ Azure OpenAI    │  │ Azure AI Search   │  │ neo4j-legacykb          │
+│ GPT-4o          │  │ Index vectoriel   │  │ ACI auto-hébergé,       │
+│ Embeddings      │  │ notebooklm-chunks │  │ réseau privé (VNet/NSG) │
+└─────────────────┘  └─────────┬─────────┘  │ IP privée, pas de FQDN  │
+                                │            └─────────────────────────┘
+                  ┌─────────────┘
+┌─────────────────▼────────────────┐   ┌───────────────────────────┐
+│ Azure Document Intelligence       │   │ Azure Key Vault            │
+│ OCR et extraction layout PDF      │   │ Secrets API + endpoints    │
+└───────────────────────────────────┘   └───────────────────────────┘
 ```
 
 **Authentification** : Managed Identity en production (zéro clé dans le code). `DefaultAzureCredential` / `az login` en local.
+
+**Réseau** : `neo4j-legacykb` n'a plus d'IP publique (réseau privé Azure VNet) — seul `ca-api`
+(intégré au même VNet) peut l'atteindre. Le backend local ne peut donc plus l'atteindre
+directement ; la vue Legacy KB en local appelle `ca-api` en cross-origin pour compenser (voir
+[ARCHITECTURE.md § CORS](ARCHITECTURE.md#cors--accès-cross-origin-du-frontend-local-à-ca-api)).
 
 ---
 
@@ -146,12 +152,12 @@ Le fichier `.env` (généré par `deploy.ps1` ou copié depuis `.env.example`) d
 | `AZURE_DOCINT_ENDPOINT` | Endpoint Azure Document Intelligence | Oui |
 | `AZURE_STORAGE_ACCOUNT_NAME` | Nom du compte de stockage | Oui |
 | `API_KEY` | Clé d'authentification pour les endpoints `/api/*` | Recommandé en prod |
-| `NEO4J_LEGACYKB_URI` | URI `bolt://` (local sans TLS) ou `bolt+ssc://` (prod, cert auto-signé) du conteneur neo4j-legacykb | Pour la vue Legacy KB |
+| `NEO4J_LEGACYKB_URI` | URI `bolt://` (local sans TLS) ou `bolt+ssc://` (prod, cert auto-signé) du conteneur neo4j-legacykb — IP **privée**, change à chaque recréation de l'ACI | Pour la vue Legacy KB |
 | `NEO4J_LEGACYKB_PASSWORD` | Mot de passe neo4j | Pour la vue Legacy KB |
-| `NOTEBOOKLM_API_URL` | URL de l'API déployée — utilisée par `mcp-legacykb` pour passer par l'API HTTPS plutôt qu'une connexion Bolt directe | Pour le serveur MCP legacykb |
-| `CORS_ALLOWED_ORIGINS` | Origines CORS autorisées (virgule-séparées) | Si frontend sur domaine différent |
+| `NOTEBOOKLM_API_URL` | FQDN public de l'API déployée (`ca-api`) — change à chaque recréation de l'environnement Container Apps. Utilisée par `mcp-legacykb`, et par le backend local pour le CORS/CSP afin que le frontend local puisse appeler `ca-api` en cross-origin pour `/api/legacykb/*` (`neo4j-legacykb` n'a plus d'IP publique) | Pour `mcp-legacykb` et pour la vue Legacy KB en local |
+| `CORS_ALLOWED_ORIGINS` | Origines CORS autorisées sur `ca-api` (virgule-séparées) — défaut `http://127.0.0.1:8000` pour le frontend local | Si frontend sur domaine différent |
 
-En production, tous les secrets (`API_KEY`, endpoints, mot de passe neo4j) sont lus depuis **Azure Key Vault** via Managed Identity — le `.env` de prod ne contient pas de secrets.
+En production, tous les secrets (`API_KEY`, endpoints, mot de passe neo4j) sont lus depuis **Azure Key Vault** via Managed Identity — le `.env` de prod ne contient pas de secrets. `NEO4J_LEGACYKB_URI` et `NOTEBOOKLM_API_URL` ne sont jamais des valeurs fixes : elles changent chaque fois que l'ACI ou l'environnement Container Apps sont recréés.
 
 ---
 
@@ -223,6 +229,9 @@ notebooklm-azure/
 │   │   ├── session_store.py    # Persistance SQLite des sessions de chat
 │   │   ├── compactor.py        # Compaction glissante de l'historique (résumé LLM)
 │   │   └── rate_limiter.py     # Rate limiting /api/chat (20 req/IP/60s)
+│   ├── scripts/
+│   │   └── import_legacykb.py  # Exécuté par le Container Apps Job caj-import-legacykb-*
+│   │                           # (import GraphML depuis l'intérieur du VNet)
 │   └── data/
 │       └── chat_history.db     # Base SQLite (créée au démarrage, non commitée)
 ├── ingest/
@@ -234,9 +243,10 @@ notebooklm-azure/
 │   ├── vendor/                 # Dépendances JS vendorisées (React, Babel, xyflow, dagre…)
 │   └── src/                    # Composants React (JSX transpilé in-browser)
 ├── infra/
-│   ├── main.bicep              # Orchestration, rôles IAM, secrets Key Vault
+│   ├── main.bicep              # Orchestration, rôles IAM, secrets Key Vault, tags obligatoires
 │   ├── main.parameters.json    # Paramètres de déploiement (non commité)
-│   └── modules/                # containerapp, openai, search, keyvault, neo4j-legacykb…
+│   └── modules/                # network (VNet/NSG), containerapp (+ Job d'import), openai,
+│                                # search, keyvault, neo4j-legacykb (réseau privé)…
 ├── deploy.ps1                  # Déploiement complet en 8 phases
 ├── teardown.ps1                # Suppression de toutes les ressources Azure
 ├── start-dev.ps1               # Lancement du serveur de développement local

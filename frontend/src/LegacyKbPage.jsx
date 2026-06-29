@@ -7,6 +7,12 @@
 // window.ReactFlow) ; layout force-directed via d3-force (window.d3).
 
 const API_BASE = window.location.origin + '/api';
+// AUDIT-2026-06 : neo4j-legacykb n'a plus d'IP publique -- routes /api/legacykb/*
+// uniquement vers ca-api (intégré au VNet), via <meta name="nlaz-legacykb-api-url">
+// injecté par api/main.py depuis NOTEBOOKLM_API_URL. Le reste (ex. /chat plus bas)
+// reste sur API_BASE (same-origin, backend local).
+const LEGACYKB_API_BASE =
+  (document.querySelector('meta[name="nlaz-legacykb-api-url"]')?.content || window.location.origin) + '/api';
 const _uid = () => Math.random().toString(36).slice(2, 10);
 
 const {
@@ -162,6 +168,7 @@ const ExtBadgeNode = ({ data }) => {
   const handleStyle = { background: 'transparent', border: 'none', width: 1, height: 1, opacity: 0 };
   return (
     <div
+      onMouseDown={() => data.onFreeze?.(data.id)}
       title="Déplier les références externes"
       style={{
         display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 4,
@@ -327,7 +334,7 @@ const NodeDetailPanel = ({ nodeId, apiFetch, onNavigate, onClose }) => {
     let cancelled = false;
     setLoading(true);
     setError(null);
-    apiFetch(`${API_BASE}/legacykb/nodes/${encodeURIComponent(nodeId)}`)
+    apiFetch(`${LEGACYKB_API_BASE}/legacykb/nodes/${encodeURIComponent(nodeId)}`)
       .then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); })
       .then(data => { if (!cancelled) { setDetail(data); setLoading(false); } })
       .catch(err => { if (!cancelled) { setError(err.message); setLoading(false); } });
@@ -679,13 +686,17 @@ const _isHighlighted = (n, highlightedIds) =>
   !highlightedIds ? false
     : highlightedIds.has(n.id) || (n.memberIds?.some(id => highlightedIds.has(id)) ?? false);
 
-const _buildGraphNodes = (topLeft, logicalNodeMap, centerId, highlightedIds) =>
+// `onFreeze` injecté directement ici (plutôt qu'en repassant sur le tableau après
+// coup) — appelé à chaque tick de la simulation, une deuxième passe sur tous les
+// nœuds juste pour ajouter un callback alourdissait inutilement le rendu le plus
+// chaud de la page (cf. limitation du débit de rendu dans l'effet de simulation).
+const _buildGraphNodes = (topLeft, logicalNodeMap, centerId, highlightedIds, onFreeze) =>
   [...logicalNodeMap.values()]
     .map(n => ({
       id: n.id,
       type: n.kind === 'extBadge' ? 'extBadgeNode' : 'legacyNode',
       position: topLeft.get(n.id) ?? { x: 0, y: 0 },
-      data: { ...n, isCenter: n.id === centerId, highlighted: _isHighlighted(n, highlightedIds) },
+      data: { ...n, isCenter: n.id === centerId, highlighted: _isHighlighted(n, highlightedIds), onFreeze },
     }));
 
 // Le point de connexion sur le pourtour de chaque nœud n'est pas figé ici : il est
@@ -990,7 +1001,7 @@ const LegacyKbPage = ({ apiFetch }) => {
 
   // ── Stats (chargées une fois au montage) ─────────────────────────────────
   React.useEffect(() => {
-    apiFetch(`${API_BASE}/legacykb/stats`)
+    apiFetch(`${LEGACYKB_API_BASE}/legacykb/stats`)
       .then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); })
       .then(setStats)
       .catch(err => setStatsError(err.message));
@@ -1007,7 +1018,7 @@ const LegacyKbPage = ({ apiFetch }) => {
       const params = new URLSearchParams({ q, limit: '30' });
       if (selectedTypes.size > 0) params.set('types', [...selectedTypes].join(','));
       if (searchDescriptions) params.set('descriptions', 'true');
-      const res = await apiFetch(`${API_BASE}/legacykb/search?${params.toString()}`);
+      const res = await apiFetch(`${LEGACYKB_API_BASE}/legacykb/search?${params.toString()}`);
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = await res.json();
       setSearchResults(data.items ?? []);
@@ -1038,7 +1049,7 @@ const LegacyKbPage = ({ apiFetch }) => {
     setDomainsError(null);
     if (hierarchy.length > 0) { setShowingDomains(true); setSearchResults([]); return; }
     try {
-      const res = await apiFetch(`${API_BASE}/legacykb/hierarchy`);
+      const res = await apiFetch(`${LEGACYKB_API_BASE}/legacykb/hierarchy`);
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = await res.json();
       setHierarchy(data.items ?? []);
@@ -1053,7 +1064,7 @@ const LegacyKbPage = ({ apiFetch }) => {
   const exploreNode = React.useCallback(async (nodeId) => {
     try {
       const res = await apiFetchRef.current(
-        `${API_BASE}/legacykb/nodes/${encodeURIComponent(nodeId)}/neighbors`
+        `${LEGACYKB_API_BASE}/legacykb/nodes/${encodeURIComponent(nodeId)}/neighbors`
       );
       if (!res.ok) return;
       const data = await res.json(); // { center, neighbors, edges }
@@ -1080,7 +1091,7 @@ const LegacyKbPage = ({ apiFetch }) => {
   const loadCommunitySubgraph = React.useCallback(async (nodeId) => {
     try {
       const res = await apiFetchRef.current(
-        `${API_BASE}/legacykb/nodes/${encodeURIComponent(nodeId)}/subgraph`
+        `${LEGACYKB_API_BASE}/legacykb/nodes/${encodeURIComponent(nodeId)}/subgraph`
       );
       if (!res.ok) return;
       const data = await res.json();
@@ -1111,7 +1122,7 @@ const LegacyKbPage = ({ apiFetch }) => {
   const recenterOnNode = React.useCallback(async (nodeId) => {
     try {
       const res = await apiFetchRef.current(
-        `${API_BASE}/legacykb/nodes/${encodeURIComponent(nodeId)}/neighbors`
+        `${LEGACYKB_API_BASE}/legacykb/nodes/${encodeURIComponent(nodeId)}/neighbors`
       );
       if (!res.ok) return;
       const data = await res.json(); // { center, neighbors, edges }
@@ -1266,17 +1277,22 @@ const LegacyKbPage = ({ apiFetch }) => {
     setFlowEdges(_buildEdges(prep.edgeGroups));
 
     const renderFromTopLeft = (topLeft) => {
-      const nodes = _buildGraphNodes(topLeft, prep.logicalNodeMap, centerId, highlightedIdsRef.current);
-      setFlowNodes(nodes.map(n => ({ ...n, data: { ...n.data, onFreeze: freezeNode } })));
+      setFlowNodes(_buildGraphNodes(topLeft, prep.logicalNodeMap, centerId, highlightedIdsRef.current, freezeNode));
     };
 
     // Rayon de collision = demi-diagonale du carré 90×90 (~63.6px) + petite marge,
     // sinon les coins peuvent se chevaucher (`NODE_W*0.62` ≈ 56px sous-dimensionnait
     // le rayon réel) ; charge plus forte pour écarter franchement les nœuds denses
     // au lieu de laisser un agglomérat se former autour des hubs.
+    // `alphaDecay`/`velocityDecay` relevés (défauts ~0.0228/0.4) : moins de ticks
+    // nécessaires pour atteindre `alphaMin`, plus de friction pour amortir
+    // l'oscillation induite par la charge plus forte — la vue se stabilise
+    // nettement plus vite sans paraître saccadée.
     const simulation = forceSimulation(prep.simNodes)
+      .alphaDecay(0.05)
+      .velocityDecay(0.45)
       .force('link', forceLink(prep.simLinks).id(d => d.id).distance(NODE_W * 2).strength(0.3))
-      .force('charge', forceManyBody().strength(-420))
+      .force('charge', forceManyBody().strength(-420).distanceMax(NODE_W * 12))
       .force('collide', forceCollide(NODE_W * 0.75))
       .force('x', forceX(0).strength(0.02))
       .force('y', forceY(0).strength(0.02));
@@ -1285,11 +1301,26 @@ const LegacyKbPage = ({ apiFetch }) => {
     renderFromTopLeft(_topLeftFromSimNodes(prep.simNodes)); // amorçage immédiat, avant le 1er tick
     setLayoutVersion(v => v + 1); // fitView sur la dispersion initiale
 
+    // Le rendu React (reconstruction de tous les nœuds + commit) est largement
+    // plus coûteux que le tick physique lui-même (calcul de forces via quadtree) —
+    // sans limite, il s'exécutait à chaque tick (jusqu'à ~300) et le rendu devenait
+    // le facteur limitant la cadence des frames, ralentissant d'autant la
+    // convergence en temps réel et rendant les clics peu réactifs pendant
+    // l'animation (thread principal saturé). On plafonne le rendu à ~24 fps —
+    // largement assez fluide visuellement — tout en laissant le tick physique
+    // (et donc la décroissance d'alpha) tourner à la cadence native de la boucle
+    // d'animation.
+    let lastRenderAt = 0;
+    const RENDER_INTERVAL_MS = 42;
     simulation.on('tick', () => {
+      const now = performance.now();
+      if (now - lastRenderAt < RENDER_INTERVAL_MS) return;
+      lastRenderAt = now;
       renderFromTopLeft(_topLeftFromSimNodes(prep.simNodes));
     });
 
     simulation.on('end', () => {
+      renderFromTopLeft(_topLeftFromSimNodes(prep.simNodes)); // position finale exacte (pas tronquée par le throttle)
       setLayoutVersion(v => v + 1); // fitView final, une fois la disposition stabilisée
     });
 

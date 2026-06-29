@@ -14,5 +14,8 @@ azure-monitor-opentelemetry==1.8.8
 # en transitif via openai, épinglé ici en direct car utilisé explicitement.
 httpx==0.28.1
 
-# Lecture directe de l'instance Neo4j neo4j-legacykb (api/routers/legacykb.py)
-neo4j==6.2.0
+# Lecture directe de l'instance Neo4j neo4j-legacykb (api/services/legacykb_client.py)
+# via l'API HTTP transactionnelle (pas le driver Bolt -- cf. docstring du module,
+# Zscaler casse le handshake TLS sur le port Bolt non-HTTP). Déjà présent en transitif
+# via azure-identity/openai, épinglé ici en direct car utilisé explicitement.
+requests==2.34.2

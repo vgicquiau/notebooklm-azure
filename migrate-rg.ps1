@@ -8,28 +8,46 @@
     Plutôt que de tout reconstruire (et de ré-indexer/ré-importer les données), ce script déplace
     nativement (ARM "resource move") les ressources qui le supportent — opération de métadonnées
     qui préserve les données (index Azure AI Search, images ACR, secrets Key Vault, blobs) et les
-    endpoints (aucun changement de DNS) — et ne recrée que les ressources qui ne supportent pas le
-    déplacement ARM : le Container App et son Managed Environment (avec une UAMI fraîche,
-    recréés en redéployant le module containerapp.bicep) et le conteneur ACI neo4j-legacykb
-    (dont le graphe vit en mémoire éphémère et doit de toute façon être ré-importé depuis le
-    dump GraphML versionné).
+    endpoints (aucun changement de DNS) — et redéploie intégralement `infra/main.bicep` pour
+    tout le reste (VNet/NSG, Container App + Managed Environment, ACI neo4j-legacykb, Job
+    d'import) — exactement comme deploy.ps1, pas une orchestration manuelle séparée.
+
+    AUDIT-2026-06 : ce choix (redéployer tout main.bicep plutôt que des modules isolés) n'est
+    pas cosmétique — depuis la migration réseau, `containerapp.bicep` a besoin du sous-réseau
+    `snet-cae` (network.bicep) ET du storage account de `neo4j-legacykb.bicep` (pour monter le
+    partage du Job d'import), et `neo4j-legacykb.bicep` a besoin du sous-réseau
+    `snet-aci-legacykb`. Orchestrer ces 3 modules à la main (comme le faisait l'ancienne version
+    de ce script) reproduit une dépendance que Bicep résout déjà correctement tout seul à
+    l'intérieur de `main.bicep` — et qui se rate facilement à la main (constaté en pratique lors
+    de la migration réseau elle-même). Les ressources déjà déplacées par ARM move (OpenAI,
+    Search, Storage, Key Vault, Registry, Monitoring) existent déjà sous le même nom dans le RG
+    cible : Bicep les retrouve et ne fait qu'un no-op de confirmation dessus.
 
     Phases :
       0. Prérequis + authentification (subscription source ET cible, même tenant Entra)
       1. Pré-vol — enregistrement des Resource Providers manquants + validation ARM à blanc
          (validateMoveResources) avant toute action destructive
       2. Déplacement groupé des ressources déplaçables (un seul appel ARM atomique)
-      3. Reconstruction en parallèle du Container App + UAMI + rôles IAM (thread principal) et
-         de la stack neo4j-legacykb (job d'arrière-plan : redéploiement Bicep + certificat TLS +
-         import GraphML + correctif UTF-8)
-      4. Réconciliation — mise à jour NEO4J_LEGACYKB_URI sur le Container App, régénération du
-         .env local
-      5. Validation post-migration (health checks /health et /api/legacykb/health)
+      3. Redéploiement de infra/main.bicep dans le RG cible (VNet/NSG, Container App + UAMI +
+         rôles IAM, ACI neo4j-legacykb dans le VNet, Job d'import) // en parallèle : réassignation
+         des rôles IAM du développeur courant (ne dépend pas du déploiement Bicep)
+      4. Stack neo4j-legacykb — certificat TLS auto-signé (SAN = IP privée), upload, redémarrage
+         ACI, déclenchement de l'import (réutilise import-neo4j-legacykb.ps1 tel quel)
+      5. Régénération du .env local + validation post-migration (health checks)
       6. Résumé — affiche la commande de suppression de l'ancien RG, ne l'exécute JAMAIS
 
+    Mot de passe neo4j-legacykb : réutilisé automatiquement depuis le secret Key Vault déjà
+    déplacé (le Key Vault survit au move, son contenu est inchangé) — pas de nouveau mot de
+    passe à fournir, sauf si ce secret est introuvable (instance jamais déployée ou Key Vault
+    vide), auquel cas -Neo4jPassword est demandé.
+
+    Clé API : préservée telle quelle (lue dans le Key Vault déplacé, jamais régénérée) — aucun
+    client existant (mcp-legacykb, intégrations) n'a besoin d'être reconfiguré après la migration.
+
     Important : les attributions de rôle RBAC scopées sur une ressource ne survivent PAS à un
-    "resource move" (documenté par Microsoft) — ce script les recrée systématiquement après coup,
-    pour l'UAMI du Container App ET pour l'identité du développeur courant (az login), afin que
+    "resource move" (documenté par Microsoft). Celles de l'UAMI du Container App sont recréées
+    automatiquement par main.bicep (il les définit lui-même). Celles de l'identité du
+    développeur courant (az login) sont recréées explicitement par ce script (Phase 3), pour que
     l'ingestion locale continue de fonctionner sans intervention manuelle.
 
 .PARAMETER SourceResourceGroup
@@ -53,8 +71,9 @@
     Suffixe d'environnement utilisé lors du déploiement initial. Défaut : prod.
 
 .PARAMETER Neo4jPassword
-    Nouveau mot de passe du compte neo4j pour le conteneur ACI recréé. Demandé interactivement
-    si absent.
+    Mot de passe du compte neo4j pour le conteneur ACI recréé. Utilisé uniquement si le secret
+    Key Vault déplacé est introuvable (cf. DESCRIPTION) — demandé interactivement dans ce cas
+    si ce paramètre est absent.
 
 .PARAMETER AlertEmail
     Email pour les alertes Azure Monitor du conteneur neo4j-legacykb recréé. Vide = désactivées.
@@ -140,6 +159,21 @@ function Remove-FileSafe([string]$Path) {
     # qui bypass -ErrorAction. [System.IO.File]::Delete() contourne le provider PowerShell.
     try { [System.IO.File]::Delete($Path) } catch {}
 }
+function New-BicepParametersFile([hashtable]$Values) {
+    # Meme helper que deploy.ps1 -- fichier de parametres temporaire, nom aleatoire,
+    # toujours supprime par l'appelant (cf. finally) pour ne pas laisser de secret sur disque.
+    $paramsObj = [ordered]@{
+        '$schema'      = 'https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#'
+        contentVersion = '1.0.0.0'
+        parameters     = [ordered]@{}
+    }
+    foreach ($key in $Values.Keys) {
+        $paramsObj.parameters[$key] = @{ value = $Values[$key] }
+    }
+    $tempFile = Join-Path $env:TEMP "migrate-rg-params-$([guid]::NewGuid()).json"
+    ($paramsObj | ConvertTo-Json -Depth 5) | Set-Content -Path $tempFile -Encoding UTF8
+    return $tempFile
+}
 
 Write-Banner
 
@@ -156,8 +190,8 @@ if ($SkipSSL) {
     Write-OK "SSL verification desactivee (az CLI)"
 
     # Meme mecanisme que deploy.ps1 Phase 1 : bundle certifi temporaire avec les
-    # certificats Zscaler du store Windows, transmis a la Branche B (job) pour que
-    # son appel pip install + ses appels az fonctionnent derriere le proxy.
+    # certificats Zscaler du store Windows, necessaire pour les appels "az storage"
+    # (SDK data-plane, ignore core.verify_ssl=false -- cf. deploy.ps1).
     $certifiBundle = "C:\Program Files\Microsoft SDKs\Azure\CLI2\Lib\site-packages\certifi\cacert.pem"
     if (Test-Path $certifiBundle) {
         $tempBundle = "$env:TEMP\migrate_rg_cacert_zscaler.pem"
@@ -172,6 +206,7 @@ if ($SkipSSL) {
                 Add-Content -Path $tempBundle -Value $pem -Encoding ascii
             }
             Write-OK "$($zscalerCerts.Count) certificat(s) Zscaler injecte(s) dans le bundle certifi temporaire"
+            $env:REQUESTS_CA_BUNDLE = $tempBundle
         } else {
             Write-Warn "Aucun certificat Zscaler trouve dans le store Windows"
         }
@@ -230,15 +265,18 @@ if ($destExists) {
     Write-OK "Resource Group cible existant reutilise : $DestResourceGroup"
 } else {
     az group create --name $DestResourceGroup --location $Location --subscription $destSubId `
-        --tags project=$ProjectName managed-by=bicep --output none --only-show-errors 2>&1 | Out-Null
+        --tags Project=$ProjectName Environment=$Environment ManagedBy=bicep --output none --only-show-errors 2>&1 | Out-Null
     Write-OK "Resource Group cible cree : $DestResourceGroup ($Location)"
 }
 
-# Resource Providers requis -- enregistrement en parallele sur la subscription cible
+# Resource Providers requis -- enregistrement en parallele sur la subscription cible.
+# Microsoft.Network et Microsoft.App ajoutes (AUDIT-2026-06) : VNet/NSG (network.bicep)
+# et Container Apps Jobs (containerapp.bicep) n'existaient pas avant la migration reseau.
 $requiredProviders = @(
     'Microsoft.CognitiveServices', 'Microsoft.Search', 'Microsoft.KeyVault',
     'Microsoft.ContainerRegistry', 'Microsoft.Storage', 'Microsoft.Web',
-    'Microsoft.Insights', 'Microsoft.ManagedIdentity', 'Microsoft.ContainerInstance'
+    'Microsoft.Insights', 'Microsoft.ManagedIdentity', 'Microsoft.ContainerInstance',
+    'Microsoft.Network', 'Microsoft.App'
 )
 Write-Info "Verification/enregistrement des Resource Providers sur la subscription cible (parallel)..."
 $rpJobs = foreach ($rp in $requiredProviders) {
@@ -255,10 +293,13 @@ $rpJobs | Remove-Job -Force
 Write-OK "Resource Providers verifies/enregistres ($($requiredProviders.Count))"
 Write-Info "(l'enregistrement peut prendre quelques minutes en arriere-plan cote Azure -- le move attendra si besoin)"
 
+Write-Warn "Si la subscription cible applique une policy de tags obligatoires (ex. rencontre en pratique : 'Squad'/'Environment'/'CostCenter'/'ManagedBy'/'Project'), le redeploiement Bicep (Phase 3) echouera sur les NOUVELLES ressources (VNet, NSG) avec 'RequestDisallowedByPolicy' tant que infra/main.bicep n'est pas mis a jour avec des valeurs de tags acceptees par cette policy -- voir la variable 'tags' en tete de infra/main.bicep."
+
 # Inventaire des ressources deplacables (exclut explicitement l'UAMI, le Container App /
-# Managed Environment, et la stack ACI neo4j -- aucun de ces types ne supporte le move ARM ;
-# voir tableau de l'etude de faisabilite). Le Container App et son Managed Environment sont
-# recrees en Phase 3 (redeploiement du module containerapp.bicep), pas deplaces.
+# Managed Environment / VNet / NSG / Job d'import, et la stack ACI neo4j -- aucun de ces
+# types ne supporte le move ARM (ACI/UAMI/ContainerApp) ou n'a pas besoin d'etre deplace
+# (VNet/NSG/Job, recrees sans cout par le redeploiement Bicep, cf. DESCRIPTION). Tous sont
+# recrees en Phase 3 (redeploiement de infra/main.bicep), pas deplaces.
 $movableTypes = @(
     'Microsoft.CognitiveServices/accounts',
     'Microsoft.Search/searchServices',
@@ -304,10 +345,10 @@ if ($toMove.Count -eq 0) {
 }
 
 # Garde-fou : si aucune ressource ne correspond au nom calcule depuis -ProjectName/-Environment,
-# les phases suivantes (UAMI, roles, neo4j, .env) cibleraient des noms inexistants. On le detecte
-# ici plutot que d'echouer profondement en Phase 3/4. Le Container App n'etant pas deplace
-# (recree en Phase 3), on verifie plutot la presence de l'ACR -- toujours deplacable et
-# toujours present puisque deploy.ps1 le cree systematiquement.
+# les phases suivantes (Bicep, neo4j, .env) cibleraient des noms inexistants. On le detecte ici
+# plutot que d'echouer profondement en Phase 3/4. Le Container App n'etant pas deplace (recree
+# en Phase 3), on verifie plutot la presence de l'ACR -- toujours deplacable et toujours present
+# puisque deploy.ps1 le cree systematiquement.
 $expectedRegistry = "acr$(($suffix -replace '-', ''))"
 if (-not ($toMove | Where-Object { $_.type -eq 'Microsoft.ContainerRegistry/registries' -and $_.name -eq $expectedRegistry })) {
     $foundRegistries = ($toMove | Where-Object { $_.type -eq 'Microsoft.ContainerRegistry/registries' } | ForEach-Object { $_.name }) -join ', '
@@ -409,55 +450,106 @@ if ($moveExitCode -ne 0) {
 
 Write-OK "Move ARM termine -- $($toMove.Count) ressource(s) deplacee(s) (endpoints/DNS inchanges)"
 
-# A partir d'ici, plus aucune action ne touche la subscription source -- on bascule
-# le contexte CLI une seule fois pour eviter toute course entre le thread principal
-# (Branche A) et le job d'arriere-plan (Branche B) qui partagent le meme profil az CLI.
+# A partir d'ici, plus aucune action ne touche la subscription source.
 az account set --subscription $destSubId --only-show-errors
 
-# ── PHASE 3 : Reconstruction parallèle ────────────────────────────────────────
-Write-Phase 3 6 "Reconstruction -- UAMI + roles IAM (thread principal) // stack neo4j (job)"
+# ── PHASE 3 : Redéploiement de infra/main.bicep ──────────────────────────────
+Write-Phase 3 6 "Redeploiement infra/main.bicep (VNet, Container App, neo4j-legacykb, Job) // roles IAM developpeur"
 
-if ($null -eq $Neo4jPassword -or $Neo4jPassword.Length -eq 0) {
-    Write-Host ""
-    Write-Host "        Nouveau mot de passe neo4j-legacykb (conteneur recree) :" -ForegroundColor White
-    $Neo4jPassword = Read-Host -AsSecureString "        Neo4j password"
+# Mot de passe neo4j -- reutilise depuis le secret Key Vault deja deplace (Key Vault =
+# ressource deplacable, son contenu survit au move) plutot que d'en demander un nouveau.
+$kvName = "kv-$suffix"
+$existingNeo4jPwd = az keyvault secret show --vault-name $kvName --subscription $destSubId `
+    --name "neo4j-legacykb-password" --query value -o tsv --only-show-errors 2>$null
+if ($existingNeo4jPwd) {
+    $neo4jPlainPwd = $existingNeo4jPwd
+    Write-OK "Mot de passe neo4j-legacykb reutilise depuis le Key Vault deplace ($kvName)"
+} else {
+    if ($null -eq $Neo4jPassword -or $Neo4jPassword.Length -eq 0) {
+        Write-Host ""
+        Write-Host "        Secret 'neo4j-legacykb-password' introuvable dans $kvName -- nouveau mot de passe :" -ForegroundColor White
+        $Neo4jPassword = Read-Host -AsSecureString "        Neo4j password"
+    }
+    $neo4jPlainPwd = ConvertFrom-SecureStringPlain $Neo4jPassword
+    if ([string]::IsNullOrWhiteSpace($neo4jPlainPwd)) {
+        Write-Fail "Le mot de passe neo4j-legacykb est obligatoire (secret Key Vault introuvable)."
+    }
 }
-$neo4jPlainPwd = ConvertFrom-SecureStringPlain $Neo4jPassword
-if ([string]::IsNullOrWhiteSpace($neo4jPlainPwd)) {
-    Write-Fail "Le mot de passe neo4j-legacykb est obligatoire."
+$existingNeo4jPwd = $null
+
+# Cle API -- preservee telle quelle (vide ici => infra/main.bicep ne touche pas au secret
+# Key Vault deja deplace, cf. condition "if (!empty(apiKey))" dans main.bicep). Aucun client
+# existant (mcp-legacykb, integrations) n'a besoin d'etre reconfigure apres la migration.
+$registryLoginServer = az acr show -g $DestResourceGroup --subscription $destSubId `
+    -n "acr$($suffix -replace '-', '')" --query loginServer -o tsv --only-show-errors 2>&1
+$apiImageTag = "$registryLoginServer/notebooklm-api:latest"
+Write-Info "Image reutilisee telle quelle (deja a jour, deplacee avec le registre) : $apiImageTag"
+
+# Reassignation des roles IAM du developpeur courant -- lancee en parallele du deploiement
+# Bicep (Phase 3), ne depend pas de lui. Les roles de l'UAMI du Container App ne sont PAS
+# reassignes ici : infra/main.bicep les definit lui-meme (roleApiOpenAI/roleApiSearch/roleApiKV),
+# le redeploiement de ce template les recree automatiquement.
+$rgScope = "/subscriptions/$destSubId/resourceGroups/$DestResourceGroup"
+$devRoles = @('Cognitive Services OpenAI User', 'Search Index Data Contributor', 'Cognitive Services User',
+              'Storage Blob Data Contributor', 'Key Vault Secrets Officer')
+Write-Info "Reassignation des roles IAM developpeur (arriere-plan, parallel au deploiement Bicep)..."
+$devRoleJobs = foreach ($role in $devRoles) {
+    Start-Job -ScriptBlock {
+        param($principal, $role, $scope, $sub)
+        az role assignment create --assignee $principal --role $role --scope $scope --subscription $sub `
+            --only-show-errors 2>&1 | Out-Null
+    } -ArgumentList $deployerObjectId, $role, $rgScope, $destSubId
 }
 
-# Branche B (lente : ~5 min) -- redeploiement Bicep autonome du module neo4j-legacykb,
-# certificat TLS auto-signe, import GraphML, correctif UTF-8, mise a jour KV + appSetting.
-$tagsJson = "{`"project`":`"$ProjectName`",`"environment`":`"$Environment`",`"managedBy`":`"bicep`"}"
+$paramsFile = New-BicepParametersFile @{
+    projectName           = $ProjectName
+    environment            = $Environment
+    location               = $Location
+    deployerObjectId       = $deployerObjectId
+    apiImageTag            = $apiImageTag
+    deployLegacyKb         = $true
+    neo4jLegacyKbPassword  = $neo4jPlainPwd
+    apiKey                 = ""
+    alertEmail             = $AlertEmail
+}
+$bicepDeployName = "migrate-main-$(Get-Date -Format 'yyyyMMddHHmmss')"
+Write-Info "Deploiement de infra/main.bicep en cours (~12 min, comme deploy.ps1)..."
+try {
+    az deployment group create --resource-group $DestResourceGroup --subscription $destSubId `
+        --template-file "$ProjectRoot\infra\main.bicep" `
+        --name $bicepDeployName --output none --only-show-errors `
+        --parameters "@$paramsFile" 2>&1
+} finally {
+    Remove-FileSafe $paramsFile
+}
+$neo4jPlainPwd = $null
 
-$branchBJob = Start-Job -ScriptBlock {
-    param($projectRoot, $destRg, $destSub, $suffix, $location, $tagsJson, $neo4jPwd, $alertEmail, $caBundle)
+$bicepOutputs = az deployment group show -g $DestResourceGroup --subscription $destSubId -n $bicepDeployName `
+    --query properties.outputs --output json --only-show-errors 2>&1 | ConvertFrom-Json
 
-    if ($caBundle) { $env:REQUESTS_CA_BUNDLE = $caBundle }
-    Set-Location $projectRoot
-    $deployName = "migrate-neo4j-$(Get-Date -Format 'yyyyMMddHHmmss')"
+$apiUrl              = $bicepOutputs.apiUrl.value
+$neo4jPrivateIp       = $bicepOutputs.neo4jLegacyKbPrivateIp.value
+$neo4jStorageAccount  = $bicepOutputs.neo4jLegacyKbStorageAccount.value
+$neo4jShareName       = $bicepOutputs.neo4jLegacyKbShareName.value
+$keyVaultUriOut       = $bicepOutputs.keyVaultName.value
+Write-OK "infra/main.bicep deploye -- API : $apiUrl  |  neo4j-legacykb (prive) : $neo4jPrivateIp"
 
-    az deployment group create --resource-group $destRg --subscription $destSub `
-        --template-file "$projectRoot\infra\modules\neo4j-legacykb.bicep" `
-        --name $deployName --output none --only-show-errors `
-        --parameters suffix=$suffix location=$location tags=$tagsJson `
-            neo4jPassword=$neo4jPwd alertEmail=$alertEmail 2>&1
+$null = Wait-Job $devRoleJobs
+$devRoleJobs | Remove-Job -Force
+Write-OK "Roles IAM developpeur reassignes :"
+foreach ($role in $devRoles) { Write-Info "  - $role" }
 
-    $outputs = az deployment group show -g $destRg --subscription $destSub -n $deployName `
-        --query properties.outputs --output json 2>&1 | ConvertFrom-Json
+# ── PHASE 4 : Stack neo4j-legacykb -- certificat TLS + import ────────────────
+Write-Phase 4 6 "neo4j-legacykb -- certificat TLS (SAN IP privee) + redemarrage + import"
 
-    $fqdn               = $outputs.fqdn.value
-    $storageAccountName = $outputs.storageAccountName.value
-    $shareName          = $outputs.shareName.value
-    $aciGroup           = "aci-neo4j-legacykb-$suffix"
+$aciGroupName = "aci-neo4j-legacykb-$suffix"
+$tmpKey    = "$env:TEMP\migrate_neo4j.key"
+$tmpCert   = "$env:TEMP\migrate_neo4j.crt"
+$tmpScript = "$env:TEMP\migrate_gen_neo4j_cert.py"
 
-    # Certificat TLS auto-signe (Neo4j boucle en restart tant qu'il est absent -- meme
-    # mecanisme que deploy.ps1 Phase 4b)
-    $tmpKey    = "$env:TEMP\migrate_neo4j.key"
-    $tmpCert   = "$env:TEMP\migrate_neo4j.crt"
-    $tmpScript = "$env:TEMP\migrate_gen_neo4j_cert.py"
-    @'
+# Script Python inline -- identique a deploy.ps1 Phase 4b (SAN IPAddress, plus DNSName,
+# depuis que neo4j-legacykb n'a plus de FQDN public -- AUDIT-2026-06).
+@'
 import sys, subprocess
 try:
     from cryptography.hazmat.primitives.asymmetric import rsa
@@ -468,18 +560,19 @@ except ImportError:
 from cryptography import x509
 from cryptography.x509.oid import NameOID
 from cryptography.hazmat.primitives import hashes, serialization
-import datetime
+import datetime, ipaddress
 
-fqdn, key_out, cert_out = sys.argv[1], sys.argv[2], sys.argv[3]
+host, key_out, cert_out = sys.argv[1], sys.argv[2], sys.argv[3]
 key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
-subject = issuer = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, fqdn)])
+subject = issuer = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, host)])
+san = x509.IPAddress(ipaddress.ip_address(host))
 cert = (x509.CertificateBuilder()
     .subject_name(subject).issuer_name(issuer)
     .public_key(key.public_key())
     .serial_number(x509.random_serial_number())
     .not_valid_before(datetime.datetime.utcnow())
     .not_valid_after(datetime.datetime.utcnow() + datetime.timedelta(days=365))
-    .add_extension(x509.SubjectAlternativeName([x509.DNSName(fqdn)]), critical=False)
+    .add_extension(x509.SubjectAlternativeName([san]), critical=False)
     .sign(key, hashes.SHA256()))
 open(key_out,  'wb').write(key.private_bytes(
     serialization.Encoding.PEM,
@@ -487,137 +580,41 @@ open(key_out,  'wb').write(key.private_bytes(
     serialization.NoEncryption()))
 open(cert_out, 'wb').write(cert.public_bytes(serialization.Encoding.PEM))
 '@ | Set-Content -Path $tmpScript -Encoding UTF8
-    python $tmpScript $fqdn $tmpKey $tmpCert
+python $tmpScript $neo4jPrivateIp $tmpKey $tmpCert
+Write-OK "Certificat auto-signe genere pour $neo4jPrivateIp"
 
-    $sslKey = az storage account keys list -g $destRg --subscription $destSub -n $storageAccountName --query '[0].value' -o tsv 2>&1
-    az storage file upload --share-name neo4j-ssl --account-name $storageAccountName --account-key $sslKey `
-        --source $tmpKey --path neo4j.key --output none --only-show-errors 2>&1 | Out-Null
-    az storage file upload --share-name neo4j-ssl --account-name $storageAccountName --account-key $sslKey `
-        --source $tmpCert --path neo4j.crt --output none --only-show-errors 2>&1 | Out-Null
-    # Remove-Item echoue sur les comptes Windows dont le nom contient un point (8.3 short-name) --
-    # [System.IO.File]::Delete() contourne le provider PowerShell. Pas d'acces a la fonction
-    # Remove-FileSafe du scope parent depuis ce Start-Job -- on inline l'equivalent.
-    foreach ($p in @($tmpKey, $tmpCert, $tmpScript)) { try { [System.IO.File]::Delete($p) } catch {} }
+$sslKey = az storage account keys list -g $DestResourceGroup --subscription $destSubId `
+    -n $neo4jStorageAccount --query '[0].value' -o tsv --only-show-errors 2>&1
+az storage file upload --share-name neo4j-ssl --account-name $neo4jStorageAccount --account-key $sslKey `
+    --source $tmpKey --path neo4j.key --no-progress --output none --only-show-errors 2>&1 | Out-Null
+az storage file upload --share-name neo4j-ssl --account-name $neo4jStorageAccount --account-key $sslKey `
+    --source $tmpCert --path neo4j.crt --no-progress --output none --only-show-errors 2>&1 | Out-Null
+foreach ($p in @($tmpKey, $tmpCert, $tmpScript)) { Remove-FileSafe $p }
+Write-OK "Certificats uploades dans le partage Azure Files neo4j-ssl"
 
-    az container restart --resource-group $destRg --subscription $destSub --name $aciGroup `
-        --output none --only-show-errors 2>&1 | Out-Null
+Write-Info "Redemarrage de l'ACI neo4j-legacykb pour activer TLS..."
+az container restart --resource-group $DestResourceGroup --subscription $destSubId --name $aciGroupName `
+    --output none --only-show-errors 2>&1 | Out-Null
+Write-OK "ACI $aciGroupName redemarre -- Neo4j demarrera avec bolt+s:// et HTTPS"
 
-    # Import GraphML + correctif UTF-8 -- reutilise le script existant tel quel (gere son
-    # propre delai d'attente de disponibilite de Neo4j jusqu'a 3 min, et applique
-    # fix_utf8.cypher automatiquement apres l'import).
-    $securePwd = ConvertTo-SecureString $neo4jPwd -AsPlainText -Force
-    & "$projectRoot\import-neo4j-legacykb.ps1" -ResourceGroup $destRg -StorageAccountName $storageAccountName `
-        -ShareName $shareName -Fqdn $fqdn -Neo4jPassword $securePwd 2>&1
+Write-Info "Declenchement de l'import via le Job (import-neo4j-legacykb.ps1)..."
+& "$ProjectRoot\import-neo4j-legacykb.ps1" -ResourceGroup $DestResourceGroup -ProjectName $ProjectName `
+    -Environment $Environment -SkipSSL:$SkipSSL
 
-    # Met a jour le secret Key Vault (deplace, meme nom). Le Container App n'existe pas
-    # forcement encore a ce stade (cree en parallele par la Branche A) -- la mise a jour de
-    # son env var NEO4J_LEGACYKB_URI se fait apres la jointure des deux branches (thread
-    # principal), pas ici.
-    $newUri = $outputs.uri.value
-    az keyvault secret set --vault-name "kv-$suffix" --name "neo4j-legacykb-password" `
-        --value $neo4jPwd --subscription $destSub --output none --only-show-errors 2>&1 | Out-Null
+# ── PHASE 5 : Régénération .env + validation ──────────────────────────────────
+Write-Phase 5 6 "Regeneration .env + validation post-migration"
 
-    return $newUri
-} -ArgumentList $ProjectRoot, $DestResourceGroup, $destSubId, $suffix, $Location, $tagsJson, $neo4jPlainPwd, $AlertEmail, $tempBundle
-
-Write-Info "Branche B (neo4j-legacykb) lancee en arriere-plan (~5 min)..."
-
-# Branche A (rapide) -- execution sur le thread principal pendant que la Branche B tourne.
-# Le Container App et son Managed Environment ne supportent pas le move ARM (contrairement
-# a l'ancienne App Service) -- on les recree en redeployant le module containerapp.bicep,
-# qui cree lui-meme une UAMI fraiche (id-api-<suffix>) et la configure (AcrPull, registries,
-# AZURE_CLIENT_ID...). neo4jLegacyKbUri est laisse vide ici -- mis a jour une fois la
-# Branche B terminee (le Container App doit exister avant qu'on puisse le cibler).
-Write-Info "Branche A -- redeploiement du Container App (containerapp.bicep)..."
-
-$registryLoginServer = az acr show -g $DestResourceGroup --subscription $destSubId `
-    -n "acr$($suffix -replace '-', '')" --query loginServer -o tsv --only-show-errors 2>&1
-$apiImageTag = "$registryLoginServer/notebooklm-api:latest"
-
-$appInsightsId = az resource list -g $DestResourceGroup --subscription $destSubId `
-    --resource-type Microsoft.Insights/components --query "[?name=='appi-$suffix'].id" -o tsv --only-show-errors 2>&1
-$appInsightsConnStr = az resource show --ids $appInsightsId --subscription $destSubId `
-    --query properties.ConnectionString -o tsv --only-show-errors 2>&1
-
-$keyVaultUri = "https://kv-$suffix.vault.azure.net/"
-
-$containerAppDeployName = "migrate-containerapp-$(Get-Date -Format 'yyyyMMddHHmmss')"
-az deployment group create -g $DestResourceGroup --subscription $destSubId `
-    --template-file "$ProjectRoot\infra\modules\containerapp.bicep" `
-    --name $containerAppDeployName --output none --only-show-errors `
-    --parameters suffix=$suffix location=$Location tags=$tagsJson `
-        apiImageTag=$apiImageTag appInsightsConnectionString=$appInsightsConnStr `
-        keyVaultUri=$keyVaultUri neo4jLegacyKbUri='' `
-        registryLoginServer=$registryLoginServer `
-        gpt4oDeploymentName=gpt-4o embeddingDeploymentName=text-embedding-3-large 2>&1
-
-$containerAppOutputs = az deployment group show -g $DestResourceGroup --subscription $destSubId -n $containerAppDeployName `
-    --query properties.outputs --output json 2>&1 | ConvertFrom-Json
-$newIdentityPrincipalId = $containerAppOutputs.principalId.value
-$apiUrl = $containerAppOutputs.apiUrl.value
-Write-OK "Container App redeploye : $apiUrl (UAMI id-api-$suffix recreee, AcrPull configure par le module)"
-
-# Roles RBAC -- non conserves par le move ARM (documente Microsoft) pour les ressources
-# deplacees, et de toute facon recreees pour la nouvelle UAMI. AcrPull est deja assigne par
-# containerapp.bicep lui-meme -- inutile de le dupliquer ici.
-$rgScope = "/subscriptions/$destSubId/resourceGroups/$DestResourceGroup"
-
-$uamiRoles = @('Cognitive Services OpenAI User', 'Search Index Data Contributor', 'Key Vault Secrets User')
-$devRoles  = @('Cognitive Services OpenAI User', 'Search Index Data Contributor', 'Cognitive Services User',
-               'Storage Blob Data Contributor', 'Key Vault Secrets Officer')
-
-Write-Info "Reassignation des roles IAM (UAMI + developpeur, parallel)..."
-$roleJobs = @()
-$roleJobs += foreach ($role in $uamiRoles) {
-    Start-Job -ScriptBlock {
-        az role assignment create --assignee $using:newIdentityPrincipalId --role $using:role `
-            --scope $using:rgScope --only-show-errors 2>&1 | Out-Null
-    }
-}
-$roleJobs += foreach ($role in $devRoles) {
-    Start-Job -ScriptBlock {
-        az role assignment create --assignee $using:deployerObjectId --role $using:role `
-            --scope $using:rgScope --only-show-errors 2>&1 | Out-Null
-    }
-}
-$roleJobs | Wait-Job | Out-Null
-$roleJobs | Remove-Job -Force
-Write-OK "Roles IAM reassignes :"
-foreach ($role in $uamiRoles) { Write-Info "  - $role (UAMI Container App)" }
-foreach ($role in $devRoles)  { Write-Info "  - $role (developpeur)" }
-
-Write-Info "Attente de la fin de la Branche B (stack neo4j-legacykb)..."
-$null = Wait-Job $branchBJob
-$neo4jUriEnv = Receive-Job $branchBJob | Select-Object -Last 1
-Remove-Job $branchBJob -Force
-Write-OK "Branche B terminee -- neo4j-legacykb pret : $neo4jUriEnv"
-
-# ── PHASE 4 : Réconciliation ───────────────────────────────────────────────────
-Write-Phase 4 6 "Reconciliation -- mise a jour NEO4J_LEGACYKB_URI + regeneration .env"
-
-# AZURE_CLIENT_ID est deja correct depuis la creation du Container App (Branche A). Seul
-# NEO4J_LEGACYKB_URI doit etre mis a jour maintenant que la Branche B a termine -- ce qui
-# cree automatiquement une nouvelle revision (l'equivalent du redemarrage App Service,
-# sans etape separee necessaire avec Container Apps).
-az containerapp update -g $DestResourceGroup --subscription $destSubId -n "ca-api-$suffix" `
-    --set-env-vars NEO4J_LEGACYKB_URI=$neo4jUriEnv --output none --only-show-errors 2>&1 | Out-Null
-Write-OK "NEO4J_LEGACYKB_URI mis a jour sur le Container App (nouvelle revision activee automatiquement)"
-Write-Warn "Propagation IAM : attendez 3-5 min avant de tester l'ingestion locale"
-
-# Les endpoints des ressources deplacees sont inchanges (move = metadonnees) -- on les
-# relit simplement depuis Azure pour regenerer un .env a jour (notamment NEO4J_LEGACYKB_URI
-# qui, lui, a change puisque l'ACI a ete recree).
 $openAIEndpoint  = az cognitiveservices account show -g $DestResourceGroup --subscription $destSubId -n "oai-$suffix" --query properties.endpoint -o tsv --only-show-errors 2>&1
 $searchName      = "srch-$suffix"
 $docIntEndpoint  = az cognitiveservices account show -g $DestResourceGroup --subscription $destSubId -n "di-$suffix" --query properties.endpoint -o tsv --only-show-errors 2>&1
 $storageName     = az storage account list -g $DestResourceGroup --subscription $destSubId --query "[?starts_with(name,'st') && !starts_with(name,'stneo4jkb')].name | [0]" -o tsv --only-show-errors 2>&1
-$apiKeyValue     = az keyvault secret show --vault-name "kv-$suffix" --subscription $destSubId --name "api-key" --query value -o tsv --only-show-errors 2>&1
+$apiKeyValue     = az keyvault secret show --vault-name $kvName --subscription $destSubId --name "api-key" --query value -o tsv --only-show-errors 2>&1
 
 $envFile = Join-Path $ProjectRoot ".env"
 if ((Test-Path $envFile) -and -not $Force) {
     $overwrite = Read-Host "        .env existant detecte. Ecraser ? (o/N)"
     if ($overwrite -ne 'o') {
-        Write-Warn "Conservation du .env existant -- mettez a jour NEO4J_LEGACYKB_URI manuellement : $neo4jUriEnv"
+        Write-Warn "Conservation du .env existant -- mettez a jour NEO4J_LEGACYKB_URI manuellement : bolt+ssc://${neo4jPrivateIp}:7687"
         $envFile = $null
     }
 }
@@ -641,14 +638,16 @@ AZURE_DOCINT_ENDPOINT=$docIntEndpoint
 # Azure Blob Storage
 AZURE_STORAGE_ACCOUNT_NAME=$storageName
 
-# Neo4j Legacy KB (golden source GraphRAG) -- recree par la migration
-NEO4J_LEGACYKB_URI=$neo4jUriEnv
+# Neo4j Legacy KB (golden source GraphRAG) -- IP privee, recreee par la migration
+# (AUDIT-2026-06 : injoignable depuis ce poste hors VNet -- cf. CLAUDE.md/ARCHITECTURE.md)
+NEO4J_LEGACYKB_URI=bolt+ssc://${neo4jPrivateIp}:7687
 NEO4J_LEGACYKB_PASSWORD=***
 
-# Authentification API (secret Key Vault, inchange par le move)
+# Authentification API (secret Key Vault, preserve par la migration)
 API_KEY=$apiKeyValue
 
-# URL de l'API deployee (utilisee par mcp-legacykb)
+# URL de l'API deployee (utilisee par mcp-legacykb et par le frontend local pour
+# /api/legacykb/* -- cf. CORS_ALLOWED_ORIGINS, AUDIT-2026-06)
 NOTEBOOKLM_API_URL=$apiUrl
 "@
     [System.IO.File]::WriteAllText($envFile, $envContent, [System.Text.Encoding]::UTF8)
@@ -656,14 +655,7 @@ NOTEBOOKLM_API_URL=$apiUrl
     Write-Info "NEO4J_LEGACYKB_PASSWORD est masque -- renseignez-le manuellement si besoin"
 }
 
-# ── PHASE 5 : Validation post-migration ───────────────────────────────────────
-Write-Phase 5 6 "Validation post-migration"
-
-# $apiUrl provient deja de la sortie du deploiement containerapp.bicep (Branche A) --
-# pas besoin de le requeter a nouveau.
-Write-Info "URL Container App : $apiUrl"
 Write-Info "Attente de disponibilite (5 tentatives x 20s)..."
-
 $ready = $false
 $attempt = 0
 do {
@@ -700,7 +692,7 @@ Write-Host "  +==========================================+" -ForegroundColor Gre
 Write-Host ""
 Write-Host "  Resource Group cible : $DestResourceGroup ($($destAccount.name))" -ForegroundColor DarkGray
 Write-Host "  URL production       : $apiUrl" -ForegroundColor DarkGray
-Write-Host "  Neo4j Legacy KB      : $neo4jUriEnv" -ForegroundColor DarkGray
+Write-Host "  Neo4j Legacy KB      : bolt+ssc://${neo4jPrivateIp}:7687 (prive, snet-aci-legacykb)" -ForegroundColor DarkGray
 Write-Host ""
 Write-Host "  Une fois la migration validee (tests manuels, ingestion locale OK), supprimez" -ForegroundColor White
 Write-Host "  l'ancien Resource Group avec la commande suivante (jamais executee automatiquement) :" -ForegroundColor White

@@ -42,8 +42,14 @@ Write-Host "  - Azure Document Intelligence" -ForegroundColor DarkGray
 Write-Host "  - Azure Key Vault" -ForegroundColor DarkGray
 Write-Host "  - Azure Blob Storage" -ForegroundColor DarkGray
 Write-Host "  - Container Registry" -ForegroundColor DarkGray
-Write-Host "  - Container App + environnement" -ForegroundColor DarkGray
+Write-Host "  - Container App + environnement (VNet-integre)" -ForegroundColor DarkGray
+Write-Host "  - Job d'import legacykb (Container Apps Job)" -ForegroundColor DarkGray
+Write-Host "  - ACI neo4j-legacykb (reseau prive) + son storage account dedie" -ForegroundColor DarkGray
+Write-Host "  - VNet + NSG (snet-aci-legacykb, snet-cae)" -ForegroundColor DarkGray
 Write-Host "  - Application Insights + Log Analytics" -ForegroundColor DarkGray
+Write-Host ""
+Write-Host "  az group delete supprime tout le contenu du RG sans ordre particulier a" -ForegroundColor DarkGray
+Write-Host "  respecter (ARM gere les dependances) -- cette liste est informative." -ForegroundColor DarkGray
 Write-Host ""
 
 if (-not $Force) {
